@@ -25,7 +25,13 @@ export async function seal(payload: Record<string, unknown>, seconds = 3600) {
     .encrypt(await key());
 }
 export async function unseal(token: string) {
-  return (await jwtDecrypt(token, await key(), { clockTolerance: 10 })).payload;
+  return (
+    await jwtDecrypt(token, await key(), {
+      clockTolerance: 10,
+      keyManagementAlgorithms: ["dir"],
+      contentEncryptionAlgorithms: ["A256GCM"],
+    })
+  ).payload;
 }
 export async function accessToken(): Promise<string | null> {
   const cookie = (await cookies()).get(sessionCookie)?.value;
@@ -46,5 +52,17 @@ export const cookieOptions = {
   path: "/",
 };
 export function validOrigin(request: Request): boolean {
-  return request.headers.get("origin") === process.env.ZG_PUBLIC_URL;
+  const configured = process.env.ZG_PUBLIC_URL;
+  if (!configured) return false;
+  try {
+    const publicURL = new URL(configured);
+    return (
+      ["https:", "http:"].includes(publicURL.protocol) &&
+      !publicURL.username &&
+      !publicURL.password &&
+      request.headers.get("origin") === publicURL.origin
+    );
+  } catch {
+    return false;
+  }
 }

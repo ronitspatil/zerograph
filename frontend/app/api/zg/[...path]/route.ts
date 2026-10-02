@@ -23,12 +23,31 @@ async function proxy(
       { status: 503 },
     );
   try {
-    const body = request.method === "GET" ? undefined : await request.text();
-    if (body && Buffer.byteLength(body) > 4_000_000)
-      return NextResponse.json(
-        { detail: "Payload too large" },
-        { status: 413 },
-      );
+    // Reject as bytes arrive instead of buffering an unbounded chunked body.
+    let body: Uint8Array | undefined;
+    if (request.method !== "GET" && request.body) {
+      const reader = request.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      try {
+        while (true) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          size += chunk.value.byteLength;
+          if (size > 4_000_000) {
+            await reader.cancel();
+            return NextResponse.json(
+              { detail: "Payload too large" },
+              { status: 413 },
+            );
+          }
+          chunks.push(chunk.value);
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      body = Buffer.concat(chunks, size);
+    }
     const upstream = await fetch(
       `${base}/api/v1/${path.join("/")}${new URL(request.url).search}`,
       {
@@ -37,7 +56,7 @@ async function proxy(
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
-        body,
+        body: body as BodyInit | undefined,
         cache: "no-store",
         signal: AbortSignal.timeout(30000),
         redirect: "error",
