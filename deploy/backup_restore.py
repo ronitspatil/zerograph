@@ -309,7 +309,12 @@ def restore(compose, archive):
         graph_bytes = (folder / "graph.json").read_bytes()
         if compose.bridge("validate", graph_bytes) != manifest["application"]:
             raise BackupError("Application backup metadata is incompatible")
-        if compose.sql("SELECT count(*) FROM information_schema.tables WHERE table_schema='public'") != "0":
+        public_objects = (
+            "SELECT (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public')"
+            "+(SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public')"
+            "+(SELECT count(*) FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace WHERE n.nspname='public')"
+        )
+        if compose.sql(public_objects) != "0":
             raise BackupError(
                 "Restore requires an empty PostgreSQL database; never restore over existing state"
             )
