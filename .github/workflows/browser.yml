@@ -1,0 +1,64 @@
+name: Production-mode Chromium qualification
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  browser-qualification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      COMPOSE_PROJECT_NAME: zerograph-browser-qualification-ci
+      PLAYWRIGHT_BROWSERS_PATH: /tmp/zerograph-browser-qualification-browsers
+      ZG_BROWSER_RESULT: /tmp/zerograph-browser-qualification-result.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - uses: actions/setup-node@v4
+        with: {node-version: "22"}
+      - run: pip install -r backend/requirements-dev.lock -e backend
+      - name: Install isolated pinned browser tooling
+        working-directory: deploy/browser
+        run: |
+          npm ci --ignore-scripts
+          npm run check
+          npx playwright install --with-deps chromium
+          sudo apt-get install --yes libnss3-tools
+      - name: Generate disposable credentials and explicitly trust fixture CA
+        run: |
+          task_fixture=$(mktemp -d /tmp/zerograph-oidc-qualification.XXXXXX)
+          browser_home=$(mktemp -d /tmp/zerograph-browser-qualification-home.XXXXXX)
+          echo "ZG_OIDC_FIXTURE_DIR=$task_fixture" >> "$GITHUB_ENV"
+          echo "ZG_BROWSER_HOME=$browser_home" >> "$GITHUB_ENV"
+          echo "NODE_EXTRA_CA_CERTS=$task_fixture/certs/ca.crt" >> "$GITHUB_ENV"
+          python deploy/oidc-init.py --directory "$task_fixture" --env-file .env
+          echo '127.0.0.1 auth.oidc.test console.oidc.test api.oidc.test' | sudo tee -a /etc/hosts >/dev/null
+          sudo cp "$task_fixture/certs/ca.crt" /usr/local/share/ca-certificates/zerograph-browser-qualification.crt
+          sudo update-ca-certificates >/dev/null
+          mkdir -m 700 -p "$browser_home/.pki/nssdb"
+          certutil -N --empty-password -d "sql:$browser_home/.pki/nssdb"
+          certutil -A -d "sql:$browser_home/.pki/nssdb" -n zerograph-browser-qualification -t 'C,,' -i "$task_fixture/certs/ca.crt"
+      - name: Build production application and real disposable HTTPS provider
+        run: docker compose -f docker-compose.yml -f deploy/oidc-compose.yml up --build --detach --wait --wait-timeout 300
+      - name: Exercise actual Chromium navigation and application UI
+        working-directory: deploy/browser
+        run: npm test
+      - name: Upload fixed-label outcome only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chromium-qualification
+          path: /tmp/zerograph-browser-qualification-result.json
+          if-no-files-found: ignore
+      - name: Non-sensitive service-state diagnostics
+        if: failure()
+        run: docker compose -f docker-compose.yml -f deploy/oidc-compose.yml ps --all --format '{{.Service}} {{.State}} {{.Health}}'
+      - name: Remove disposable stack and ownership-verified fixture secrets
+        if: always()
+        run: |
+          set +e
+          docker compose -f docker-compose.yml -f deploy/oidc-compose.yml down --volumes --remove-orphans
+          stack_status=$?
+          python deploy/oidc-cleanup.py --directory "$ZG_OIDC_FIXTURE_DIR" --env-file .env
+          files_status=$?
+          test "$stack_status" -eq 0 && test "$files_status" -eq 0
