@@ -54,8 +54,8 @@ to avoid investigating a denied operation.
 Use an approved named AWS profile and region. The CLI requires repeated account
 and role confirmations plus a read-only sandbox acknowledgment; it will not start
 credential discovery or network calls when confirmations are missing/mismatched.
-It reserves a new artifact file with mode0600 and refuses existing paths before
-credential discovery. The CLI assumes the supplied role for900seconds, then
+It reserves a new artifact file with mode 0600 and refuses existing paths before
+credential discovery. The CLI assumes the supplied role for 900 seconds, then
 verifies the returned STS account, ARN partition and assumed-role name **before**
 any IAM/S3/Organizations inventory. It never publishes to ZeroGraph databases.
 
@@ -82,7 +82,7 @@ SCP coverage status, bucket metadata observed/absent/unknown counts, warning-cod
 counts, budgets, SDK invocation/page counts and duration. It includes no resource
 names, raw policy JSON, credentials, external IDs or exception strings. Correlate
 its hashes with the approved target in your private change record. Failure returns
-nonzero and writes status`failed`; inventory completion with metadata gaps is
+nonzero and writes status `failed`; inventory completion with metadata gaps is
 labelled explicitly. `effective_permissions_complete` and object-encryption
 verification remain false for every outcome.
 
@@ -97,26 +97,26 @@ verification remain false for every outcome.
 | Permission evaluations | 100000 | 1000000 |
 | Graph edges | 15000 | 15000 |
 | Organizations ancestor depth | 10 | 20 |
-| Collection wall time | 600seconds | 600seconds |
+| Collection wall time | 600 seconds | 600 seconds |
 
-Each policy document is additionally bounded to64KiB and256statements; each role
-has at most100unique attached policy references. Duplicate inventory rows and
+Each policy document is additionally bounded to 64 KiB and 256 statements; each role
+has at most 100 unique attached policy references. Duplicate inventory rows and
 policy IDs are reconciled before consuming unique-resource budgets. Conflicting
 role/bucket duplicates, repeated continuation tokens, malformed/truncated pages,
 ancestor cycles and exhausted budgets fail the whole collection instead of
 publishing a partial snapshot. Required IAM policy fetch failures also abort.
 
 The evaluation preflight is `roles × buckets × 6 + roles × (roles − 1)`. The default
-500-role and500-bucket bounds are **individual ceilings**, not simultaneous
-capacity:500of each exceeds100000evaluations and fails before enrichment. A
-100-role/100-bucket inventory needs69900evaluations. Operators may construct
+500-role and 500-bucket bounds are **individual ceilings**, not simultaneous
+capacity: 500 of each exceeds 100,000 evaluations and fails before enrichment. A
+100-role/100-bucket inventory needs 69,900 evaluations. Operators may construct
 `CollectionLimits` within hard caps for an approved larger sandbox; no unbounded
 CLI override is exposed. Account inventory is not an AWS transaction and may
 change during scanning; conflicting duplicates are rejected rather than guessed.
 
 `sdk_requests` counts Python SDK invocations, not wire attempts; SDK standard
-retries allow at most3total attempts per invocation. Thus wire attempts may be up
-to3times the reported count. Connection/read timeouts are5/10seconds. Wall budget
+retries allow at most 3 total attempts per invocation. Thus wire attempts may be up
+to 3 times the reported count. Connection/read timeouts are 5/10 seconds. Wall budget
 is checked before and after calls and during evaluation; one bounded in-flight
 SDK invocation can finish after the deadline, but no snapshot is published then.
 
