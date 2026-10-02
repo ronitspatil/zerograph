@@ -86,6 +86,29 @@ class SafetyTests(unittest.TestCase):
                 private_file(path, "replacement")
             self.assertEqual(path.read_text(), "sensitive")
 
+    def test_environment_cannot_override_helm_cluster_or_storage(self):
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            patch.dict(
+                os.environ,
+                {
+                    "HELM_KUBEAPISERVER": "https://customer.example.com",
+                    "HELM_KUBETOKEN": "customer-token",
+                    "HELM_KUBEINSECURE_SKIP_TLS_VERIFY": "true",
+                    "HELM_DRIVER": "sql",
+                    "KUBECONFIG": "/customer/config",
+                    "KUBERNETES_MASTER": "https://customer.example.com",
+                    "HELM_DATA_HOME": "/customer/helm",
+                },
+            ),
+        ):
+            drill = Drill(Path(folder))
+            self.assertFalse(any(key.startswith("HELM_KUBE") for key in drill.env))
+            self.assertNotIn("KUBERNETES_MASTER", drill.env)
+            self.assertEqual(drill.env["HELM_DRIVER"], "secret")
+            self.assertEqual(drill.env["KUBECONFIG"], str(Path(folder) / "kubeconfig"))
+            self.assertEqual(drill.env["HELM_DATA_HOME"], str(Path(folder) / "helm-data"))
+
     def test_commands_refuse_before_cluster_ownership(self):
         with tempfile.TemporaryDirectory() as folder:
             drill = Drill(Path(folder))

@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener
 
 import yaml
 
@@ -126,7 +126,21 @@ class Drill:
         self.server = None
         self.node_id = None
         self.config_digest = None
-        self.env = {**os.environ, "KUBECONFIG": str(self.kubeconfig), "KIND_EXPERIMENTAL_PROVIDER": "docker"}
+        self.env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("HELM_KUBE") and key != "KUBERNETES_MASTER"
+        }
+        self.env.update(
+            {
+                "KUBECONFIG": str(self.kubeconfig),
+                "KIND_EXPERIMENTAL_PROVIDER": "docker",
+                "HELM_DRIVER": "secret",
+                "HELM_CONFIG_HOME": str(folder / "helm-config"),
+                "HELM_CACHE_HOME": str(folder / "helm-cache"),
+                "HELM_DATA_HOME": str(folder / "helm-data"),
+            }
+        )
         self.results = {"checks": [], "cluster": self.cluster, "node_image": NODE_IMAGE}
         self.metrics_token = secrets.token_hex(32)
         self.password = secrets.token_hex(24)
@@ -431,7 +445,9 @@ class Drill:
             headers = {"Authorization": "Bearer " + token} if token else {}
             headers.update(extra_headers or {})
             try:
-                with urlopen(Request(base + path, headers=headers, method=method), timeout=10) as response:
+                with build_opener(ProxyHandler({})).open(
+                    Request(base + path, headers=headers, method=method), timeout=10
+                ) as response:
                     return response.status, response.read(100_000)
             except HTTPError as error:
                 return error.code, error.read(100_000)
