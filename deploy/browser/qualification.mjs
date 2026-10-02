@@ -142,7 +142,8 @@ try {
     const { page, health, session } = await login(context, 'viewer-a');
     step('cross-origin browser form mutation denied');
     const attacker = await context.newPage();
-    await attacker.goto(apiOrigin + '/health', { waitUntil: 'domcontentloaded' });
+    const healthResponse = await attacker.goto(apiOrigin + '/health/live', { waitUntil: 'domcontentloaded' });
+    require(healthResponse.status() === 200);
     const denied = attacker.waitForResponse(response => response.url() === consoleOrigin + '/api/auth/logout');
     await attacker.evaluate(target => {
       const form = document.createElement('form');
