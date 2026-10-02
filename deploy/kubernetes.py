@@ -129,13 +129,18 @@ class Drill:
         self.env = {
             key: value
             for key, value in os.environ.items()
-            if not key.startswith("HELM_KUBE") and key != "KUBERNETES_MASTER"
+            if not key.startswith(("HELM_KUBE", "DOCKER_")) and key != "KUBERNETES_MASTER"
         }
+        docker_config = folder / "docker-config"
+        docker_config.mkdir(mode=0o700)
+        private_file(docker_config / "config.json", "{}")
         self.env.update(
             {
                 "KUBECONFIG": str(self.kubeconfig),
                 "KIND_EXPERIMENTAL_PROVIDER": "docker",
                 "HELM_DRIVER": "secret",
+                "DOCKER_HOST": "unix:///var/run/docker.sock",
+                "DOCKER_CONFIG": str(docker_config),
                 "HELM_CONFIG_HOME": str(folder / "helm-config"),
                 "HELM_CACHE_HOME": str(folder / "helm-cache"),
                 "HELM_DATA_HOME": str(folder / "helm-data"),
