@@ -16,7 +16,7 @@ const snapshot = {
     { id: 'agent:browser', name: 'Browser Agent', type: 'AIAgent', provider: 'fixture' },
     { id: 'data:browser', name: 'Browser Data', type: 'Database', provider: 'fixture', sensitivity: 'restricted' },
   ],
-  edges: [{ id: 'browser-read', source: 'agent:browser', target: 'data:browser', type: 'CAN_READ',
+  edges: [{ source: 'agent:browser', target: 'data:browser', type: 'CAN_READ',
     certainty: 'confirmed', evidence: ['Disposable browser fixture'] }],
 };
 
