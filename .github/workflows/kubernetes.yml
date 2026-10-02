@@ -16,11 +16,11 @@ jobs:
         run: |
           mkdir -m 700 /tmp/zerograph-kubernetes-tools
           cd /tmp/zerograph-kubernetes-tools
-          curl --fail --silent --show-error --location -o kind-linux-amd64 https://github.com/kubernetes-sigs/kind/releases/download/v0.29.0/kind-linux-amd64
-          curl --fail --silent --show-error --location -o kind-linux-amd64.sha256sum https://github.com/kubernetes-sigs/kind/releases/download/v0.29.0/kind-linux-amd64.sha256sum
+          curl --fail --silent --show-error --location -o kind-linux-amd64 https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64
+          curl --fail --silent --show-error --location -o kind-linux-amd64.sha256sum https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64.sha256sum
           sha256sum --check kind-linux-amd64.sha256sum
-          curl --fail --silent --show-error --location -o kubectl https://dl.k8s.io/release/v1.33.1/bin/linux/amd64/kubectl
-          curl --fail --silent --show-error --location -o kubectl.sha256 https://dl.k8s.io/release/v1.33.1/bin/linux/amd64/kubectl.sha256
+          curl --fail --silent --show-error --location -o kubectl https://dl.k8s.io/release/v1.36.4/bin/linux/amd64/kubectl
+          curl --fail --silent --show-error --location -o kubectl.sha256 https://dl.k8s.io/release/v1.36.4/bin/linux/amd64/kubectl.sha256
           python -c 'import hashlib,pathlib; p=pathlib.Path("kubectl"); assert hashlib.sha256(p.read_bytes()).hexdigest()==pathlib.Path("kubectl.sha256").read_text().strip()'
           chmod 700 kind-linux-amd64 kubectl
           mv kind-linux-amd64 kind
