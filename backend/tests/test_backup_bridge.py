@@ -56,6 +56,21 @@ def test_preflight_refuses_before_revision_materialization(monkeypatch):
     assert not any("properties(s)" in call.args[0] for call in session.run.call_args_list)
 
 
+def test_logical_graph_equality_does_not_depend_on_cypher_row_order():
+    nodes = [
+        {"id": "b", "type": "ServiceAccount", "name": "Identity"},
+        {"id": "a", "type": "S3Bucket", "name": "Asset"},
+    ]
+    edges = [
+        {"source": "b", "target": "a", "type": "CAN_READ"},
+        {"source": "b", "target": "a", "type": "CAN_WRITE"},
+    ]
+    first = bridge.GraphSnapshot.model_validate({"nodes": nodes, "edges": edges})
+    second = bridge.GraphSnapshot.model_validate({"nodes": list(reversed(nodes)), "edges": list(reversed(edges))})
+    assert bridge.canonical_graph(first) == bridge.canonical_graph(second)
+    assert first.nodes[0].id == "b"  # Canonicalization must not mutate a caller's snapshot.
+
+
 @pytest.mark.parametrize("retention", [{}, {"created_at_ms": 123456789}])
 def test_import_preserves_legacy_missing_and_new_retention_timestamp(monkeypatch, retention):
     monkeypatch.setattr(bridge, "runtime", lambda: {"app_version": "0.1.0", "schema_head": "0002"})
