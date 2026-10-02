@@ -114,9 +114,11 @@ capacity: 500 of each exceeds 100,000 evaluations and fails before enrichment. A
 CLI override is exposed. Account inventory is not an AWS transaction and may
 change during scanning; conflicting duplicates are rejected rather than guessed.
 
-`sdk_requests` counts Python SDK invocations, not wire attempts; SDK standard
-retries allow at most 3 total attempts per invocation. Thus wire attempts may be up
-to 3 times the reported count. Connection/read timeouts are 5/10 seconds. Wall budget
+`sdk_requests` counts collector SDK invocations, excluding the single bootstrap
+AssumeRole call and credential-provider activity; it is not a wire-request count.
+SDK standard retries are configured for at most 3 total attempts per operation.
+Internal regional discovery/redirect requests are not measured by this counter.
+Connection/read timeouts are 5/10 seconds. Wall budget
 is checked before and after calls and during evaluation; one bounded in-flight
 SDK invocation can finish after the deadline, but no snapshot is published then.
 
