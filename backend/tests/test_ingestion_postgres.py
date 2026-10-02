@@ -208,3 +208,265 @@ def test_postgres_upgrade_preserves_legacy_outbox(postgres_environment, monkeypa
         assert tasks._claim_job("legacy")
     finally:
         get_settings.cache_clear()
+
+
+def test_retention_protects_publication_pointer_with_real_tenant_lock(postgres_environment, monkeypatch):
+    from datetime import UTC, datetime
+
+    from app.graph import retention
+
+    factory, graph = postgres_environment
+    # Old revisions and pointer are synthetic and scoped to this disposable schema.
+    for index in range(8):
+        graph.publish("tenant", f"old-{index}", GraphSnapshot())
+        graph.created_at["tenant", f"old-{index}"] = index + 1
+    with factory() as db:
+        db.get(TenantState, "tenant").revision = "old-0"
+        db.commit()
+    monkeypatch.setattr(retention, "session_factory", lambda: factory)
+    monkeypatch.setattr(retention, "get_graph_store", lambda: graph)
+    deleting, release, published = Event(), Event(), Event()
+    original_delete = graph.delete_revision
+    original_publish = graph.publish
+
+    def paused_delete(*args):
+        deleting.set()
+        assert release.wait(timeout=10)
+        return original_delete(*args)
+
+    def observed_publish(*args):
+        published.set()
+        return original_publish(*args)
+
+    job_id = enqueue(factory)
+    with (
+        patch.object(graph, "delete_revision", side_effect=paused_delete),
+        patch.object(graph, "publish", side_effect=observed_publish),
+    ):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            cleanup = pool.submit(
+                retention.prune_revisions,
+                "tenant",
+                retention.RetentionPolicy(1, 2, 1),
+                apply=True,
+                timestamp=datetime.now(UTC),
+            )
+            assert deleting.wait(timeout=10)
+            ingestion = pool.submit(tasks.process_job, job_id)
+            # Worker can claim/collect, but cannot publish while retention owns
+            # the tenant row lock. This bounded wait tests exclusion, not speed.
+            assert not published.wait(timeout=0.2)
+            release.set()
+            result = cleanup.result(timeout=10)
+            ingestion.result(timeout=10)
+    assert result.deleted == ["old-5"]
+    assert ("tenant", "old-0") in graph.snapshots
+    with factory() as db:
+        state = db.get(TenantState, "tenant")
+        assert state.revision not in {"old-5", "old-0"}
+        assert graph.snapshot("tenant", state.revision).nodes
+        assert db.scalar(select(AuditEvent).where(AuditEvent.action == "graph.revision_deleted"))
+
+
+def test_retention_missing_or_recent_revisions_are_not_deleted(postgres_environment, monkeypatch):
+    from app.graph import retention
+
+    factory, graph = postgres_environment
+    monkeypatch.setattr(retention, "session_factory", lambda: factory)
+    monkeypatch.setattr(retention, "get_graph_store", lambda: graph)
+    for index in range(5):
+        graph.publish("tenant", f"new-{index}", GraphSnapshot())
+    result = retention.prune_revisions("tenant", retention.RetentionPolicy(1, 2, 2), apply=True)
+    assert result.deleted == []
+    assert len(graph.snapshots) == 5
+    with pytest.raises(ValueError, match="authoritative SQL state"):
+        retention.prune_revisions("unknown", apply=True)
+
+
+def test_retention_intent_survives_graph_commit_and_completion_commit_failure(
+    postgres_environment, monkeypatch
+):
+    from sqlalchemy.orm import Session
+
+    from app.graph import retention
+
+    factory, graph = postgres_environment
+    monkeypatch.setattr(retention, "session_factory", lambda: factory)
+    monkeypatch.setattr(retention, "get_graph_store", lambda: graph)
+    for index in range(5):
+        graph.publish("tenant", f"old-{index}", GraphSnapshot())
+        graph.created_at["tenant", f"old-{index}"] = index + 1
+    original_commit = Session.commit
+
+    def fail_completion(db):
+        if any(
+            isinstance(event, AuditEvent) and event.action == "graph.revision_deleted" for event in db.new
+        ):
+            raise RuntimeError("injected completion commit failure")
+        return original_commit(db)
+
+    with patch.object(Session, "commit", fail_completion):
+        with pytest.raises(RuntimeError, match="completion commit"):
+            retention.prune_revisions("tenant", retention.RetentionPolicy(1, 2, 1), apply=True)
+    assert ("tenant", "old-2") not in graph.snapshots
+    with factory() as db:
+        intent = db.scalar(select(AuditEvent).where(AuditEvent.action == "graph.revision_delete_requested"))
+        assert intent.detail["revision"] == "old-2"
+        assert intent.detail["operation_id"]
+        assert db.scalar(select(AuditEvent).where(AuditEvent.action == "graph.revision_deleted")) is None
+        assert db.get(TenantState, "tenant").revision == "initial"
+
+
+def test_retention_refuses_deletion_when_durable_intent_commit_fails(postgres_environment, monkeypatch):
+    from sqlalchemy.orm import Session
+
+    from app.graph import retention
+
+    factory, graph = postgres_environment
+    monkeypatch.setattr(retention, "session_factory", lambda: factory)
+    monkeypatch.setattr(retention, "get_graph_store", lambda: graph)
+    for index in range(5):
+        graph.publish("tenant", f"old-{index}", GraphSnapshot())
+        graph.created_at["tenant", f"old-{index}"] = index + 1
+    with (
+        patch.object(Session, "commit", side_effect=RuntimeError("intent storage unavailable")),
+        patch.object(graph, "delete_revision") as delete,
+    ):
+        with pytest.raises(RuntimeError, match="intent storage"):
+            retention.prune_revisions("tenant", retention.RetentionPolicy(1, 2, 1), apply=True)
+    delete.assert_not_called()
+    assert len(graph.snapshots) == 5
+    with factory() as db:
+        assert db.scalar(select(AuditEvent)) is None
+
+
+def test_api_reader_pin_blocks_publication_and_cleanup_through_paths(postgres_environment, monkeypatch):
+    from app.api.routes import load_snapshot
+    from app.graph import retention
+
+    factory, graph = postgres_environment
+    monkeypatch.setattr(retention, "session_factory", lambda: factory)
+    monkeypatch.setattr(retention, "get_graph_store", lambda: graph)
+    for index in range(5):
+        graph.publish(
+            "tenant",
+            f"old-{index}",
+            GraphSnapshot(nodes=[Node(id="asset", name="asset", type=NodeType.BUCKET)]),
+        )
+        graph.created_at["tenant", f"old-{index}"] = index + 1
+    with factory() as db:
+        db.get(TenantState, "tenant").revision = "old-0"
+        db.commit()
+    snapshot_started, paths_started, release_snapshot, release_paths = Event(), Event(), Event(), Event()
+    original_snapshot, original_paths = graph.snapshot, graph.shortest_paths
+
+    def paused_snapshot(tenant, revision):
+        if revision == "old-0":
+            snapshot_started.set()
+            assert release_snapshot.wait(timeout=10)
+        return original_snapshot(tenant, revision)
+
+    def paused_paths(*args):
+        paths_started.set()
+        assert release_paths.wait(timeout=10)
+        return original_paths(*args)
+
+    def reader():
+        with factory() as db:
+            snapshot, revision = load_snapshot(db, graph, "tenant")
+            assert revision == "old-0"
+            assert len(snapshot.nodes) == 1
+            graph.shortest_paths("tenant", revision, "asset", 1, False)
+        return revision
+
+    collected = Event()
+    original_collect = tasks.collect
+
+    def observed_collect(*args):
+        snapshot = original_collect(*args)
+        collected.set()
+        return snapshot
+
+    job_id = enqueue(factory)
+    with (
+        patch.object(graph, "snapshot", side_effect=paused_snapshot),
+        patch.object(graph, "shortest_paths", side_effect=paused_paths),
+        patch.object(tasks, "collect", side_effect=observed_collect),
+    ):
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            read = pool.submit(reader)
+            assert snapshot_started.wait(timeout=10)
+            publish = pool.submit(tasks.process_job, job_id)
+            cleanup = pool.submit(
+                retention.prune_revisions, "tenant", retention.RetentionPolicy(1, 2, 3), apply=True
+            )
+            assert collected.wait(timeout=10)
+            assert not publish.done()
+            assert not cleanup.done()
+            release_snapshot.set()
+            assert paths_started.wait(timeout=10)
+            with pytest.raises(TimeoutError):
+                publish.result(timeout=0.1)
+            with pytest.raises(TimeoutError):
+                cleanup.result(timeout=0.1)
+            assert ("tenant", "old-0") in graph.snapshots
+            release_paths.set()
+            assert read.result(timeout=10) == "old-0"
+            publish.result(timeout=10)
+            cleanup.result(timeout=10)
+    with factory() as db:
+        snapshot, revision = load_snapshot(db, graph, "tenant")
+        assert revision != "old-0"
+        assert len(snapshot.nodes) == 1
+
+
+def test_api_pointer_pin_refreshes_stale_identity_map(postgres_environment):
+    from app.api.routes import load_snapshot
+
+    factory, graph = postgres_environment
+    graph.publish("tenant", "new", GraphSnapshot(nodes=[Node(id="new", name="new", type=NodeType.BUCKET)]))
+    with factory() as reader:
+        stale = reader.get(TenantState, "tenant")
+        assert stale.revision == "initial"
+        with factory() as publisher:
+            publisher.get(TenantState, "tenant").revision = "new"
+            publisher.commit()
+        snapshot, revision = load_snapshot(reader, graph, "tenant")
+        assert revision == "new"
+        assert stale.revision == "new"
+        assert snapshot.nodes[0].id == "new"
+
+
+def test_api_pointer_pin_timeout_returns_sanitized_retry_response(postgres_environment, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.api import routes
+    from app.core.auth import Actor, current_actor
+    from app.db.session import get_db
+    from app.graph.repository import get_graph_store
+    from app.main import create_app
+
+    factory, graph = postgres_environment
+    monkeypatch.setattr(routes, "SNAPSHOT_LOCK_TIMEOUT_MS", 20)
+
+    def reader_db():
+        with factory() as db:
+            yield db
+
+    app = create_app()
+    app.dependency_overrides[get_db] = reader_db
+    app.dependency_overrides[get_graph_store] = lambda: graph
+    app.dependency_overrides[current_actor] = lambda: Actor("reader", "tenant", frozenset({"viewer"}))
+    with factory() as publisher:
+        publisher.execute(
+            select(TenantState).where(TenantState.tenant_id == "tenant").with_for_update()
+        ).scalar_one()
+        with TestClient(app) as client:
+            response = client.get("/api/v1/graph")
+        assert response.status_code == 503
+        assert response.headers["retry-after"] == "5"
+        assert response.json() == {"detail": "Graph publication or maintenance is busy; retry shortly"}
+        assert "SQL" not in response.text
+        assert "55P03" not in response.text
+    with TestClient(app) as client:
+        assert client.get("/api/v1/graph").status_code == 200

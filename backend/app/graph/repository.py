@@ -1,4 +1,6 @@
 import json
+import time
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Protocol
@@ -10,10 +12,20 @@ from app.core.config import get_settings
 from app.graph.schema import Edge, EdgeType, GraphSnapshot, Node, NodeType
 
 
+@dataclass(frozen=True)
+class RevisionMetadata:
+    revision: str
+    created_at_ms: int
+
+
 class GraphStore(Protocol):
     def migrate(self) -> None: ...
     def publish(self, tenant: str, revision: str, snapshot: GraphSnapshot) -> None: ...
     def snapshot(self, tenant: str, revision: str) -> GraphSnapshot: ...
+    def retention_candidates(
+        self, tenant: str, protected: str, cutoff_ms: int, keep: int, limit: int
+    ) -> list[RevisionMetadata]: ...
+    def delete_revision(self, tenant: str, revision: str, created_at_ms: int, cutoff_ms: int) -> bool: ...
     def shortest_paths(
         self, tenant: str, revision: str, source: str, hops: int, include_uncertain: bool
     ) -> dict[str, list[str]]: ...
@@ -25,15 +37,48 @@ class MemoryGraphStore:
 
     def __init__(self):
         self.snapshots: dict[tuple[str, str], GraphSnapshot] = {}
+        self.created_at: dict[tuple[str, str], int] = {}
 
     def migrate(self) -> None:
         pass
 
     def publish(self, tenant: str, revision: str, snapshot: GraphSnapshot) -> None:
         self.snapshots[(tenant, revision)] = snapshot.model_copy(deep=True)
+        self.created_at.setdefault((tenant, revision), time.time_ns() // 1_000_000)
 
     def snapshot(self, tenant: str, revision: str) -> GraphSnapshot:
         return self.snapshots.get((tenant, revision), GraphSnapshot()).model_copy(deep=True)
+
+    def retention_candidates(
+        self, tenant: str, protected: str, cutoff_ms: int, keep: int, limit: int
+    ) -> list[RevisionMetadata]:
+        _validate_retention_bounds(keep, limit)
+        revisions = sorted(
+            (
+                RevisionMetadata(revision, created)
+                for (scope, revision), created in self.created_at.items()
+                if scope == tenant and (scope, revision) in self.snapshots
+            ),
+            key=lambda revision: (revision.created_at_ms, revision.revision),
+            reverse=True,
+        )
+        return [
+            revision
+            for revision in revisions[keep:]
+            if revision.revision != protected and revision.created_at_ms < cutoff_ms
+        ][:limit]
+
+    def delete_revision(self, tenant: str, revision: str, created_at_ms: int, cutoff_ms: int) -> bool:
+        key = tenant, revision
+        if self.created_at.get(key) != created_at_ms or created_at_ms >= cutoff_ms:
+            return False
+        if key not in self.snapshots:
+            return False
+        if len(self.snapshots[key].nodes) > 5000:
+            raise ValueError("Revision exceeds bounded deletion node limit")
+        del self.snapshots[key]
+        del self.created_at[key]
+        return True
 
     def shortest_paths(
         self, tenant: str, revision: str, source: str, hops: int, include_uncertain: bool
@@ -44,6 +89,11 @@ class MemoryGraphStore:
 
     def close(self) -> None:
         pass
+
+
+def _validate_retention_bounds(keep: int, limit: int) -> None:
+    if not 2 <= keep <= 1000 or not 1 <= limit <= 50:
+        raise ValueError("Keep count must be 2..1000 and batch size 1..50")
 
 
 class CypherGraphStore:
@@ -118,8 +168,9 @@ class CypherGraphStore:
                         revision=revision,
                     ).consume()
             tx.run(
-                "MERGE (s:Snapshot {key:$key}) SET s.tenant_id=$tenant, s.revision=$revision, "
-                "s.source=$source, s.warnings=$warnings",
+                "MERGE (s:Snapshot {key:$key}) ON CREATE SET s.created_at_ms=$created_at "
+                "SET s.tenant_id=$tenant, s.revision=$revision, s.source=$source, s.warnings=$warnings",
+                created_at=time.time_ns() // 1_000_000,
                 key=json.dumps([tenant, revision]),
                 tenant=tenant,
                 revision=revision,
@@ -169,6 +220,65 @@ class CypherGraphStore:
             source=meta["source"] if meta else "snapshot",
             warnings=meta["warnings"] if meta else [],
         )
+
+    def retention_candidates(
+        self, tenant: str, protected: str, cutoff_ms: int, keep: int, limit: int
+    ) -> list[RevisionMetadata]:
+        _validate_retention_bounds(keep, limit)
+        # Rank before the age filter: keep the newest revisions regardless of age.
+        # Undated legacy revisions are never inferred old enough for deletion.
+        query = (
+            "MATCH (s:Snapshot {tenant_id:$tenant}) WHERE s.created_at_ms IS NOT NULL "
+            "WITH s ORDER BY s.created_at_ms DESC, s.revision DESC SKIP $keep "
+            "WITH s WHERE s.revision <> $protected AND s.created_at_ms < $cutoff "
+            "RETURN s.revision AS revision, s.created_at_ms AS created_at "
+            "ORDER BY created_at DESC, revision DESC LIMIT $limit"
+        )
+        with self.driver.session() as session:
+            return [
+                RevisionMetadata(row["revision"], row["created_at"])
+                for row in session.run(
+                    Query(query, timeout=self.timeout),
+                    tenant=tenant,
+                    protected=protected,
+                    cutoff=cutoff_ms,
+                    keep=keep,
+                    limit=limit,
+                )
+            ]
+
+    def delete_revision(self, tenant: str, revision: str, created_at_ms: int, cutoff_ms: int) -> bool:
+        # Call only while holding the SQL tenant publication lock. No graph-only
+        # check can safely establish which revision the SQL pointer references.
+        def delete(tx):
+            row = tx.run(
+                "MATCH (s:Snapshot {tenant_id:$tenant, revision:$revision}) "
+                "WHERE s.created_at_ms=$created AND s.created_at_ms < $cutoff "
+                "RETURN s.key AS key",
+                tenant=tenant,
+                revision=revision,
+                created=created_at_ms,
+                cutoff=cutoff_ms,
+            ).single()
+            if row is None:
+                return False
+            count = tx.run(
+                "MATCH (n:Entity {tenant_id:$tenant, revision:$revision}) RETURN count(n) AS count",
+                tenant=tenant,
+                revision=revision,
+            ).single()["count"]
+            if count > 5000:
+                raise ValueError("Revision exceeds bounded deletion node limit")
+            tx.run(
+                "MATCH (n:Entity {tenant_id:$tenant, revision:$revision}) DETACH DELETE n",
+                tenant=tenant,
+                revision=revision,
+            ).consume()
+            tx.run("MATCH (s:Snapshot {key:$key}) DELETE s", key=row["key"]).consume()
+            return True
+
+        with self.driver.session() as session:
+            return session.execute_write(unit_of_work(timeout=self.timeout)(delete))
 
     def shortest_paths(
         self, tenant: str, revision: str, source: str, hops: int, include_uncertain: bool
