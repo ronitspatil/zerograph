@@ -1,0 +1,52 @@
+from functools import lru_cache
+from typing import Literal
+
+from pydantic import Field, SecretStr, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="ZG_", env_file=".env", extra="ignore")
+    environment: Literal["development", "test", "production"] = "development"
+    demo_mode: bool = False
+    demo_token: SecretStr = SecretStr("")
+    database_url: str = "postgresql+psycopg://zerograph:zerograph@postgres:5432/zerograph"
+    redis_url: str = "redis://redis:6379/0"
+    graph_uri: str = "bolt://memgraph:7687"
+    graph_vendor: Literal["memgraph", "neo4j", "memory"] = "memgraph"
+    graph_username: str = ""
+    graph_password: SecretStr = SecretStr("")
+    oidc_issuer: str = ""
+    oidc_audience: str = "zerograph-api"
+    oidc_jwks_url: str = ""
+    tenant_claim: str = "tenant_id"
+    role_claim: str = "roles"
+    query_timeout_seconds: int = Field(default=15, ge=1, le=120)
+    max_body_bytes: int = Field(default=4_000_000, ge=1024)
+    max_nodes: int = Field(default=5000, ge=1, le=10000)
+    aws_tenant_id: str = ""
+    aws_role_arn: str = ""
+    aws_external_id: SecretStr = SecretStr("")
+    aws_region: str = "us-east-1"
+    git_provider: Literal["github", "gitlab"] = "github"
+    git_repository: str = ""
+    git_tenant_id: str = ""
+    git_base_branch: str = "main"
+    git_token: SecretStr = SecretStr("")
+    git_policy_prefix: str = "security/zerograph"
+
+    @model_validator(mode="after")
+    def secure_configuration(self) -> "Settings":
+        if self.demo_mode and len(self.demo_token.get_secret_value()) < 32:
+            raise ValueError("Demo mode requires a random token of at least 32 characters")
+        if self.environment == "production":
+            if self.demo_mode or self.graph_vendor == "memory":
+                raise ValueError("Demo authentication and memory graphs are prohibited in production")
+            if not self.oidc_issuer.startswith("https://") or not self.oidc_jwks_url.startswith("https://"):
+                raise ValueError("Production requires HTTPS OIDC issuer and JWKS URL")
+        return self
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

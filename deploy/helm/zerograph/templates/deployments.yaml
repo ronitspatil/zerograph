@@ -1,0 +1,58 @@
+{{- range $component := list "backend" "frontend" "worker" "scheduler" }}
+{{- $web := eq $component "frontend" }}
+{{- $api := eq $component "backend" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $.Release.Name }}-{{ $component }}
+spec:
+  replicas: {{ if eq $component "scheduler" }}1{{ else }}{{ index $.Values $component "replicas" }}{{ end }}
+  {{- if eq $component "scheduler" }}
+  strategy: {type: Recreate}
+  {{- end }}
+  selector:
+    matchLabels: {app: {{ $.Release.Name }}, component: {{ $component }}}
+  template:
+    metadata:
+      labels: {app: {{ $.Release.Name }}, component: {{ $component }}}
+    spec:
+      serviceAccountName: {{ $.Values.serviceAccount.name }}
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001}
+      containers:
+        - name: {{ $component }}
+          image: {{ if $web }}{{ $.Values.frontend.image }}{{ else }}{{ $.Values.backend.image }}{{ end }}
+          imagePullPolicy: IfNotPresent
+          {{- if eq $component "worker" }}
+          command: [celery, -A, app.collectors.tasks.celery_app, worker, --loglevel=INFO, --concurrency=2]
+          {{- else if eq $component "scheduler" }}
+          command: [celery, -A, app.collectors.tasks.celery_app, beat, --loglevel=INFO, --schedule=/tmp/celerybeat-schedule]
+          {{- end }}
+          envFrom:
+            - configMapRef: {name: {{ $.Release.Name }}-config}
+            - secretRef: {name: {{ $.Values.secretName }}}
+          {{- if or $web $api }}
+          ports:
+            - containerPort: {{ if $web }}3100{{ else }}8000{{ end }}
+          readinessProbe:
+            httpGet: {path: {{ if $web }}/login{{ else }}/health/ready{{ end }}, port: {{ if $web }}3100{{ else }}8000{{ end }}}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: {{ if $web }}/login{{ else }}/health/live{{ end }}, port: {{ if $web }}3100{{ else }}8000{{ end }}}
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+{{ toYaml $.Values.resources | indent 12 }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 128Mi}
+---
+{{- end }}

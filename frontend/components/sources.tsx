@@ -1,0 +1,156 @@
+"use client";
+import { useState } from "react";
+import { Cloud, Code2, FileJson, Plus, RefreshCw } from "lucide-react";
+import type { Job } from "@/lib/types";
+import { api } from "@/lib/api";
+import { Button } from "@/components/ui/button";
+export function Sources({
+  jobs,
+  onRefresh,
+  canAdmin,
+}: {
+  jobs: Job[];
+  onRefresh: () => void;
+  canAdmin: boolean;
+}) {
+  const [source, setSource] = useState("snapshot");
+  const [payload, setPayload] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function submit() {
+    setBusy(true);
+    setError("");
+    try {
+      await api("ingestions", {
+        method: "POST",
+        body: JSON.stringify({
+          source,
+          payload: source === "aws" ? {} : JSON.parse(payload),
+        }),
+      });
+      setPayload("");
+      onRefresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Ingestion failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <section>
+      <div className="source-cards">
+        <div className="panel">
+          <Cloud size={23} />
+          <h3>AWS account</h3>
+          <p>
+            Read-only IAM role and S3 metadata collection through an
+            administrator-configured role.
+          </p>
+          <span className="pill amber">Scoped coverage</span>
+        </div>
+        <div className="panel">
+          <Code2 size={23} />
+          <h3>AI agents & MCP</h3>
+          <p>
+            Import server inventories, agent configurations, and explicit
+            tool-to-data bindings.
+          </p>
+          <span className="pill purple">Declared access</span>
+        </div>
+        <div className="panel">
+          <FileJson size={23} />
+          <h3>Graph snapshot</h3>
+          <p>
+            Import normalized identity and data relationships from your internal
+            collectors.
+          </p>
+          <span className="pill green">Validated schema</span>
+        </div>
+      </div>
+      <div className="panel form-panel">
+        <div className="panel-heading">
+          <h3>Start ingestion</h3>
+          <span className="muted">Asynchronous · tenant scoped</span>
+        </div>
+        <label>
+          Source
+          <select value={source} onChange={(e) => setSource(e.target.value)}>
+            <option value="snapshot">Normalized graph snapshot</option>
+            <option value="mcp">MCP / agent inventory</option>
+            <option value="aws">Configured AWS connector</option>
+          </select>
+        </label>
+        {source !== "aws" && (
+          <label>
+            JSON inventory
+            <textarea
+              rows={10}
+              value={payload}
+              onChange={(e) => setPayload(e.target.value)}
+              placeholder={
+                source === "mcp"
+                  ? '{"mcpServers": {}, "agents": [], "bindings": {}}'
+                  : '{"nodes": [], "edges": [], "source": "internal"}'
+              }
+              spellCheck={false}
+            />
+          </label>
+        )}
+        {error && (
+          <p role="alert" className="error-banner">
+            {error}
+          </p>
+        )}
+        <Button
+          disabled={busy || !canAdmin || (source !== "aws" && !payload)}
+          onClick={submit}
+        >
+          <Plus size={16} />
+          {busy ? "Queuing…" : "Queue ingestion"}
+        </Button>
+      </div>
+      <div className="panel history-panel">
+        <div className="panel-heading">
+          <h3>Collection history</h3>
+          <Button variant="ghost" size="small" onClick={onRefresh}>
+            <RefreshCw size={14} />
+            Refresh
+          </Button>
+        </div>
+        {jobs.length ? (
+          <table>
+            <thead>
+              <tr>
+                <th>Source</th>
+                <th>Status</th>
+                <th>Nodes</th>
+                <th>Started</th>
+              </tr>
+            </thead>
+            <tbody>
+              {jobs.map((j) => (
+                <tr key={j.id}>
+                  <td>
+                    {j.source}
+                    {j.error && <small className="job-error">{j.error}</small>}
+                  </td>
+                  <td>
+                    <span
+                      className={`pill ${j.status === "completed" ? "green" : j.status === "failed" ? "red" : "amber"}`}
+                    >
+                      {j.status}
+                    </span>
+                  </td>
+                  <td>{j.node_count}</td>
+                  <td>{new Date(j.created_at).toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p className="empty-line">No ingestion jobs yet.</p>
+        )}
+      </div>
+    </section>
+  );
+}

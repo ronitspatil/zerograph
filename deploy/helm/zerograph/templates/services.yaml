@@ -1,0 +1,13 @@
+{{- range $component := list "backend" "frontend" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $.Release.Name }}-{{ $component }}
+spec:
+  type: ClusterIP
+  selector: {app: {{ $.Release.Name }}, component: {{ $component }}}
+  ports:
+    - port: {{ if eq $component "frontend" }}3100{{ else }}8000{{ end }}
+      targetPort: {{ if eq $component "frontend" }}3100{{ else }}8000{{ end }}
+---
+{{- end }}
