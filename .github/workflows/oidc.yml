@@ -1,0 +1,46 @@
+name: Production-mode OIDC qualification
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  oidc-qualification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      COMPOSE_PROJECT_NAME: zerograph-oidc-qualification-ci
+      ZG_OIDC_E2E: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -r backend/requirements-dev.lock -e backend
+      - name: Generate temporary credentials and explicit CA trust
+        run: |
+          task_fixture=$(mktemp -d /tmp/zerograph-oidc-qualification.XXXXXX)
+          echo "ZG_OIDC_FIXTURE_DIR=$task_fixture" >> "$GITHUB_ENV"
+          python deploy/oidc-init.py --directory "$task_fixture" --env-file .env
+          echo '127.0.0.1 auth.oidc.test console.oidc.test api.oidc.test' | sudo tee -a /etc/hosts >/dev/null
+      - name: Build real production-mode application and disposable provider
+        run: docker compose -f docker-compose.yml -f deploy/oidc-compose.yml up --build --detach --wait --wait-timeout 300
+      - name: Exercise real HTTPS code/PKCE, signed claims and denial paths
+        run: pytest tests/test_oidc_e2e.py --no-cov -q --tb=short --show-capture=no --junitxml=oidc-qualification.xml
+        working-directory: backend
+      - name: Upload sanitized qualification outcome only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oidc-qualification
+          path: backend/oidc-qualification.xml
+          if-no-files-found: ignore
+      - name: Bounded non-sensitive service-state diagnostics
+        if: failure()
+        run: docker compose -f docker-compose.yml -f deploy/oidc-compose.yml ps --all --format '{{.Service}} {{.State}} {{.Health}}'
+      - name: Remove only disposable project and generated fixture secrets
+        if: always()
+        run: |
+          set +e
+          docker compose -f docker-compose.yml -f deploy/oidc-compose.yml down --volumes --remove-orphans
+          stack_status=$?
+          python deploy/oidc-cleanup.py --directory "$ZG_OIDC_FIXTURE_DIR" --env-file .env
+          files_status=$?
+          test "$stack_status" -eq 0 && test "$files_status" -eq 0
