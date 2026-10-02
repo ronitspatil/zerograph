@@ -6,6 +6,8 @@ jobs:
   kind-helm:
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    env:
+      ZG_KUBE_SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
