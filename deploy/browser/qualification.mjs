@@ -9,6 +9,7 @@ const outcomes = [];
 let stage = 'initialize disposable browser fixture';
 let browser;
 let accounts;
+let diagnostics;
 const require = condition => { if (!condition) throw new Error('fixed assertion'); };
 const step = label => { stage = label; };
 const snapshot = {
@@ -34,8 +35,22 @@ async function visible(locator) { await locator.waitFor({ state: 'visible', time
 async function login(context, username) {
   const page = await context.newPage();
   const health = { errors: 0, active: true };
-  page.on('pageerror', () => { if (health.active) health.errors++; });
-  page.on('console', message => { if (health.active && message.type() === 'error') health.errors++; });
+  page.on('pageerror', () => { if (health.active) { health.errors++; diagnostics.page_errors++; } });
+  page.on('console', message => {
+    if (health.active && message.type() === 'error') {
+      health.errors++; diagnostics.console_errors++;
+      if (/content security policy/i.test(message.text())) diagnostics.csp_errors++;
+    }
+  });
+  page.on('response', response => {
+    const url = new URL(response.url());
+    if (url.origin === consoleOrigin && url.pathname.startsWith('/api/zg/')) {
+      const status = response.status();
+      if (status >= 200 && status < 300) diagnostics.api_success++;
+      if (status === 401 || status === 403) diagnostics.api_denied++;
+      if (status >= 500) diagnostics.api_server_errors++;
+    }
+  });
   step('validated HTTPS protected navigation');
   await page.goto(consoleOrigin + '/', { waitUntil: 'domcontentloaded' });
   require(new URL(page.url()).pathname === '/login');
@@ -67,12 +82,14 @@ async function login(context, username) {
 }
 
 async function run(label, action) {
+  diagnostics = { page_errors: 0, console_errors: 0, csp_errors: 0,
+    api_success: 0, api_denied: 0, api_server_errors: 0 };
   const context = await browser.newContext({ ignoreHTTPSErrors: false, viewport: { width: 1440, height: 1000 } });
   try {
     await action(context);
-    outcomes.push({ label, stage: 'complete', passed: true });
+    outcomes.push({ label, stage: 'complete', passed: true, diagnostics: { ...diagnostics } });
   } catch {
-    outcomes.push({ label, stage, passed: false });
+    outcomes.push({ label, stage, passed: false, diagnostics: { ...diagnostics } });
   } finally {
     await context.close();
   }
