@@ -26,6 +26,22 @@ jobs:
       - run: ruff check backend
       - run: pytest --cov-fail-under=75
         working-directory: backend
+  analysis-qualification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -r backend/requirements-dev.lock -e backend
+      - run: python scripts/qualify_analysis.py --output analysis-qualification.json
+        working-directory: backend
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: analysis-qualification
+          path: backend/analysis-qualification.json
+          if-no-files-found: error
   frontend:
     runs-on: ubuntu-latest
     defaults:

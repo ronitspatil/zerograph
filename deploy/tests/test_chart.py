@@ -75,6 +75,17 @@ class ChartTests(unittest.TestCase):
         self.assertEqual(scheduler["replicas"], 1)
         self.assertEqual(scheduler["strategy"]["type"], "Recreate")
 
+    def test_metrics_scraping_is_optional_and_uses_secret_reference(self):
+        self.assertFalse(any(resource["kind"] == "ServiceMonitor" for resource in self.resources))
+        enabled = render("--set", "monitoring.enabled=true")
+        monitor = next(resource for resource in enabled if resource["kind"] == "ServiceMonitor")
+        endpoint = monitor["spec"]["endpoints"][0]
+        self.assertEqual(endpoint["path"], "/metrics")
+        self.assertEqual(endpoint["authorization"]["credentials"], {"name": "zerograph-secrets", "key": "ZG_METRICS_TOKEN"})
+        service = next(resource for resource in enabled if resource["kind"] == "Service" and resource["metadata"]["name"] == "release-test-backend")
+        self.assertEqual(service["metadata"]["labels"], monitor["spec"]["selector"]["matchLabels"])
+        self.assertEqual(service["spec"]["ports"][0]["name"], "http")
+
     def test_external_secrets_override_config_without_rendering_values(self):
         for deployment in self.deployments.values():
             container = deployment["spec"]["template"]["spec"]["containers"][0]

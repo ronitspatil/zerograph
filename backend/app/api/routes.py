@@ -17,6 +17,7 @@ from app.core.auth import Actor, require_role
 from app.core.config import get_settings
 from app.db.models import AuditEvent, IngestionJob, Remediation, TenantState
 from app.db.session import audit, get_db
+from app.engine.analysis_index import AnalysisIndex
 from app.engine.blast_radius import BlastRadius, calculate
 from app.engine.toxic_combos import Finding, detect
 from app.graph.repository import GraphStore, get_graph_store
@@ -105,10 +106,11 @@ def graph_view(
 @router.get("/overview")
 def overview(db: DB, graph: Graph, actor: Viewer):
     snapshot, revision = load_snapshot(db, graph, actor.tenant_id)
-    findings = detect(snapshot)
+    prepared = AnalysisIndex.build(snapshot, include_uncertain=True)
+    findings = detect(snapshot, index=prepared)
     identities = [n for n in snapshot.nodes if n.type in IDENTITY_TYPES]
     # Count identities with sensitive reachable assets. Full scores are computed on demand.
-    high_blast = sum(calculate(snapshot, n.id, include_uncertain=True).risk_score >= 70 for n in identities)
+    high_blast = sum(prepared.score(n.id, prepared.paths(n.id))[0] >= 70 for n in identities)
     return {
         "revision": revision,
         "total_nhis": len(identities),
