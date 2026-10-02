@@ -338,3 +338,100 @@ def test_retention_refuses_deletion_when_durable_intent_commit_fails(postgres_en
     assert len(graph.snapshots) == 5
     with factory() as db:
         assert db.scalar(select(AuditEvent)) is None
+
+
+def test_api_reader_pin_blocks_publication_and_cleanup_through_paths(postgres_environment, monkeypatch):
+    from app.api.routes import load_snapshot
+    from app.graph import retention
+
+    factory, graph = postgres_environment
+    monkeypatch.setattr(retention, "session_factory", lambda: factory)
+    monkeypatch.setattr(retention, "get_graph_store", lambda: graph)
+    for index in range(5):
+        graph.publish(
+            "tenant",
+            f"old-{index}",
+            GraphSnapshot(nodes=[Node(id="asset", name="asset", type=NodeType.BUCKET)]),
+        )
+        graph.created_at["tenant", f"old-{index}"] = index + 1
+    with factory() as db:
+        db.get(TenantState, "tenant").revision = "old-0"
+        db.commit()
+    snapshot_started, paths_started, release_snapshot, release_paths = Event(), Event(), Event(), Event()
+    original_snapshot, original_paths = graph.snapshot, graph.shortest_paths
+
+    def paused_snapshot(tenant, revision):
+        if revision == "old-0":
+            snapshot_started.set()
+            assert release_snapshot.wait(timeout=10)
+        return original_snapshot(tenant, revision)
+
+    def paused_paths(*args):
+        paths_started.set()
+        assert release_paths.wait(timeout=10)
+        return original_paths(*args)
+
+    def reader():
+        with factory() as db:
+            snapshot, revision = load_snapshot(db, graph, "tenant")
+            assert revision == "old-0"
+            assert len(snapshot.nodes) == 1
+            graph.shortest_paths("tenant", revision, "asset", 1, False)
+        return revision
+
+    collected = Event()
+    original_collect = tasks.collect
+
+    def observed_collect(*args):
+        snapshot = original_collect(*args)
+        collected.set()
+        return snapshot
+
+    job_id = enqueue(factory)
+    with (
+        patch.object(graph, "snapshot", side_effect=paused_snapshot),
+        patch.object(graph, "shortest_paths", side_effect=paused_paths),
+        patch.object(tasks, "collect", side_effect=observed_collect),
+    ):
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            read = pool.submit(reader)
+            assert snapshot_started.wait(timeout=10)
+            publish = pool.submit(tasks.process_job, job_id)
+            cleanup = pool.submit(
+                retention.prune_revisions, "tenant", retention.RetentionPolicy(1, 2, 3), apply=True
+            )
+            assert collected.wait(timeout=10)
+            assert not publish.done()
+            assert not cleanup.done()
+            release_snapshot.set()
+            assert paths_started.wait(timeout=10)
+            with pytest.raises(TimeoutError):
+                publish.result(timeout=0.1)
+            with pytest.raises(TimeoutError):
+                cleanup.result(timeout=0.1)
+            assert ("tenant", "old-0") in graph.snapshots
+            release_paths.set()
+            assert read.result(timeout=10) == "old-0"
+            publish.result(timeout=10)
+            cleanup.result(timeout=10)
+    with factory() as db:
+        snapshot, revision = load_snapshot(db, graph, "tenant")
+        assert revision != "old-0"
+        assert len(snapshot.nodes) == 1
+
+
+def test_api_pointer_pin_refreshes_stale_identity_map(postgres_environment):
+    from app.api.routes import load_snapshot
+
+    factory, graph = postgres_environment
+    graph.publish("tenant", "new", GraphSnapshot(nodes=[Node(id="new", name="new", type=NodeType.BUCKET)]))
+    with factory() as reader:
+        stale = reader.get(TenantState, "tenant")
+        assert stale.revision == "initial"
+        with factory() as publisher:
+            publisher.get(TenantState, "tenant").revision = "new"
+            publisher.commit()
+        snapshot, revision = load_snapshot(reader, graph, "tenant")
+        assert revision == "new"
+        assert stale.revision == "new"
+        assert snapshot.nodes[0].id == "new"

@@ -74,11 +74,13 @@ tenant pointers. Repeating retention is idempotent and creates a new intent for
 any still-present candidate.
 
 Do not run retention during backup/restore or while external tools write graph
-revisions or SQL tenant pointers outside the application's lock protocol. The current SQL pointer is never deleted. Requests that fetched a previous
-pointer just before advancement are not pinned: an unusually old previous revision
-could be removed while such a request reads it. Run applied maintenance in a
-read-drained maintenance window when uninterrupted graph reads are required.
-Historical or long-running readers require a separate retention pinning policy.
+revisions or SQL tenant pointers outside the application's lock protocol. API graph readers pin the current SQL pointer using a shared tenant row lock
+held by the existing request database session through snapshot and shortest-path
+materialization. Publication and cleanup take an exclusive lock, so they wait
+for existing readers and new readers wait for cleanup. No read-drained window is
+required for the current API read paths. Locks end with request transaction
+completion/session closure; no long-lived reader registry is added. A future
+historical-snapshot or external reader must use an equivalent pinning policy.
 Clock synchronization is required because age cutoffs and timestamps use UTC
 application clocks. Retention does not delete SQL source snapshots, ingestion
 jobs, remediations or audit history.

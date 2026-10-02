@@ -37,7 +37,16 @@ def tenant_state(db: Session, tenant: str) -> TenantState | None:
 
 
 def load_snapshot(db: Session, graph: GraphStore, tenant: str) -> tuple[GraphSnapshot, str]:
-    state = tenant_state(db, tenant)
+    # Pin the authoritative pointer for this request transaction. Publishers and
+    # retention use FOR UPDATE, so the graph cannot disappear or advance while
+    # snapshot and subsequent shortest-path queries materialize. Refresh any
+    # identity-map entry loaded before the lock was acquired.
+    state = db.execute(
+        select(TenantState)
+        .where(TenantState.tenant_id == tenant)
+        .with_for_update(read=True)
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
     revision = state.revision if state else ""
     return graph.snapshot(tenant, revision), revision
 
