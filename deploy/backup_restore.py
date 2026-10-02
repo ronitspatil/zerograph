@@ -129,22 +129,17 @@ class Compose:
         return result.stdout if output is None else b""
 
     def bridge(self, action, data=None):
-        return json.loads(
-            self.run(
-                [
-                    "run",
-                    "--rm",
-                    "--no-deps",
-                    "-T",
-                    "backend",
-                    "python",
-                    "-c",
-                    BRIDGE.read_text(),
-                    action,
-                ],
-                input=data,
+        try:
+            return json.loads(
+                self.run(
+                    ["run", "--rm", "--no-deps", "-T", "backend", "python", "-c", BRIDGE.read_text(), action],
+                    input=data,
+                )
             )
-        )
+        except BackupError as exc:
+            raise BackupError(
+                f"Snapshot {action} failed; check offline state and release compatibility"
+            ) from exc
 
     def offline(self):
         raw = self.run(["ps", "--all", "--format", "json"]).decode()
@@ -255,7 +250,9 @@ def backup(compose, archive):
         folder = Path(temporary)
         graph_file = folder / "graph.json"
         with private_file(graph_file) as output:
-            output.write(json.dumps(graph, separators=(",", ":"), sort_keys=True).encode())
+            output.write(
+                json.dumps(graph, separators=(",", ":"), sort_keys=True, ensure_ascii=False).encode()
+            )
         with private_file(folder / "postgres.dump") as output:
             compose.run(
                 [
@@ -288,12 +285,20 @@ def backup(compose, archive):
         with private_file(folder / "manifest.json") as output:
             output.write(json.dumps(manifest, sort_keys=True, indent=2).encode())
         candidate = folder / "backup.zip"
-        with private_file(candidate) as output, zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED) as zipped:
-            for name in sorted(MEMBERS):
-                if (folder / name).stat().st_size > LIMITS[name]:
-                    raise BackupError("Backup exceeds supported archive size")
-                zipped.write(folder / name, arcname=name)
+        with private_file(candidate) as output:
+            with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED) as zipped:
+                for name in sorted(MEMBERS):
+                    if (folder / name).stat().st_size > LIMITS[name]:
+                        raise BackupError("Backup exceeds supported archive size")
+                    zipped.write(folder / name, arcname=name)
+            output.flush()
+            os.fsync(output.fileno())
         os.link(candidate, archive)  # Atomic publication, never replace another archive.
+        directory_fd = os.open(archive.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
 
 
 def restore(compose, archive):
@@ -370,7 +375,10 @@ def main():
         print(
             f"{args.action.capitalize()} verified. Keep maintenance exclusive until stores and application are ready."
         )
-    except (BackupError, OSError, subprocess.SubprocessError, ValueError):
+    except BackupError as exc:
+        # BackupError text is authored here, never raw driver/SQL/Docker diagnostics.
+        parser.exit(1, f"{exc}. Keep the target offline and preserve state.\n")
+    except (OSError, subprocess.SubprocessError, ValueError):
         parser.exit(
             1,
             "Operation refused or failed. Preserve source/target state and inspect archive compatibility, offline state and service health.\n",

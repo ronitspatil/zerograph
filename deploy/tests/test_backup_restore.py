@@ -166,8 +166,19 @@ class ArchiveTests(unittest.TestCase):
 
         compose.run.side_effect = dump
         archive = self.root / "new.zip"
-        with patch("deploy.backup_restore.engines", return_value=self.engines):
+        synced = []
+        original_fsync = os.fsync
+
+        def record_fsync(fd):
+            synced.append(stat.S_IFMT(os.fstat(fd).st_mode))
+            original_fsync(fd)
+
+        with (
+            patch("deploy.backup_restore.engines", return_value=self.engines),
+            patch("deploy.backup_restore.os.fsync", side_effect=record_fsync),
+        ):
             backup(compose, archive)
+        self.assertEqual(synced, [stat.S_IFREG, stat.S_IFDIR])
         self.assertEqual(stat.S_IMODE(archive.stat().st_mode), 0o600)
         self.assertEqual(self.unpack(archive)["application"], self.metadata)
 

@@ -19,6 +19,44 @@ from app.graph.repository import get_graph_store
 from app.graph.schema import GraphSnapshot
 from sqlalchemy import func, select, text
 
+MAX_GRAPH_BYTES = 100_000_000
+MAX_REVISIONS = 1000
+MAX_TENANTS = 1000
+MAX_NODES = 100_000
+MAX_EDGES = 400_000
+
+
+def enforce_bounds(counts, payload_characters, tenants):
+    if (
+        counts["revisions"] > MAX_REVISIONS
+        or tenants > MAX_TENANTS
+        or counts["nodes"] > MAX_NODES
+        or counts["edges"] > MAX_EDGES
+        # UTF-8 upper bound plus conservative envelope/pointer overhead.
+        or payload_characters * 4 + counts["revisions"] * 2000 + tenants * 2000 > MAX_GRAPH_BYTES
+    ):
+        raise ValueError("Logical backup exceeds supported graph bounds")
+
+
+def preflight(graph):
+    with session_factory()() as db:
+        tenants = db.scalar(select(func.count()).select_from(TenantState))
+    with graph.driver.session() as session:
+        counts = {
+            "nodes": session.run("MATCH (n) RETURN count(n) AS count").single()["count"],
+            "edges": session.run("MATCH ()-[r]->() RETURN count(r) AS count").single()["count"],
+            "revisions": session.run("MATCH (s:Snapshot) RETURN count(s) AS count").single()["count"],
+        }
+        enforce_bounds(counts, 0, tenants)
+        queries = [
+            "MATCH (n:Entity) RETURN sum(size(n.payload)) AS size",
+            "MATCH ()-[r]->() RETURN sum(size(r.payload)) AS size",
+            "MATCH (s:Snapshot) RETURN sum(size(s.tenant_id)+size(s.revision)+size(s.source)) AS size",
+            "MATCH (s:Snapshot) UNWIND s.warnings AS warning RETURN sum(size(warning)) AS size",
+        ]
+        characters = sum((session.run(query).single()["size"] or 0) for query in queries)
+        enforce_bounds(counts, characters, tenants)
+
 
 def runtime():
     if get_settings().graph_vendor != "memgraph":
@@ -133,6 +171,7 @@ def execute(action):
         return {"empty": True}
     if action != "export":
         raise ValueError("Unknown operation")
+    preflight(graph)
     with graph.driver.session() as session:
         revisions = [
             dict(record)
@@ -147,7 +186,7 @@ def execute(action):
             {
                 "tenant": item["tenant"],
                 "revision": item["revision"],
-                "graph": graph.snapshot(item["tenant"], item["revision"]).model_dump(mode="json"),
+                "graph": canonical_graph(graph.snapshot(item["tenant"], item["revision"])),
                 "retention": {
                     key: item["properties"][key] for key in ("created_at_ms",) if key in item["properties"]
                 },
@@ -165,9 +204,19 @@ def execute(action):
     return validate(data)
 
 
+def canonical_graph(snapshot):
+    # Cypher MATCH does not guarantee row order. Compare logical content, not internal storage IDs.
+    return snapshot.model_copy(
+        update={
+            "nodes": sorted(snapshot.nodes, key=lambda node: node.id),
+            "edges": sorted(snapshot.edges, key=lambda edge: edge.id),
+        }
+    ).model_dump(mode="json")
+
+
 if __name__ == "__main__":
     try:
-        print(json.dumps(execute(sys.argv[1]), separators=(",", ":"), sort_keys=True))
+        print(json.dumps(execute(sys.argv[1]), separators=(",", ":"), sort_keys=True, ensure_ascii=False))
     except Exception:  # noqa: BLE001 - never expose sensitive driver diagnostics at this operator boundary
         # Do not print connector URLs, credentials, graph metadata or SQL payloads.
         print(
