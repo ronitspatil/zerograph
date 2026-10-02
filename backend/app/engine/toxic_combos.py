@@ -2,7 +2,7 @@ import hashlib
 
 from pydantic import BaseModel
 
-from app.engine.blast_radius import shortest_paths
+from app.engine.analysis_index import AnalysisIndex
 from app.graph.schema import DATA_TYPES, GraphSnapshot, Sensitivity
 
 
@@ -18,13 +18,15 @@ class Finding(BaseModel):
     recommendation: str
 
 
-def detect(snapshot: GraphSnapshot) -> list[Finding]:
-    nodes = {n.id: n for n in snapshot.nodes}
+def detect(snapshot: GraphSnapshot, index: AnalysisIndex | None = None) -> list[Finding]:
+    prepared = index or AnalysisIndex.build(snapshot, include_uncertain=True)
+    prepared.validate_for(snapshot, True)
+    nodes = prepared.nodes
     findings = []
     for source in snapshot.nodes:
         if not source.internet_exposed or source.authenticated:
             continue
-        paths = shortest_paths(snapshot, source.id, 5, include_uncertain=True)
+        paths = prepared.paths(source.id, 5)
         for target_id, path in paths.items():
             target = nodes[target_id]
             if target.type not in DATA_TYPES:
@@ -36,11 +38,7 @@ def detect(snapshot: GraphSnapshot) -> list[Finding]:
             matched = []
             uncertain = False
             for a, b in zip(path, path[1:], strict=False):
-                candidates = [
-                    e
-                    for e in snapshot.edges
-                    if e.source == a and e.target == b and e.type.value != "STORES_PII"
-                ]
+                candidates = prepared.edge_pairs.get((a, b), [])
                 confirmed = [e for e in candidates if e.certainty == "confirmed"]
                 chosen = confirmed or candidates
                 uncertain |= not bool(confirmed)
