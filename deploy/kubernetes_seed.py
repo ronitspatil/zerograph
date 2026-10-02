@@ -9,6 +9,7 @@ from app.db.models import TenantState
 from app.db.session import session_factory
 from app.graph.repository import get_graph_store
 from app.graph.schema import Edge, GraphSnapshot, Node
+from redis import Redis
 from sqlalchemy import select, text
 
 TENANT = "kubernetes-synthetic"
@@ -21,6 +22,11 @@ def main():
     assert os.getuid() == 10001
     assert os.statvfs("/").f_flag & os.ST_RDONLY
     graph = get_graph_store()
+    redis = Redis.from_url(settings.redis_url, socket_timeout=3)
+    if sys.argv[1] == "seed":
+        assert redis.get("kubernetes-qualification:proof") is None
+        redis.set("kubernetes-qualification:proof", "synthetic-v1")
+    assert redis.get("kubernetes-qualification:proof") == b"synthetic-v1"
     with session_factory()() as db:
         head = db.scalar(text("SELECT version_num FROM alembic_version"))
         assert head == "0002"
@@ -53,6 +59,7 @@ def main():
             ).single()
             assert isinstance(row["created"], int)
     graph.close()
+    redis.close()
     print(json.dumps({"migration_head": head, "revision": REVISION, "nodes": 2, "edges": 1}))
 
 
