@@ -208,3 +208,76 @@ def test_postgres_upgrade_preserves_legacy_outbox(postgres_environment, monkeypa
         assert tasks._claim_job("legacy")
     finally:
         get_settings.cache_clear()
+
+
+def test_retention_protects_publication_pointer_with_real_tenant_lock(postgres_environment, monkeypatch):
+    from datetime import UTC, datetime
+
+    from app.graph import retention
+
+    factory, graph = postgres_environment
+    # Old revisions and pointer are synthetic and scoped to this disposable schema.
+    for index in range(8):
+        graph.publish("tenant", f"old-{index}", GraphSnapshot())
+        graph.created_at["tenant", f"old-{index}"] = index + 1
+    with factory() as db:
+        db.get(TenantState, "tenant").revision = "old-0"
+        db.commit()
+    monkeypatch.setattr(retention, "session_factory", lambda: factory)
+    monkeypatch.setattr(retention, "get_graph_store", lambda: graph)
+    deleting, release, published = Event(), Event(), Event()
+    original_delete = graph.delete_revision
+    original_publish = graph.publish
+
+    def paused_delete(*args):
+        deleting.set()
+        assert release.wait(timeout=10)
+        return original_delete(*args)
+
+    def observed_publish(*args):
+        published.set()
+        return original_publish(*args)
+
+    job_id = enqueue(factory)
+    with (
+        patch.object(graph, "delete_revision", side_effect=paused_delete),
+        patch.object(graph, "publish", side_effect=observed_publish),
+    ):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            cleanup = pool.submit(
+                retention.prune_revisions,
+                "tenant",
+                retention.RetentionPolicy(1, 2, 1),
+                apply=True,
+                timestamp=datetime.now(UTC),
+            )
+            assert deleting.wait(timeout=10)
+            ingestion = pool.submit(tasks.process_job, job_id)
+            # Worker can claim/collect, but cannot publish while retention owns
+            # the tenant row lock. This bounded wait tests exclusion, not speed.
+            assert not published.wait(timeout=0.2)
+            release.set()
+            result = cleanup.result(timeout=10)
+            ingestion.result(timeout=10)
+    assert result.deleted == ["old-5"]
+    assert ("tenant", "old-0") in graph.snapshots
+    with factory() as db:
+        state = db.get(TenantState, "tenant")
+        assert state.revision not in {"old-5", "old-0"}
+        assert graph.snapshot("tenant", state.revision).nodes
+        assert db.scalar(select(AuditEvent).where(AuditEvent.action == "graph.revision_deleted"))
+
+
+def test_retention_missing_or_recent_revisions_are_not_deleted(postgres_environment, monkeypatch):
+    from app.graph import retention
+
+    factory, graph = postgres_environment
+    monkeypatch.setattr(retention, "session_factory", lambda: factory)
+    monkeypatch.setattr(retention, "get_graph_store", lambda: graph)
+    for index in range(5):
+        graph.publish("tenant", f"new-{index}", GraphSnapshot())
+    result = retention.prune_revisions("tenant", retention.RetentionPolicy(1, 2, 2), apply=True)
+    assert result.deleted == []
+    assert len(graph.snapshots) == 5
+    with pytest.raises(ValueError, match="authoritative SQL state"):
+        retention.prune_revisions("unknown", apply=True)
