@@ -6,7 +6,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="ZG_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="ZG_", env_file=".env", extra="ignore", hide_input_in_errors=True
+    )
     environment: Literal["development", "test", "production"] = "development"
     demo_mode: bool = False
     demo_token: SecretStr = SecretStr("")
@@ -22,6 +24,8 @@ class Settings(BaseSettings):
     tenant_claim: str = "tenant_id"
     role_claim: str = "roles"
     query_timeout_seconds: int = Field(default=15, ge=1, le=120)
+    metrics_token: SecretStr = SecretStr("")
+    body_timeout_seconds: int = Field(default=30, ge=1, le=120)
     max_body_bytes: int = Field(default=4_000_000, ge=1024)
     max_nodes: int = Field(default=5000, ge=1, le=10000)
     aws_tenant_id: str = ""
@@ -39,6 +43,11 @@ class Settings(BaseSettings):
     def secure_configuration(self) -> "Settings":
         if self.demo_mode and len(self.demo_token.get_secret_value()) < 32:
             raise ValueError("Demo mode requires a random token of at least 32 characters")
+        metrics = self.metrics_token.get_secret_value()
+        if metrics and (len(metrics) < 32 or len(metrics) > 4096 or not metrics.isascii()):
+            raise ValueError("Metrics scraping requires an ASCII secret of 32 to 4096 characters")
+        if metrics and metrics in {self.demo_token.get_secret_value(), self.git_token.get_secret_value()}:
+            raise ValueError("Metrics scraping must use a separate secret")
         if self.environment == "production":
             if self.demo_mode or self.graph_vendor == "memory":
                 raise ValueError("Demo authentication and memory graphs are prohibited in production")
