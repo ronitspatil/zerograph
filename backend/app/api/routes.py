@@ -6,17 +6,18 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import select, text
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
 from app.collectors.execution_audit import AuditNormalization, normalize_cloudtrail
 from app.collectors.mcp_agent_collector import MCPInventory
 from app.collectors.tasks import ingest
-from app.core.auth import Actor, current_actor, require_role
+from app.core.auth import Actor, require_role
 from app.core.config import get_settings
 from app.db.models import AuditEvent, IngestionJob, Remediation, TenantState
 from app.db.session import audit, get_db
+from app.engine.analysis_index import AnalysisIndex
 from app.engine.blast_radius import BlastRadius, calculate
 from app.engine.toxic_combos import Finding, detect
 from app.graph.repository import GraphStore, get_graph_store
@@ -24,10 +25,12 @@ from app.graph.schema import IDENTITY_TYPES, GraphSnapshot, Node, NodeType
 from app.remediation.gitops_sync import GitOpsClient, GitOpsError
 from app.remediation.policy_optimizer import Optimization, UsageEvidence, optimize, terraform_policy
 
+SNAPSHOT_LOCK_TIMEOUT_MS = 5000
+
 router = APIRouter(prefix="/api/v1")
 DB = Annotated[Session, Depends(get_db)]
 Graph = Annotated[GraphStore, Depends(get_graph_store)]
-Viewer = Annotated[Actor, Depends(current_actor)]
+Viewer = Annotated[Actor, Depends(require_role("viewer"))]
 Analyst = Annotated[Actor, Depends(require_role("analyst"))]
 Admin = Annotated[Actor, Depends(require_role("admin"))]
 
@@ -37,7 +40,29 @@ def tenant_state(db: Session, tenant: str) -> TenantState | None:
 
 
 def load_snapshot(db: Session, graph: GraphStore, tenant: str) -> tuple[GraphSnapshot, str]:
-    state = tenant_state(db, tenant)
+    # Pin the authoritative pointer for this request transaction. Publishers and
+    # retention use FOR UPDATE, so the graph cannot disappear or advance while
+    # snapshot and subsequent shortest-path queries materialize. Refresh any
+    # identity-map entry loaded before the lock was acquired.
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(
+            text("SELECT set_config('lock_timeout', :timeout, true)"),
+            {"timeout": f"{SNAPSHOT_LOCK_TIMEOUT_MS}ms"},
+        )
+    try:
+        state = db.execute(
+            select(TenantState)
+            .where(TenantState.tenant_id == tenant)
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+    except DBAPIError as exc:
+        if getattr(exc.orig, "sqlstate", None) != "55P03":
+            raise
+        db.rollback()
+        raise HTTPException(
+            503, "Graph publication or maintenance is busy; retry shortly", headers={"Retry-After": "5"}
+        ) from None
     revision = state.revision if state else ""
     return graph.snapshot(tenant, revision), revision
 
@@ -81,10 +106,11 @@ def graph_view(
 @router.get("/overview")
 def overview(db: DB, graph: Graph, actor: Viewer):
     snapshot, revision = load_snapshot(db, graph, actor.tenant_id)
-    findings = detect(snapshot)
+    prepared = AnalysisIndex.build(snapshot, include_uncertain=True)
+    findings = detect(snapshot, index=prepared)
     identities = [n for n in snapshot.nodes if n.type in IDENTITY_TYPES]
     # Count identities with sensitive reachable assets. Full scores are computed on demand.
-    high_blast = sum(calculate(snapshot, n.id, include_uncertain=True).risk_score >= 70 for n in identities)
+    high_blast = sum(prepared.score(n.id, prepared.paths(n.id))[0] >= 70 for n in identities)
     return {
         "revision": revision,
         "total_nhis": len(identities),

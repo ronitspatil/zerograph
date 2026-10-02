@@ -33,3 +33,9 @@ ingress:
   className: nginx
   host: zerograph.example.com
   tlsSecret: zerograph-tls
+
+# Requires pre-installed Prometheus Operator CRDs; no monitoring service is installed.
+monitoring:
+  enabled: false
+  interval: 30s
+  labels: {}

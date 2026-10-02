@@ -56,6 +56,8 @@ Build and push the two images, set image names in your values file, configure OI
 
 The service account disables automatic Kubernetes API tokens. If using workload identity, configure the provider's projected token mechanism and required egress policies. Apply ingress size/rate limits and namespace NetworkPolicies appropriate to your infrastructure. Back up both PostgreSQL and the graph store; their revision relationship is needed for recovery.
 
+The migration hook applies the same non-root, read-only filesystem and capability restrictions as application containers. ConfigMap changes trigger a workload rollout through a pod-template checksum. Changes to an external Secret require an explicit rollout after rotation; secret contents are not rendered or hashed by the chart. Web startup probes allow initial startup before liveness checks begin. The migration ConfigMap is a retained pre-install/pre-upgrade hook resource and must be included in uninstall cleanup if no longer needed.
+
 ## Validation
 
 Use Python 3.12 for the backend:
@@ -68,5 +70,9 @@ backend/.venv/bin/pip install -r backend/requirements-dev.lock -e backend
 ```
 
 Set `ZG_INTEGRATION_GRAPH=neo4j` or `memgraph` and `ZG_GRAPH_URI` to a disposable graph instance to run `backend/tests/test_graph_integration.py`. The test creates a unique namespace and removes only its own test nodes. CI runs the integration test against both database images.
+
+CI also builds the Docker images and starts the complete Compose stack with disposable volumes. `test_stack_e2e.py` exercises the built frontend, cookie session, asynchronous demo ingestion through Celery/Redis, SQL/graph persistence, blast-radius analysis, and remediation review. CI then restarts PostgreSQL, Redis and Memgraph and verifies that the graph revision, remediation and audit records survive without re-ingestion. Failure logs are bounded, and stack cleanup runs even if checks fail. This proves the local demo deployment; it does not validate production OIDC, live cloud credentials, or Kubernetes installation.
+
+To reproduce, generate a disposable `.env`, run `docker compose up --build --detach --wait --wait-timeout 240`, and run `ZG_E2E_URL=http://localhost:3100 backend/.venv/bin/pytest backend/tests/test_stack_e2e.py -v --no-cov`. Use a disposable Compose project; the test adds synthetic demo data. Run `docker compose down --volumes` only when its volumes are disposable. With Helm and PyYAML installed, run `helm lint deploy/helm/zerograph --strict` and `python3 -m unittest discover -s deploy/tests -v` to verify rendered resources and configuration rollouts without a cluster.
 
 The console uses Next.js 15.5.24 and React 19 rather than the originally proposed Next.js 14 and React 18. The change avoids advisories without fixes in the older Next.js major. Dependency lockfiles pin the backend and frontend installations; frontend overrides select a patched PostCSS version.

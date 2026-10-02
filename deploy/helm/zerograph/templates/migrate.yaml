@@ -12,6 +12,7 @@ spec:
   template:
     spec:
       restartPolicy: OnFailure
+      automountServiceAccountToken: false
       securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001}
       containers:
         - name: migrate
@@ -20,3 +21,14 @@ spec:
           envFrom:
             - configMapRef: {name: {{ .Release.Name }}-config}
             - secretRef: {name: {{ .Values.secretName }}}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+{{ toYaml .Values.resources | indent 12 }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 128Mi}

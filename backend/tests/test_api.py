@@ -163,12 +163,21 @@ def test_preview_and_terraform_export(client):
 def test_cross_tenant_job_and_remediation_are_not_found(client, environment):
     response = client.post("/api/v1/remediations/preview", json=preview_payload())
     rid = response.json()["id"]
+    with patch("app.api.routes.ingest.delay"):
+        jid = client.post(
+            "/api/v1/ingestions",
+            json={"source": "snapshot", "payload": demo_snapshot().model_dump(mode="json")},
+        ).json()["id"]
     app = create_app()
     app.dependency_overrides[current_actor] = lambda: Actor("bob", "tenant-b", frozenset({"admin"}))
     with TestClient(app) as other:
         assert other.get(f"/api/v1/remediations/{rid}/terraform").status_code == 404
         assert other.post(f"/api/v1/remediations/{rid}/pr").status_code == 404
-        assert other.get("/api/v1/ingestions/missing").status_code == 404
+        assert other.get(f"/api/v1/ingestions/{jid}").status_code == 404
+        assert other.get("/api/v1/ingestions").json() == []
+        assert other.get("/api/v1/remediations").json() == []
+        assert other.get("/api/v1/audit").json() == []
+        assert other.post("/api/v1/simulate", json={"node_id": "agent:support"}).status_code == 404
 
 
 def test_stale_graph_blocks_pr(client, environment):

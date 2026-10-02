@@ -69,3 +69,22 @@ def test_session_ingestion_simulation_and_remediation():
         assert any(e["action"] == "remediation.previewed" for e in client.get("/api/zg/audit").json())
         assert client.post("/api/auth/logout").status_code == 200
         assert client.get("/api/zg/me").status_code == 401
+
+
+@pytest.mark.skipif(
+    not os.getenv("ZG_E2E_URL") or os.getenv("ZG_E2E_VERIFY_PERSISTENCE") != "true",
+    reason="Requires an already ingested disposable stack after database restart",
+)
+def test_snapshot_and_remediation_survive_database_restart():
+    base = os.environ["ZG_E2E_URL"].rstrip("/")
+    with httpx.Client(base_url=base, timeout=15, headers={"Origin": base}) as client:
+        assert client.post("/api/auth/demo").status_code == 200
+        graph = client.get("/api/zg/graph")
+        assert graph.status_code == 200, graph.text
+        assert len(graph.json()["nodes"]) >= 12
+        assert len(client.get("/api/zg/findings").json()) == 3
+        remediations = client.get("/api/zg/remediations")
+        assert remediations.status_code == 200, remediations.text
+        assert len(remediations.json()) >= 1
+        assert any(e["action"] == "remediation.previewed" for e in client.get("/api/zg/audit").json())
+        assert client.post("/api/auth/logout").status_code == 200

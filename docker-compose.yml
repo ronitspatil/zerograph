@@ -30,7 +30,7 @@ services:
     restart: unless-stopped
   memgraph:
     image: memgraph/memgraph:3.2.0
-    command: ["--storage-wal-enabled=true", "--storage-snapshot-interval-sec=300", "--storage-recover-on-startup=true"]
+    command: ["--storage-wal-enabled=true", "--storage-snapshot-interval-sec=300", "--data-recovery-on-startup=true"]
     volumes: [graph-data:/var/lib/memgraph]
     networks: [internal]
     healthcheck:

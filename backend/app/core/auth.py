@@ -22,7 +22,7 @@ class Actor:
 
 @lru_cache
 def jwks_client(url: str) -> PyJWKClient:
-    return PyJWKClient(url, cache_keys=True, lifespan=300, timeout=5)
+    return PyJWKClient(url, cache_keys=False, lifespan=300, timeout=5)
 
 
 def current_actor(credentials: HTTPAuthorizationCredentials | None = Depends(bearer)) -> Actor:
@@ -30,6 +30,8 @@ def current_actor(credentials: HTTPAuthorizationCredentials | None = Depends(bea
         raise HTTPException(401, "Authentication required", headers={"WWW-Authenticate": "Bearer"})
     settings = get_settings()
     token = credentials.credentials
+    if len(token) > 16_384 or not token.isascii():
+        raise HTTPException(401, "Invalid access token", headers={"WWW-Authenticate": "Bearer"})
     if settings.demo_mode and hmac.compare_digest(token, settings.demo_token.get_secret_value()):
         enforce_rate_limit("demo", "demo-user")
         return Actor("demo-user", "demo", frozenset({"viewer", "analyst", "admin"}))
@@ -50,7 +52,12 @@ def current_actor(credentials: HTTPAuthorizationCredentials | None = Depends(bea
         roles = claims.get(settings.role_claim, [])
         if not isinstance(tenant, str) or not tenant or len(tenant) > 128:
             raise ValueError("Invalid tenant claim")
-        if not isinstance(roles, list) or not all(isinstance(r, str) for r in roles):
+        subject = claims["sub"]
+        if not isinstance(subject, str) or not subject.strip() or len(subject) > 256:
+            raise ValueError("Invalid subject claim")
+        if not isinstance(roles, list) or len(roles) > 64 or not all(
+            isinstance(r, str) and len(r) <= 128 for r in roles
+        ):
             raise ValueError("Invalid role claim")
         enforce_rate_limit(tenant, claims["sub"])
         return Actor(claims["sub"], tenant, frozenset(roles))
@@ -60,7 +67,10 @@ def current_actor(credentials: HTTPAuthorizationCredentials | None = Depends(bea
 
 def require_role(role: str):
     def authorize(actor: Actor = Depends(current_actor)) -> Actor:
-        if role not in actor.roles and "admin" not in actor.roles:
+        allowed = {role, "admin"}
+        if role == "viewer":
+            allowed.add("analyst")
+        if not actor.roles.intersection(allowed):
             raise HTTPException(403, f"{role} role required")
         return actor
 
