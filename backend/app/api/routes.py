@@ -340,6 +340,8 @@ def create_pr(remediation_id: str, db: DB, actor: Admin):
     )
 
     def refresh():
+        if db.get_bind().dialect.name == "postgresql":
+            db.execute(text("SELECT set_config('lock_timeout', :timeout, true)"), {"timeout": "5000ms"})
         record = db.execute(statement).scalar_one_or_none()
         if record is None:
             raise HTTPException(404, "Remediation not found")
@@ -397,6 +399,13 @@ def create_pr(remediation_id: str, db: DB, actor: Admin):
         raise HTTPException(409, str(exc)) from None
     except GitOpsError as exc:
         raise HTTPException(502, str(exc)) from None
+    except DBAPIError as exc:
+        if getattr(exc.orig, "sqlstate", None) != "55P03":
+            raise
+        db.rollback()
+        raise HTTPException(
+            503, "Proposal or graph publication is busy; retry shortly", headers={"Retry-After": "5"}
+        ) from None
     finally:
         if client is not None:
             client.close()

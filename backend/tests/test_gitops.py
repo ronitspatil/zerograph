@@ -303,3 +303,212 @@ def test_invalid_destination_rejected(attribute, value):
 def test_missing_config_rejected():
     with pytest.raises(GitOpsError):
         GitOpsClient(Settings(environment="test", demo_mode=False))
+
+
+class Chunks(httpx.SyncByteStream):
+    def __init__(self):
+        self.reads, self.closed = 0, False
+
+    def __iter__(self):
+        for _ in range(5):
+            self.reads += 1
+            yield b" " * 400_000
+
+    def close(self):
+        self.closed = True
+
+
+def test_stream_size_limit_stops_reading_and_closes_response():
+    chunks = Chunks()
+
+    def handler(_request):
+        return httpx.Response(200, headers={"content-type": "application/json"}, stream=chunks)
+
+    with pytest.raises(GitOpsError, match="request budget"):
+        GitOpsClient(settings(), httpx.MockTransport(handler)).create_pr(RID, TENANT, CONTENT)
+    assert chunks.reads == 3 and chunks.closed
+
+
+def test_declared_size_limit_rejects_before_reading_stream():
+    chunks = Chunks()
+
+    def handler(_request):
+        return httpx.Response(
+            200, headers={"content-type": "application/json", "content-length": "1000001"}, stream=chunks
+        )
+
+    with pytest.raises(GitOpsError, match="supported size"):
+        GitOpsClient(settings(), httpx.MockTransport(handler)).create_pr(RID, TENANT, CONTENT)
+    assert chunks.reads == 0 and chunks.closed
+
+
+def test_excessively_nested_json_is_sanitized():
+    response = b"[" * 2000 + b"]" * 2000
+    with pytest.raises(GitOpsError) as error:
+        GitOpsClient(
+            settings(),
+            httpx.MockTransport(
+                lambda _request: httpx.Response(
+                    200, content=response, headers={"content-type": "application/json"}
+                )
+            ),
+        ).create_pr(RID, TENANT, CONTENT)
+    assert str(error.value) in {"GitOps request failed; retry the same proposal", "Malformed provider response"}
+
+
+def test_request_and_elapsed_deadline_budget(monkeypatch):
+    remote = Provider("github")
+    monkeypatch.setattr("app.remediation.gitops_sync.MAX_REQUESTS", 1)
+    with pytest.raises(GitOpsError, match="budget exhausted"):
+        remote.client().create_pr(RID, TENANT, CONTENT)
+    assert not remote.writes
+    monkeypatch.setattr("app.remediation.gitops_sync.MAX_REQUESTS", 20)
+    monkeypatch.setattr("app.remediation.gitops_sync.DEADLINE_SECONDS", 0)
+    with pytest.raises(GitOpsError, match="budget exhausted"):
+        remote.client().create_pr(RID, TENANT, CONTENT)
+    assert not remote.writes
+
+
+@pytest.fixture
+def gitops_postgres(monkeypatch):
+    import os
+    from uuid import uuid4
+
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import sessionmaker
+
+    from app.api import routes
+    from app.db.models import Base, Remediation, TenantState
+
+    url = os.getenv("ZG_INGESTION_POSTGRES_URL")
+    if not url:
+        pytest.skip("No disposable PostgreSQL integration database configured")
+    namespace = "zg_gitops_" + uuid4().hex
+    admin = create_engine(url)
+    with admin.begin() as db:
+        db.execute(text(f'CREATE SCHEMA "{namespace}"'))
+    engine = create_engine(
+        url, connect_args={"options": f"-csearch_path={namespace} -capplication_name={namespace}"}
+    )
+    factory = sessionmaker(engine, expire_on_commit=False)
+    Base.metadata.create_all(engine)
+    config = settings()
+    config.git_tenant_id = "tenant-a"
+    monkeypatch.setattr(routes, "get_settings", lambda: config)
+    with factory() as db:
+        db.add(TenantState(tenant_id="tenant-a", revision="revision-a"))
+        db.add(
+            Remediation(
+                id=RID,
+                tenant_id="tenant-a",
+                actor="test",
+                identity_id="identity",
+                original={"old": True},
+                optimized={"old": False},
+                evidence={"revision": "revision-a"},
+            )
+        )
+        db.commit()
+    try:
+        yield factory, admin, namespace
+    finally:
+        engine.dispose()
+        with admin.begin() as db:
+            db.execute(text(f'DROP SCHEMA "{namespace}" CASCADE'))
+        admin.dispose()
+
+
+def test_postgres_concurrent_same_proposal_serializes_remote_call(gitops_postgres, monkeypatch):
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from sqlalchemy import text
+
+    from app.api import routes
+    from app.core.auth import Actor
+    from app.remediation.gitops_sync import PullRequest
+
+    factory, admin, namespace = gitops_postgres
+    entered, release = Event(), Event()
+    calls = []
+
+    class Client:
+        def __init__(self, config):
+            self.config = config
+
+        def scope(self, *args):
+            actual = GitOpsClient(
+                self.config, httpx.MockTransport(lambda _request: pytest.fail("Unexpected remote request"))
+            )
+            try:
+                return actual.scope(*args)
+            finally:
+                actual.close()
+
+        def close(self):
+            pass
+
+        def create_pr(self, *args):
+            calls.append(args)
+            entered.set()
+            assert release.wait(4)
+            return PullRequest("https://github.com/acme/policies/pull/1", BRANCH)
+
+    monkeypatch.setattr(routes, "GitOpsClient", Client)
+    actor = Actor("test", "tenant-a", frozenset({"admin"}))
+
+    def request():
+        with factory() as db:
+            return routes.create_pr(RID, db, actor)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(request)
+        assert entered.wait(3)
+        second = pool.submit(request)
+        try:
+            waiting = False
+            for _attempt in range(100):
+                with admin.connect() as db:
+                    waiting = (
+                        db.scalar(
+                            text(
+                                "SELECT count(*) FROM pg_stat_activity WHERE application_name=:name AND wait_event_type='Lock'"
+                            ),
+                            {"name": namespace},
+                        )
+                        > 0
+                    )
+                if waiting:
+                    break
+                time.sleep(0.01)
+            assert waiting, "Second request must actually wait on PostgreSQL row lock"
+        finally:
+            release.set()
+        assert first.result(timeout=3) == second.result(timeout=3)
+    assert len(calls) == 1
+
+
+def test_postgres_publisher_lock_is_bounded_retryable_and_rolls_back(gitops_postgres):
+    import time
+
+    from fastapi import HTTPException
+    from sqlalchemy import select
+
+    from app.api import routes
+    from app.core.auth import Actor
+    from app.db.models import Remediation, TenantState
+
+    factory, _admin, _namespace = gitops_postgres
+    with factory() as publisher, factory() as request_db:
+        publisher.execute(select(TenantState).with_for_update()).scalar_one()
+        started = time.monotonic()
+        with pytest.raises(HTTPException) as error:
+            routes.create_pr(RID, request_db, Actor("test", "tenant-a", frozenset({"admin"})))
+        assert error.value.status_code == 503
+        assert error.value.headers == {"Retry-After": "5"}
+        assert 4.5 <= time.monotonic() - started < 8
+        assert not request_db.in_transaction()
+        publisher.rollback()
+    with factory() as db:
+        assert "gitops_scope" not in db.get(Remediation, RID).evidence
