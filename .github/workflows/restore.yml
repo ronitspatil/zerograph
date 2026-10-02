@@ -1,0 +1,59 @@
+name: ZeroGraph restore drill
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  restore-drill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      ZG_E2E_URL: http://localhost:3100
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -r backend/requirements-dev.lock -e backend
+      - run: ruff check --config backend/pyproject.toml deploy
+      - run: python -m unittest deploy.tests.test_backup_restore -v
+      - run: python deploy/init_env.py
+      - name: Populate disposable source stack
+        run: |
+          docker compose --project-name zerograph-restore-source up --build --detach --wait --wait-timeout 240
+          ZG_E2E_URL=http://localhost:3100 pytest backend/tests/test_stack_e2e.py --no-cov -v
+      - name: Drain writers and seed durable pending work
+        run: |
+          docker compose --project-name zerograph-restore-source stop --timeout 900 frontend scheduler backend worker
+          docker compose --project-name zerograph-restore-source run --rm --no-deps -T backend python -c '
+          from app.db.models import IngestionJob
+          from app.db.session import session_factory
+          with session_factory()() as db:
+              db.add(IngestionJob(id="restore-queued-proof", tenant_id="demo", actor="restore-drill", source="demo", payload={}))
+              db.commit()
+          '
+      - name: Create and verify coordinated archive
+        run: |
+          python deploy/backup_restore.py backup --project zerograph-restore-source --archive /tmp/zerograph-restore.zip
+          python deploy/backup_restore.py verify --archive /tmp/zerograph-restore.zip
+      - name: Restore into fresh disposable volumes
+        run: |
+          docker compose --project-name zerograph-restore-source down --volumes --remove-orphans
+          docker compose --project-name zerograph-restore-target up --detach --wait --wait-timeout 240 postgres memgraph redis
+          python deploy/backup_restore.py restore --project zerograph-restore-target --archive /tmp/zerograph-restore.zip
+      - name: Resume target and verify data and durable job recovery
+        run: |
+          docker compose --project-name zerograph-restore-target up --detach --wait --wait-timeout 240
+          ZG_E2E_VERIFY_PERSISTENCE=true pytest backend/tests/test_stack_e2e.py -k survive_database_restart --no-cov -v
+          ZG_RESTORE_E2E=true pytest backend/tests/test_restore_e2e.py --no-cov -v
+      - name: Capture bounded diagnostics
+        if: failure()
+        run: |
+          docker compose --project-name zerograph-restore-source ps --all
+          docker compose --project-name zerograph-restore-source logs --no-color --tail 100
+          docker compose --project-name zerograph-restore-target ps --all
+          docker compose --project-name zerograph-restore-target logs --no-color --tail 100
+      - name: Remove only disposable projects and sensitive archive
+        if: always()
+        run: |
+          docker compose --project-name zerograph-restore-source down --volumes --remove-orphans
+          docker compose --project-name zerograph-restore-target down --volumes --remove-orphans
+          rm -f /tmp/zerograph-restore.zip
