@@ -22,7 +22,7 @@ from app.engine.blast_radius import BlastRadius, calculate
 from app.engine.toxic_combos import Finding, detect
 from app.graph.repository import GraphStore, get_graph_store
 from app.graph.schema import IDENTITY_TYPES, GraphSnapshot, Node, NodeType
-from app.remediation.gitops_sync import GitOpsClient, GitOpsError
+from app.remediation.gitops_sync import GitOpsClient, GitOpsConflict, GitOpsError
 from app.remediation.policy_optimizer import Optimization, UsageEvidence, optimize, terraform_policy
 
 SNAPSHOT_LOCK_TIMEOUT_MS = 5000
@@ -332,36 +332,74 @@ def export_terraform(remediation_id: str, db: DB, actor: Viewer):
 
 @router.post("/remediations/{remediation_id}/pr")
 def create_pr(remediation_id: str, db: DB, actor: Admin):
-    record = db.execute(
+    statement = (
         select(Remediation)
         .where(Remediation.id == remediation_id, Remediation.tenant_id == actor.tenant_id)
         .with_for_update()
-    ).scalar_one_or_none()
-    if record is None:
-        raise HTTPException(404, "Remediation not found")
-    if record.pr_url:
-        return {"url": record.pr_url, "status": record.status}
-    if record.original == record.optimized:
-        raise HTTPException(409, "No policy reduction to propose")
-    state = tenant_state(db, actor.tenant_id)
-    if not state or state.revision != record.evidence.get("revision"):
-        raise HTTPException(409, "Graph changed since preview; generate a fresh proposal")
-    settings = get_settings()
-    if settings.git_repository and settings.git_tenant_id != actor.tenant_id:
-        raise HTTPException(403, "GitOps destination is not configured for this tenant")
+        .execution_options(populate_existing=True)
+    )
+
+    def refresh():
+        record = db.execute(statement).scalar_one_or_none()
+        if record is None:
+            raise HTTPException(404, "Remediation not found")
+        return record
+
+    def validate(record, settings):
+        if record.original == record.optimized:
+            raise HTTPException(409, "No policy reduction to propose")
+        state = db.execute(
+            select(TenantState)
+            .where(TenantState.tenant_id == actor.tenant_id)
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+        if not state or state.revision != record.evidence.get("revision"):
+            raise HTTPException(409, "Graph changed since preview; generate a fresh proposal")
+        if settings.git_repository and settings.git_tenant_id != actor.tenant_id:
+            raise HTTPException(403, "GitOps destination is not configured for this tenant")
+
+    client = None
     try:
-        pr = GitOpsClient(settings).create_pr(
-            record.id,
-            hashlib.sha256(actor.tenant_id.encode()).hexdigest()[:16],
-            json.dumps(record.optimized, indent=2) + "\n",
-        )
+        record = refresh()
+        if record.pr_url:
+            return {"url": record.pr_url, "status": record.status}
+        settings = get_settings()
+        validate(record, settings)
+        client = GitOpsClient(settings)
+        tenant_key = hashlib.sha256(actor.tenant_id.encode()).hexdigest()[:16]
+        content = json.dumps(record.optimized, indent=2, sort_keys=True) + "\n"
+        scope = client.scope(record.id, tenant_key, content)
+        previous = record.evidence.get("gitops_scope")
+        if previous is not None and previous != scope:
+            raise HTTPException(409, "Proposal destination or content changed; generate a fresh preview")
+        if previous is None:
+            record.evidence = {**record.evidence, "gitops_scope": scope}
+            audit(db, actor, "remediation.pr_requested", {"remediation_id": record.id, "scope": scope})
+            db.commit()  # Durable intent precedes any provider side effects; releases the row lock.
+            record = refresh()  # Refresh after reacquiring: another request may have completed.
+            if record.pr_url:
+                return {"url": record.pr_url, "status": record.status}
+            settings = get_settings()
+            validate(record, settings)
+            client.close()
+            client = GitOpsClient(settings)
+            content = json.dumps(record.optimized, indent=2, sort_keys=True) + "\n"
+            scope = client.scope(record.id, tenant_key, content)
+            if record.evidence.get("gitops_scope") != scope:
+                raise HTTPException(409, "Proposal destination or content changed; generate a fresh preview")
+        pr = client.create_pr(record.id, tenant_key, content)
+        record.pr_url, record.status = pr.url, "pr_opened"
+        audit(db, actor, "remediation.pr_opened", {"remediation_id": record.id, "url": pr.url})
+        db.commit()
+        return {"url": pr.url, "status": record.status}
+    except GitOpsConflict as exc:
+        raise HTTPException(409, str(exc)) from None
     except GitOpsError as exc:
-        raise HTTPException(502, str(exc)) from exc
-    record.pr_url = pr.url
-    record.status = "pr_opened"
-    audit(db, actor, "remediation.pr_opened", {"remediation_id": record.id, "url": pr.url})
-    db.commit()
-    return {"url": pr.url, "status": record.status}
+        raise HTTPException(502, str(exc)) from None
+    finally:
+        if client is not None:
+            client.close()
 
 
 @router.get("/audit")
