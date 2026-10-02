@@ -198,3 +198,111 @@ def test_gitops_destination_cannot_be_used_by_another_tenant(client, monkeypatch
     get_settings.cache_clear()
     assert client.post(f"/api/v1/remediations/{rid}/pr").status_code == 403
     get_settings.cache_clear()
+
+
+def gitops_test_destination(monkeypatch):
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("ZG_GIT_REPOSITORY", "acme/policies")
+    monkeypatch.setenv("ZG_GIT_TENANT_ID", "tenant-a")
+    monkeypatch.setenv("ZG_GIT_TOKEN", "dedicated-test-token")
+    get_settings.cache_clear()
+
+
+def test_gitops_intent_persists_after_provider_timeout_and_scope_change_refused(
+    client, environment, monkeypatch
+):
+    import hashlib
+
+    import httpx
+    from test_gitops import Provider
+
+    from app.api import routes
+    from app.core.config import get_settings
+    from app.db.models import Remediation
+    from app.remediation.gitops_sync import GitOpsClient
+
+    gitops_test_destination(monkeypatch)
+    rid = client.post("/api/v1/remediations/preview", json=preview_payload()).json()["id"]
+    remote = Provider("github", rid, hashlib.sha256(b"tenant-a").hexdigest()[:16])
+    remote.fail_after = "file"
+    factory, _ = environment
+
+    def constructor(config):
+        def transport(request):
+            with factory() as db:
+                record = db.get(Remediation, rid)
+                assert record.evidence["gitops_scope"]["repository"] == "acme/policies"
+            return remote(request)
+
+        return GitOpsClient(config, httpx.MockTransport(transport))
+
+    monkeypatch.setattr(routes, "GitOpsClient", constructor)
+    response = client.post(f"/api/v1/remediations/{rid}/pr")
+    assert response.status_code == 502
+    writes = len(remote.writes)
+    with factory() as db:
+        record = db.get(Remediation, rid)
+        scope = record.evidence["gitops_scope"]
+        assert record.pr_url is None
+        assert "dedicated-test-token" not in str(scope)
+        assert "s3:GetObject" not in str(scope)
+    monkeypatch.setenv("ZG_GIT_BASE_BRANCH", "new-base")
+    get_settings.cache_clear()
+    assert client.post(f"/api/v1/remediations/{rid}/pr").status_code == 409
+    assert len(remote.writes) == writes
+    monkeypatch.setenv("ZG_GIT_BASE_BRANCH", "main")
+    get_settings.cache_clear()
+    assert client.post(f"/api/v1/remediations/{rid}/pr").status_code == 200
+    assert len(remote.writes) == 3
+
+
+def test_remote_success_sql_result_failure_retry_has_zero_remote_mutations(client, environment, monkeypatch):
+    import hashlib
+
+    import httpx
+    from sqlalchemy.exc import SQLAlchemyError
+    from sqlalchemy.orm import Session
+    from test_gitops import Provider
+
+    from app.api import routes
+    from app.db.models import Remediation
+    from app.remediation.gitops_sync import GitOpsClient
+
+    gitops_test_destination(monkeypatch)
+    rid = client.post("/api/v1/remediations/preview", json=preview_payload()).json()["id"]
+    remote = Provider("gitlab", rid, hashlib.sha256(b"tenant-a").hexdigest()[:16])
+    monkeypatch.setenv("ZG_GIT_PROVIDER", "gitlab")
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        routes, "GitOpsClient", lambda config: GitOpsClient(config, httpx.MockTransport(remote))
+    )
+    original_commit = Session.commit
+    fail_once = True
+
+    def commit(db):
+        nonlocal fail_once
+        if fail_once and any(isinstance(item, Remediation) and item.pr_url for item in db.dirty):
+            fail_once = False
+            raise SQLAlchemyError("SECRET database error")
+        return original_commit(db)
+
+    monkeypatch.setattr(Session, "commit", commit)
+    with TestClient(client.app, raise_server_exceptions=False) as request_client:
+        first = request_client.post(f"/api/v1/remediations/{rid}/pr")
+        assert first.status_code == 500
+        assert "SECRET" not in first.text
+        writes = len(remote.writes)
+        assert writes == 3 and remote.review is not None
+        factory, _ = environment
+        with factory() as db:
+            record = db.get(Remediation, rid)
+            assert record.pr_url is None
+            assert record.evidence["gitops_scope"]["provider"] == "gitlab"
+        second = request_client.post(f"/api/v1/remediations/{rid}/pr")
+        assert second.status_code == 200
+        assert len(remote.writes) == writes
+        assert request_client.post(f"/api/v1/remediations/{rid}/pr").json() == second.json()
+        assert len(remote.writes) == writes
