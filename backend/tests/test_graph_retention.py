@@ -102,3 +102,16 @@ def test_creation_timestamp_not_changed_by_repeat_publish(environment):
     created_at = graph.created_at["tenant-a", "repeat"]
     graph.publish("tenant-a", "repeat", GraphSnapshot())
     assert graph.created_at["tenant-a", "repeat"] == created_at
+
+
+def test_snapshot_pin_preserves_non_lock_database_errors(environment):
+    from sqlalchemy.exc import DBAPIError
+
+    from app.api.routes import load_snapshot
+
+    factory, graph = environment
+    original = DBAPIError("synthetic query", {}, RuntimeError("unrelated database failure"))
+    with factory() as db, patch.object(db, "execute", side_effect=original):
+        with pytest.raises(DBAPIError) as raised:
+            load_snapshot(db, graph, "tenant-a")
+    assert raised.value is original

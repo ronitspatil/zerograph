@@ -6,8 +6,8 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import select, text
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
 from app.collectors.execution_audit import AuditNormalization, normalize_cloudtrail
@@ -23,6 +23,8 @@ from app.graph.repository import GraphStore, get_graph_store
 from app.graph.schema import IDENTITY_TYPES, GraphSnapshot, Node, NodeType
 from app.remediation.gitops_sync import GitOpsClient, GitOpsError
 from app.remediation.policy_optimizer import Optimization, UsageEvidence, optimize, terraform_policy
+
+SNAPSHOT_LOCK_TIMEOUT_MS = 5000
 
 router = APIRouter(prefix="/api/v1")
 DB = Annotated[Session, Depends(get_db)]
@@ -41,12 +43,25 @@ def load_snapshot(db: Session, graph: GraphStore, tenant: str) -> tuple[GraphSna
     # retention use FOR UPDATE, so the graph cannot disappear or advance while
     # snapshot and subsequent shortest-path queries materialize. Refresh any
     # identity-map entry loaded before the lock was acquired.
-    state = db.execute(
-        select(TenantState)
-        .where(TenantState.tenant_id == tenant)
-        .with_for_update(read=True)
-        .execution_options(populate_existing=True)
-    ).scalar_one_or_none()
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(
+            text("SELECT set_config('lock_timeout', :timeout, true)"),
+            {"timeout": f"{SNAPSHOT_LOCK_TIMEOUT_MS}ms"},
+        )
+    try:
+        state = db.execute(
+            select(TenantState)
+            .where(TenantState.tenant_id == tenant)
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+    except DBAPIError as exc:
+        if getattr(exc.orig, "sqlstate", None) != "55P03":
+            raise
+        db.rollback()
+        raise HTTPException(
+            503, "Graph publication or maintenance is busy; retry shortly", headers={"Retry-After": "5"}
+        ) from None
     revision = state.revision if state else ""
     return graph.snapshot(tenant, revision), revision
 

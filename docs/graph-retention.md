@@ -77,7 +77,10 @@ Do not run retention during backup/restore or while external tools write graph
 revisions or SQL tenant pointers outside the application's lock protocol. API graph readers pin the current SQL pointer using a shared tenant row lock
 held by the existing request database session through snapshot and shortest-path
 materialization. Publication and cleanup take an exclusive lock, so they wait
-for existing readers and new readers wait for cleanup. No read-drained window is
+for existing readers and new readers wait up to five seconds for cleanup or
+publication. A PostgreSQL lock acquisition timeout returns a sanitized HTTP503
+with `Retry-After: 5`; other database errors use the existing error handler.
+No read-drained window is
 required for the current API read paths. Locks end with request transaction
 completion/session closure; no long-lived reader registry is added. A future
 historical-snapshot or external reader must use an equivalent pinning policy.

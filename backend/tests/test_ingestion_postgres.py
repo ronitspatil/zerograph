@@ -435,3 +435,38 @@ def test_api_pointer_pin_refreshes_stale_identity_map(postgres_environment):
         assert revision == "new"
         assert stale.revision == "new"
         assert snapshot.nodes[0].id == "new"
+
+
+def test_api_pointer_pin_timeout_returns_sanitized_retry_response(postgres_environment, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.api import routes
+    from app.core.auth import Actor, current_actor
+    from app.db.session import get_db
+    from app.graph.repository import get_graph_store
+    from app.main import create_app
+
+    factory, graph = postgres_environment
+    monkeypatch.setattr(routes, "SNAPSHOT_LOCK_TIMEOUT_MS", 20)
+
+    def reader_db():
+        with factory() as db:
+            yield db
+
+    app = create_app()
+    app.dependency_overrides[get_db] = reader_db
+    app.dependency_overrides[get_graph_store] = lambda: graph
+    app.dependency_overrides[current_actor] = lambda: Actor("reader", "tenant", frozenset({"viewer"}))
+    with factory() as publisher:
+        publisher.execute(
+            select(TenantState).where(TenantState.tenant_id == "tenant").with_for_update()
+        ).scalar_one()
+        with TestClient(app) as client:
+            response = client.get("/api/v1/graph")
+        assert response.status_code == 503
+        assert response.headers["retry-after"] == "5"
+        assert response.json() == {"detail": "Graph publication or maintenance is busy; retry shortly"}
+        assert "SQL" not in response.text
+        assert "55P03" not in response.text
+    with TestClient(app) as client:
+        assert client.get("/api/v1/graph").status_code == 200
