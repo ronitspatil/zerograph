@@ -109,6 +109,31 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual(drill.env["KUBECONFIG"], str(Path(folder) / "kubeconfig"))
             self.assertEqual(drill.env["HELM_DATA_HOME"], str(Path(folder) / "helm-data"))
 
+    def test_docker_bootstrap_cannot_use_remote_context_or_credentials(self):
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            patch.dict(
+                os.environ,
+                {
+                    "DOCKER_HOST": "tcp://customer.example.com:2376",
+                    "DOCKER_CONTEXT": "customer",
+                    "DOCKER_CONFIG": "/customer/docker",
+                    "DOCKER_CERT_PATH": "/customer/certs",
+                    "DOCKER_TLS_VERIFY": "1",
+                },
+            ),
+        ):
+            drill = Drill(Path(folder))
+            self.assertEqual(drill.env["DOCKER_HOST"], "unix:///var/run/docker.sock")
+            self.assertEqual(drill.env["DOCKER_CONFIG"], str(Path(folder) / "docker-config"))
+            self.assertFalse(
+                any(key in drill.env for key in ("DOCKER_CONTEXT", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY"))
+            )
+            config_file = Path(drill.env["DOCKER_CONFIG"]) / "config.json"
+            self.assertEqual(config_file.read_text(), "{}")
+            self.assertEqual(config_file.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(config_file.parent.stat().st_mode & 0o777, 0o700)
+
     def test_commands_refuse_before_cluster_ownership(self):
         with tempfile.TemporaryDirectory() as folder:
             drill = Drill(Path(folder))
