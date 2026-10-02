@@ -134,6 +134,28 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual(config_file.stat().st_mode & 0o777, 0o600)
             self.assertEqual(config_file.parent.stat().st_mode & 0o777, 0o700)
 
+    def test_memgraph_fixture_uses_vendor_nonroot_volume_group(self):
+        with tempfile.TemporaryDirectory() as folder:
+            drill = Drill(Path(folder))
+            with (
+                patch.object(drill, "apply") as apply,
+                patch.object(drill, "kubectl"),
+                patch.object(drill, "get", return_value={"items": []}),
+            ):
+                drill.fixtures()
+            resources = apply.call_args.args[0]
+            graph = next(
+                r for r in resources if r["kind"] == "StatefulSet" and r["metadata"]["name"] == "memgraph"
+            )
+            self.assertEqual(
+                graph["spec"]["template"]["spec"]["securityContext"],
+                {"runAsUser": 101, "runAsGroup": 101, "fsGroup": 101, "runAsNonRoot": True},
+            )
+            self.assertEqual(
+                graph["spec"]["template"]["spec"]["containers"][0]["volumeMounts"][0]["mountPath"],
+                "/var/lib/memgraph",
+            )
+
     def test_commands_refuse_before_cluster_ownership(self):
         with tempfile.TemporaryDirectory() as folder:
             drill = Drill(Path(folder))

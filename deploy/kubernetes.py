@@ -317,7 +317,21 @@ class Drill:
                         "selector": {"matchLabels": {"fixture": name}},
                         "template": {
                             "metadata": {"labels": {"fixture": name}},
-                            "spec": {"containers": [container]},
+                            "spec": {
+                                "containers": [container],
+                                **(
+                                    {
+                                        "securityContext": {
+                                            "runAsUser": 101,
+                                            "runAsGroup": 101,
+                                            "fsGroup": 101,
+                                            "runAsNonRoot": True,
+                                        }
+                                    }
+                                    if name == "memgraph"
+                                    else {}
+                                ),
+                            },
                         },
                         "volumeClaimTemplates": [
                             {
@@ -516,6 +530,7 @@ class Drill:
         self.results["commit"] = self.command(
             ["git", "rev-parse", "HEAD"], "release commit", timeout=10
         ).strip()
+        self.results["task_head"] = os.environ.get("ZG_KUBE_SOURCE_HEAD", self.results["commit"])
         self.results["kubernetes_version"] = json.loads(self.kubectl("get", "--raw=/version"))["gitVersion"]
         self.kubectl("create", "namespace", self.namespace)
         self.stage = "build application images"
@@ -640,6 +655,11 @@ class Drill:
                             "name": item["name"],
                             "ready": item["ready"],
                             "restarts": item["restartCount"],
+                            "last_termination": {
+                                key: value
+                                for key, value in item.get("lastState", {}).get("terminated", {}).items()
+                                if key in {"reason", "exitCode", "signal"}
+                            },
                             "state": {
                                 phase: {
                                     key: value
