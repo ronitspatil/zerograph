@@ -80,6 +80,15 @@ jobs:
       - name: Exercise session, ingestion queue, analysis and remediation
         run: pytest tests/test_stack_e2e.py -v --no-cov
         working-directory: backend
+      - name: Restart persistent stores and wait for application recovery
+        run: |
+          docker compose restart postgres redis memgraph
+          docker compose up --detach --wait --wait-timeout 240
+      - name: Verify graph revision and SQL records survived restart
+        run: pytest tests/test_stack_e2e.py -k survive_database_restart -v --no-cov
+        working-directory: backend
+        env:
+          ZG_E2E_VERIFY_PERSISTENCE: "true"
       - name: Capture bounded failure diagnostics
         if: failure()
         run: |
