@@ -1,6 +1,6 @@
 # Operational visibility
 
-The backend exports protected Prometheus exposition at `/metrics`. Set a separate random `ZG_METRICS_TOKEN` of at least 32 ASCII characters in the backend secret. Missing configuration returns 503, missing or invalid Bearer authentication returns 401. Application access tokens and demo tokens do not authorize scraping. Never put the scrape credential in a URL or frontend configuration. The backend service remains internal; scrape through a trusted private network or TLS endpoint.
+The backend exports protected Prometheus exposition at `/metrics`. Set a separate random `ZG_METRICS_TOKEN` of at least 32 printable ASCII characters without whitespace in the backend secret. Missing configuration returns 503, missing or invalid Bearer authentication returns 401. Application access tokens and demo tokens do not authorize scraping. Never put the scrape credential in a URL or frontend configuration. The backend service remains internal; scrape through a trusted private network or TLS endpoint.
 
 With existing Prometheus Operator infrastructure, set Helm `monitoring.enabled=true`. The optional ServiceMonitor discovers each backend pod through the backend Service and references `ZG_METRICS_TOKEN` in the existing application Secret. No Prometheus, Grafana, Operator CRDs or outbound telemetry integration is installed. The default chart creates no ServiceMonitor and exports nothing to an external system. Configure Prometheus selectors and RBAC for the same namespace; restrict endpoint access using your cluster network policy.
 

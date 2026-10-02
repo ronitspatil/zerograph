@@ -49,7 +49,7 @@ def test_scrape_auth_not_application_auth_and_not_public(metrics_client):
     assert "text/plain" in response.headers["content-type"]
 
 
-@pytest.mark.parametrize("secret", ["short", "\u2603" * 64, "a" * 4097, "a" * 64])
+@pytest.mark.parametrize("secret", ["short", "\u2603" * 64, "a" * 4097, "a" * 64, " " * 64, "m" * 64 + "\n"])
 def test_scrape_secret_validation(secret):
     with pytest.raises(ValidationError):
         Settings(metrics_token=secret)
@@ -264,3 +264,36 @@ def test_real_postgres_ingestion_metrics(monkeypatch):
         with admin.begin() as db:
             db.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
         admin.dispose()
+
+
+def test_failures_are_structured_and_do_not_log_request_secrets(metrics_client):
+    import json
+
+    from loguru import logger
+
+    client, app = metrics_client
+
+    def failure():
+        raise RuntimeError("private-error-credential")
+
+    app.add_api_route("/failure", failure, methods=["GET"])
+    captured = []
+    handler = logger.add(captured.append, serialize=True)
+    try:
+        response = client.get(
+            "/failure?token=private-query", headers={"Authorization": "Bearer private-token"}
+        )
+        assert response.status_code == 500
+    finally:
+        logger.remove(handler)
+    records = [json.loads(record)["record"] for record in captured]
+    failed = next(
+        record["extra"] for record in records if record["extra"].get("event") == "http_request_failed"
+    )
+    completed = next(record["extra"] for record in records if record["extra"].get("event") == "http_request")
+    assert failed["exception_type"] == "RuntimeError"
+    assert failed["request_id"] == completed["request_id"] == response.headers["x-request-id"]
+    assert completed["status"] == 500 and completed["method"] == "GET" and completed["elapsed_ms"] >= 0
+    assert all("private-" not in record for record in captured)
+    body = scrape(client).text
+    assert 'zg_http_requests_total{method="GET",operation="unmatched",status_class="5xx"} 1.0' in body

@@ -44,8 +44,16 @@ class Settings(BaseSettings):
         if self.demo_mode and len(self.demo_token.get_secret_value()) < 32:
             raise ValueError("Demo mode requires a random token of at least 32 characters")
         metrics = self.metrics_token.get_secret_value()
-        if metrics and (len(metrics) < 32 or len(metrics) > 4096 or not metrics.isascii()):
-            raise ValueError("Metrics scraping requires an ASCII secret of 32 to 4096 characters")
+        if metrics and (
+            len(metrics) < 32
+            or len(metrics) > 4096
+            or not metrics.isascii()
+            or not metrics.isprintable()
+            or any(character.isspace() for character in metrics)
+        ):
+            raise ValueError(
+                "Metrics scraping requires a printable ASCII secret of 32 to 4096 characters without whitespace"
+            )
         if metrics and metrics in {self.demo_token.get_secret_value(), self.git_token.get_secret_value()}:
             raise ValueError("Metrics scraping must use a separate secret")
         if self.environment == "production":

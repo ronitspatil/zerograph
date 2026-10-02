@@ -83,7 +83,9 @@ def create_app() -> FastAPI:
         try:
             response = await call_next(request)
         except Exception as exc:
-            logger.error("Request failed id={} exception_type={}", request_id, type(exc).__name__)
+            logger.bind(
+                event="http_request_failed", request_id=request_id, exception_type=type(exc).__name__
+            ).error("Request failed")
             response = JSONResponse(
                 {"detail": "Internal service error", "request_id": request_id}, status_code=500
             )
@@ -91,13 +93,13 @@ def create_app() -> FastAPI:
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Cache-Control"] = "no-store"
         # Do not log URLs containing identity IDs, tokens, queries, or payloads.
-        logger.info(
-            "request={} method={} status={} elapsed_ms={:.1f}",
-            request_id,
-            request.method,
-            response.status_code,
-            1000 * (time.monotonic() - start),
-        )
+        logger.bind(
+            event="http_request",
+            request_id=request_id,
+            method=request.method,
+            status=response.status_code,
+            elapsed_ms=1000 * (time.monotonic() - start),
+        ).info("HTTP request completed")
         return response
 
     @app.get("/health/live", include_in_schema=False)
