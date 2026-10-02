@@ -35,6 +35,7 @@ async function visible(locator) { await locator.waitFor({ state: 'visible', time
 async function login(context, username) {
   const page = await context.newPage();
   const health = { errors: 0, active: true };
+  let documentPolicy = '';
   page.on('pageerror', () => { if (health.active) { health.errors++; diagnostics.page_errors++; } });
   page.on('console', message => {
     if (health.active && message.type() === 'error') {
@@ -44,6 +45,9 @@ async function login(context, username) {
   });
   page.on('response', response => {
     const url = new URL(response.url());
+    if (url.origin === consoleOrigin && url.pathname === '/' && response.request().resourceType() === 'document') {
+      documentPolicy = response.headers()['content-security-policy'] || '';
+    }
     if (url.origin === consoleOrigin && url.pathname.startsWith('/api/zg/')) {
       const status = response.status();
       if (status >= 200 && status < 300) diagnostics.api_success++;
@@ -68,6 +72,14 @@ async function login(context, username) {
   require(new URL(page.url()).pathname === '/');
   step('workspace graph heading rendered');
   await visible(page.getByRole('heading', { name: 'Identity & data graph', exact: true }));
+  const nonce = documentPolicy.match(/'nonce-([^']+)'/)?.[1] || '';
+  diagnostics.document_nonce_present = nonce ? 1 : 0;
+  Object.assign(diagnostics, await page.evaluate(expected => {
+    const scripts = [...document.scripts];
+    return { script_count: scripts.length,
+      script_nonce_match: scripts.filter(script => expected && script.nonce === expected).length,
+      script_nonce_mismatch: scripts.filter(script => !expected || script.nonce !== expected).length };
+  }, nonce));
   step('hydrated console API connection');
   await visible(page.getByText('API connected', { exact: true }));
   require(new URL(page.url()).origin === consoleOrigin);
@@ -83,7 +95,8 @@ async function login(context, username) {
 
 async function run(label, action) {
   diagnostics = { page_errors: 0, console_errors: 0, csp_errors: 0,
-    api_success: 0, api_denied: 0, api_server_errors: 0 };
+    api_success: 0, api_denied: 0, api_server_errors: 0,
+    document_nonce_present: 0, script_count: 0, script_nonce_match: 0, script_nonce_mismatch: 0 };
   const context = await browser.newContext({ ignoreHTTPSErrors: false, viewport: { width: 1440, height: 1000 } });
   try {
     await action(context);
