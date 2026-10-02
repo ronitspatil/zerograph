@@ -281,3 +281,60 @@ def test_retention_missing_or_recent_revisions_are_not_deleted(postgres_environm
     assert len(graph.snapshots) == 5
     with pytest.raises(ValueError, match="authoritative SQL state"):
         retention.prune_revisions("unknown", apply=True)
+
+
+def test_retention_intent_survives_graph_commit_and_completion_commit_failure(
+    postgres_environment, monkeypatch
+):
+    from sqlalchemy.orm import Session
+
+    from app.graph import retention
+
+    factory, graph = postgres_environment
+    monkeypatch.setattr(retention, "session_factory", lambda: factory)
+    monkeypatch.setattr(retention, "get_graph_store", lambda: graph)
+    for index in range(5):
+        graph.publish("tenant", f"old-{index}", GraphSnapshot())
+        graph.created_at["tenant", f"old-{index}"] = index + 1
+    original_commit = Session.commit
+
+    def fail_completion(db):
+        if any(
+            isinstance(event, AuditEvent) and event.action == "graph.revision_deleted" for event in db.new
+        ):
+            raise RuntimeError("injected completion commit failure")
+        return original_commit(db)
+
+    with patch.object(Session, "commit", fail_completion):
+        with pytest.raises(RuntimeError, match="completion commit"):
+            retention.prune_revisions("tenant", retention.RetentionPolicy(1, 2, 1), apply=True)
+    assert ("tenant", "old-2") not in graph.snapshots
+    with factory() as db:
+        intent = db.scalar(select(AuditEvent).where(AuditEvent.action == "graph.revision_delete_requested"))
+        assert intent.detail["revision"] == "old-2"
+        assert intent.detail["operation_id"]
+        assert db.scalar(select(AuditEvent).where(AuditEvent.action == "graph.revision_deleted")) is None
+        assert db.get(TenantState, "tenant").revision == "initial"
+
+
+def test_retention_refuses_deletion_when_durable_intent_commit_fails(postgres_environment, monkeypatch):
+    from sqlalchemy.orm import Session
+
+    from app.graph import retention
+
+    factory, graph = postgres_environment
+    monkeypatch.setattr(retention, "session_factory", lambda: factory)
+    monkeypatch.setattr(retention, "get_graph_store", lambda: graph)
+    for index in range(5):
+        graph.publish("tenant", f"old-{index}", GraphSnapshot())
+        graph.created_at["tenant", f"old-{index}"] = index + 1
+    with (
+        patch.object(Session, "commit", side_effect=RuntimeError("intent storage unavailable")),
+        patch.object(graph, "delete_revision") as delete,
+    ):
+        with pytest.raises(RuntimeError, match="intent storage"):
+            retention.prune_revisions("tenant", retention.RetentionPolicy(1, 2, 1), apply=True)
+    delete.assert_not_called()
+    assert len(graph.snapshots) == 5
+    with factory() as db:
+        assert db.scalar(select(AuditEvent)) is None

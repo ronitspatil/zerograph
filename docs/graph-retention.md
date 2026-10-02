@@ -56,10 +56,22 @@ graph transaction rolls back that revision's Entity and Snapshot deletion.
 
 Deletion is irreversible without a verified backup. Graph and SQL operations are
 not a distributed transaction: if a later deletion or SQL audit commit fails,
-earlier graph deletions may already be committed. Those revisions remain safely
-unreferenced, and repeating the command is idempotent, but audit entries for the
-partial batch may be absent. Preserve operator command outputs and failures in
-change records; do not interpret a failed batch as proof that nothing was deleted.
+earlier graph deletions may already be committed. Before each graph deletion, a
+separate SQL transaction durably commits `graph.revision_delete_requested` with a
+unique `operation_id`, revision, cutoff and protected pointer. If that intent
+commit fails, no graph deletion for that revision occurs. The tenant publication
+lock remains held by the outer SQL transaction. Completion or skip events use
+the same operation ID; final SQL completion failure leaves the committed intent
+available for operator reconciliation.
+
+For an intent without `graph.revision_deleted` or `graph.revision_delete_skipped`,
+inspect the target graph under the tenant publication lock: absent metadata means
+deletion may have committed; present matching metadata means it remains eligible
+for a fresh bounded plan. Preserve the intent and failure record, investigate the
+SQL/graph outage and record the reconciliation in your change system. Do not
+infer deletion outcome solely from a missing completion event or blindly edit
+tenant pointers. Repeating retention is idempotent and creates a new intent for
+any still-present candidate.
 
 Do not run retention during backup/restore or while external tools write graph
 revisions or SQL tenant pointers outside the application's lock protocol. The current SQL pointer is never deleted. Requests that fetched a previous

@@ -8,6 +8,7 @@ import argparse
 import json
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 from sqlalchemy import select, text
 
@@ -81,19 +82,24 @@ def prune_revisions(
         for revision in result.candidates:
             if revision.revision == state.revision:
                 continue  # Defense in depth if an adapter violates its contract.
+            detail = {
+                "operation_id": str(uuid4()),
+                "revision": revision.revision,
+                "created_at_ms": revision.created_at_ms,
+                "cutoff_ms": cutoff,
+                "protected_revision": state.revision,
+            }
+            # The separate session commits durable intent before irreversible
+            # graph I/O. AuditEvent has no tenant-state FK, so this does not
+            # release or contend with the outer publication row lock.
+            with session_factory()() as intent_db:
+                audit(intent_db, Actor(actor, tenant, frozenset()), "graph.revision_delete_requested", detail)
+                intent_db.commit()
             if graph.delete_revision(tenant, revision.revision, revision.created_at_ms, cutoff):
                 result.deleted.append(revision.revision)
-                audit(
-                    db,
-                    Actor(actor, tenant, frozenset()),
-                    "graph.revision_deleted",
-                    {
-                        "revision": revision.revision,
-                        "created_at_ms": revision.created_at_ms,
-                        "cutoff_ms": cutoff,
-                        "protected_revision": state.revision,
-                    },
-                )
+                audit(db, Actor(actor, tenant, frozenset()), "graph.revision_deleted", detail)
+            else:
+                audit(db, Actor(actor, tenant, frozenset()), "graph.revision_delete_skipped", detail)
         db.commit()
         return result
 
