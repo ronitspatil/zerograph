@@ -23,12 +23,54 @@ async function proxy(
       { status: 503 },
     );
   try {
-    const body = request.method === "GET" ? undefined : await request.text();
-    if (body && Buffer.byteLength(body) > 4_000_000)
-      return NextResponse.json(
-        { detail: "Payload too large" },
-        { status: 413 },
-      );
+    // Reject as bytes arrive instead of buffering an unbounded chunked body.
+    let body: Uint8Array | undefined;
+    if (request.method !== "GET" && request.body) {
+      const reader = request.body.getReader();
+      const buffer = Buffer.alloc(4_000_000);
+      let size = 0;
+      let timedOut = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          reject(new Error("Request body timed out"));
+        }, 30_000);
+      });
+      try {
+        const readBody = async () => {
+          while (true) {
+            const chunk = await reader.read();
+            if (chunk.done) return true;
+            size += chunk.value.byteLength;
+            if (size > buffer.byteLength) {
+              void reader.cancel().catch(() => {});
+              return false;
+            }
+            buffer.set(chunk.value, size - chunk.value.byteLength);
+          }
+        };
+        if (!(await Promise.race([readBody(), deadline]))) {
+          return NextResponse.json(
+            { detail: "Payload too large" },
+            { status: 413 },
+          );
+        }
+      } catch (error) {
+        void reader.cancel().catch(() => {});
+        if (timedOut) {
+          return NextResponse.json(
+            { detail: "Request body timed out" },
+            { status: 408 },
+          );
+        }
+        throw error;
+      } finally {
+        clearTimeout(timer);
+        reader.releaseLock();
+      }
+      body = buffer.subarray(0, size);
+    }
     const upstream = await fetch(
       `${base}/api/v1/${path.join("/")}${new URL(request.url).search}`,
       {
@@ -37,7 +79,7 @@ async function proxy(
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
-        body,
+        body: body as BodyInit | undefined,
         cache: "no-store",
         signal: AbortSignal.timeout(30000),
         redirect: "error",

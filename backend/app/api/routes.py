@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.collectors.execution_audit import AuditNormalization, normalize_cloudtrail
 from app.collectors.mcp_agent_collector import MCPInventory
 from app.collectors.tasks import ingest
-from app.core.auth import Actor, current_actor, require_role
+from app.core.auth import Actor, require_role
 from app.core.config import get_settings
 from app.db.models import AuditEvent, IngestionJob, Remediation, TenantState
 from app.db.session import audit, get_db
@@ -27,7 +27,7 @@ from app.remediation.policy_optimizer import Optimization, UsageEvidence, optimi
 router = APIRouter(prefix="/api/v1")
 DB = Annotated[Session, Depends(get_db)]
 Graph = Annotated[GraphStore, Depends(get_graph_store)]
-Viewer = Annotated[Actor, Depends(current_actor)]
+Viewer = Annotated[Actor, Depends(require_role("viewer"))]
 Analyst = Annotated[Actor, Depends(require_role("analyst"))]
 Admin = Annotated[Actor, Depends(require_role("admin"))]
 

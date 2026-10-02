@@ -27,6 +27,8 @@ export async function GET(request: Request) {
       body.set("client_secret", process.env.ZG_OIDC_CLIENT_SECRET);
     const exchange = await fetch(token_endpoint, {
       method: "POST",
+      redirect: "error",
+      cache: "no-store",
       body,
       signal: AbortSignal.timeout(10000),
     });
@@ -36,6 +38,7 @@ export async function GET(request: Request) {
       throw new Error("Missing access token");
     // Backend verifies signature, issuer, audience, tenant and roles on the access token.
     const actor = await fetch(`${process.env.ZG_BACKEND_URL}/api/v1/me`, {
+      redirect: "error",
       headers: { Authorization: `Bearer ${tokens.access_token}` },
       cache: "no-store",
       signal: AbortSignal.timeout(10000),
