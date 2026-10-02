@@ -83,7 +83,9 @@ async function login(context, username) {
   step('hydrated console API connection');
   await visible(page.getByText('API connected', { exact: true }));
   require(new URL(page.url()).origin === consoleOrigin);
-  require(await page.getByRole('alert').count() === 0);
+  step('workspace has no application error banner');
+  // Next's accessibility route announcer has role=alert during normal navigation.
+  require(await page.locator('.error-banner[role="alert"]').count() === 0);
   step('secure cookie and HttpOnly DOM enforcement');
   const cookies = await context.cookies(consoleOrigin);
   const session = cookies.find(cookie => cookie.name === 'zg_session');
