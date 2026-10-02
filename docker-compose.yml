@@ -1,0 +1,108 @@
+name: zerograph
+x-backend: &backend
+  image: zerograph-backend:local
+  build: ./backend
+  env_file: .env
+  environment: &backend-env
+    ZG_DATABASE_URL: postgresql+psycopg://zerograph:${POSTGRES_PASSWORD:?Run deploy/init_env.py}@postgres:5432/zerograph
+    ZG_REDIS_URL: redis://redis:6379/0
+    ZG_GRAPH_URI: bolt://memgraph:7687
+  networks: [internal]
+  restart: unless-stopped
+  security_opt: [no-new-privileges:true]
+  read_only: true
+  tmpfs: [/tmp]
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: zerograph
+      POSTGRES_USER: zerograph
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run deploy/init_env.py}
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    networks: [internal]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U zerograph -d zerograph"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  memgraph:
+    image: memgraph/memgraph:3.2.0
+    command: ["--storage-wal-enabled=true", "--storage-snapshot-interval-sec=300", "--storage-recover-on-startup=true"]
+    volumes: [graph-data:/var/lib/memgraph]
+    networks: [internal]
+    healthcheck:
+      test: [CMD-SHELL, "echo 'RETURN 1;' | mgconsole --host 127.0.0.1 --port 7687"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+  redis:
+    image: redis:7.4-alpine
+    command: [redis-server, --appendonly, "yes", --maxmemory, 256mb, --maxmemory-policy, noeviction]
+    volumes: [redis-data:/data]
+    networks: [internal]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  migrate:
+    <<: *backend
+    command: [python, -m, app.db.migrate]
+    restart: "no"
+    depends_on:
+      postgres: {condition: service_healthy}
+      memgraph: {condition: service_healthy}
+  backend:
+    <<: *backend
+    expose: ["8000"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+  worker:
+    <<: *backend
+    command: [celery, -A, app.collectors.tasks.celery_app, worker, --loglevel=INFO, --concurrency=2]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+  scheduler:
+    <<: *backend
+    command: [celery, -A, app.collectors.tasks.celery_app, beat, --loglevel=INFO, --schedule=/tmp/celerybeat-schedule]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+  frontend:
+    image: zerograph-frontend:local
+    build: ./frontend
+    env_file: .env
+    environment:
+      ZG_BACKEND_URL: http://backend:8000
+    ports: ["127.0.0.1:3100:3100"]
+    networks: [internal]
+    depends_on:
+      backend: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3100/login').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: [/tmp]
+
+volumes:
+  postgres-data:
+  graph-data:
+  redis-data:
+networks:
+  internal:

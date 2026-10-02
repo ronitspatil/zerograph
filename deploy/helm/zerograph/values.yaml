@@ -1,0 +1,35 @@
+backend:
+  image: your-registry/zerograph-backend:0.1.0
+  replicas: 2
+frontend:
+  image: your-registry/zerograph-frontend:0.1.0
+  replicas: 2
+worker:
+  replicas: 2
+secretName: zerograph-secrets
+publicUrl: https://zerograph.example.com
+config:
+  ZG_ENVIRONMENT: production
+  ZG_DEMO_MODE: "false"
+  ZG_COOKIE_SECURE: "true"
+  ZG_GRAPH_VENDOR: memgraph
+  ZG_OIDC_ISSUER: https://identity.example.com
+  ZG_OIDC_JWKS_URL: https://identity.example.com/.well-known/jwks.json
+  ZG_OIDC_AUDIENCE: zerograph-api
+  ZG_OIDC_CLIENT_ID: zerograph-web
+  ZG_TENANT_CLAIM: tenant_id
+  ZG_ROLE_CLAIM: roles
+  ZG_DATABASE_URL: postgresql+psycopg://zerograph@postgres:5432/zerograph
+  ZG_REDIS_URL: redis://redis:6379/0
+  ZG_GRAPH_URI: bolt://memgraph:7687
+serviceAccount:
+  name: zerograph
+  annotations: {}
+resources:
+  requests: {cpu: 200m, memory: 256Mi}
+  limits: {cpu: "2", memory: 2Gi}
+ingress:
+  enabled: true
+  className: nginx
+  host: zerograph.example.com
+  tlsSecret: zerograph-tls

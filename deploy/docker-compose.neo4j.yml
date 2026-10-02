@@ -1,0 +1,30 @@
+services:
+  memgraph:
+    image: neo4j:5.26-community
+    command: []
+    environment:
+      NEO4J_AUTH: neo4j/${ZG_GRAPH_PASSWORD:?Set a graph password}
+      GRAPH_PASSWORD: ${ZG_GRAPH_PASSWORD}
+      NEO4J_PLUGINS: '["apoc"]'
+    volumes: !override [neo4j-data:/data]
+    healthcheck:
+      test: [CMD-SHELL, "cypher-shell -u neo4j -p \"$$GRAPH_PASSWORD\" 'RETURN 1' >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+  migrate:
+    environment:
+      ZG_GRAPH_VENDOR: neo4j
+      ZG_GRAPH_USERNAME: neo4j
+    depends_on:
+      memgraph: {condition: service_healthy}
+  backend:
+    environment:
+      ZG_GRAPH_VENDOR: neo4j
+      ZG_GRAPH_USERNAME: neo4j
+  worker:
+    environment:
+      ZG_GRAPH_VENDOR: neo4j
+      ZG_GRAPH_USERNAME: neo4j
+volumes:
+  neo4j-data:
