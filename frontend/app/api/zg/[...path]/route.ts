@@ -27,26 +27,49 @@ async function proxy(
     let body: Uint8Array | undefined;
     if (request.method !== "GET" && request.body) {
       const reader = request.body.getReader();
-      const chunks: Uint8Array[] = [];
+      const buffer = Buffer.alloc(4_000_000);
       let size = 0;
+      let timedOut = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          reject(new Error("Request body timed out"));
+        }, 30_000);
+      });
       try {
-        while (true) {
-          const chunk = await reader.read();
-          if (chunk.done) break;
-          size += chunk.value.byteLength;
-          if (size > 4_000_000) {
-            await reader.cancel();
-            return NextResponse.json(
-              { detail: "Payload too large" },
-              { status: 413 },
-            );
+        const readBody = async () => {
+          while (true) {
+            const chunk = await reader.read();
+            if (chunk.done) return true;
+            size += chunk.value.byteLength;
+            if (size > buffer.byteLength) {
+              void reader.cancel().catch(() => {});
+              return false;
+            }
+            buffer.set(chunk.value, size - chunk.value.byteLength);
           }
-          chunks.push(chunk.value);
+        };
+        if (!(await Promise.race([readBody(), deadline]))) {
+          return NextResponse.json(
+            { detail: "Payload too large" },
+            { status: 413 },
+          );
         }
+      } catch (error) {
+        void reader.cancel().catch(() => {});
+        if (timedOut) {
+          return NextResponse.json(
+            { detail: "Request body timed out" },
+            { status: 408 },
+          );
+        }
+        throw error;
       } finally {
+        clearTimeout(timer);
         reader.releaseLock();
       }
-      body = Buffer.concat(chunks, size);
+      body = buffer.subarray(0, size);
     }
     const upstream = await fetch(
       `${base}/api/v1/${path.join("/")}${new URL(request.url).search}`,

@@ -44,6 +44,8 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 const params = { params: Promise.resolve({ path: ["ingestions"] }) };
 
@@ -172,4 +174,47 @@ it("OAuth callback never creates a session for a backend-rejected token", async 
     ).headers.get("location"),
   ).toContain("error=authentication");
   expect(mocks.seal).not.toHaveBeenCalled();
+});
+
+it("BFF uses one bounded buffer for many tiny body chunks", async () => {
+  const allocation = vi.spyOn(Buffer, "alloc");
+  let sent = 0;
+  const stream = new ReadableStream({
+    pull(controller) {
+      if (sent++ < 10_000) controller.enqueue(new Uint8Array([120]));
+      else controller.close();
+    },
+  });
+  fetchMock.mockResolvedValue(Response.json({ ok: true }));
+  const request = new Request("https://console.example", {
+    method: "POST",
+    body: stream,
+    duplex: "half",
+  } as RequestInit);
+  expect((await POST(request, params)).status).toBe(200);
+  expect(
+    allocation.mock.calls.filter(([size]) => size === 4_000_000),
+  ).toHaveLength(1);
+  const forwarded = fetchMock.mock.calls[0][1].body;
+  expect(forwarded.byteLength).toBe(10_000);
+  expect(forwarded.every((byte: number) => byte === 120)).toBe(true);
+});
+it("BFF cancels stalled request bodies at the total read deadline", async () => {
+  vi.useFakeTimers();
+  let cancelled = false;
+  const stream = new ReadableStream({
+    cancel() {
+      cancelled = true;
+    },
+  });
+  const request = new Request("https://console.example", {
+    method: "POST",
+    body: stream,
+    duplex: "half",
+  } as RequestInit);
+  const response = POST(request, params);
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect((await response).status).toBe(408);
+  expect(cancelled).toBe(true);
+  expect(fetchMock).not.toHaveBeenCalled();
 });
