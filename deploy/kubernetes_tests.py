@@ -1,5 +1,7 @@
 """Safety regressions: no cluster access or Docker required."""
 
+import base64
+import json
 import os
 import tempfile
 import unittest
@@ -10,10 +12,21 @@ from deploy.kubernetes import Drill, DrillError, check_config, private_file, run
 
 
 def config():
+    embedded = base64.b64encode(b"-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----").decode()
     return {
+        "apiVersion": "v1",
+        "kind": "Config",
+        "users": [
+            {"name": "kind-owned", "user": {"client-certificate-data": embedded, "client-key-data": embedded}}
+        ],
         "current-context": "kind-owned",
-        "clusters": [{"name": "kind-owned", "cluster": {"server": "https://127.0.0.1:1234"}}],
-        "contexts": [{"name": "kind-owned", "context": {"cluster": "kind-owned"}}],
+        "clusters": [
+            {
+                "name": "kind-owned",
+                "cluster": {"server": "https://127.0.0.1:1234", "certificate-authority-data": embedded},
+            }
+        ],
+        "contexts": [{"name": "kind-owned", "context": {"cluster": "kind-owned", "user": "kind-owned"}}],
     }
 
 
@@ -34,6 +47,35 @@ class SafetyTests(unittest.TestCase):
                 check_config(current, "kind-owned")
         with self.assertRaises(DrillError):
             check_config(config(), "kind-owned", "https://127.0.0.1:4567")
+
+    def test_tls_plugins_and_external_credentials_refused(self):
+        mutations = [
+            lambda c: c["clusters"][0]["cluster"].update({"insecure-skip-tls-verify": True}),
+            lambda c: c["clusters"][0]["cluster"].update({"tls-server-name": "customer"}),
+            lambda c: c["clusters"][0]["cluster"].update({"certificate-authority": "/customer/ca"}),
+            lambda c: c["users"][0]["user"].update({"exec": {"command": "credential-plugin"}}),
+            lambda c: c["users"][0]["user"].update({"auth-provider": {"name": "plugin"}}),
+            lambda c: c["users"][0]["user"].update({"client-key": "/customer/key"}),
+            lambda c: c["users"].append(c["users"][0]),
+            lambda c: c["contexts"][0]["context"].update(user="customer"),
+            lambda c: c["users"][0]["user"].update({"client-key-data": "malformed"}),
+        ]
+        for mutate in mutations:
+            current = config()
+            mutate(current)
+            with self.assertRaises(DrillError):
+                check_config(current, "kind-owned")
+
+    def test_replacement_control_plane_refused(self):
+        with tempfile.TemporaryDirectory() as folder:
+            drill = Drill(Path(folder))
+            node = {"Id": "original", "Config": {"Labels": {"io.x-k8s.kind.cluster": drill.cluster}}}
+            with patch.object(drill, "command", return_value=json.dumps([node])):
+                drill.owned_node()
+            node["Id"] = "replacement"
+            with patch.object(drill, "command", return_value=json.dumps([node])):
+                with self.assertRaises(DrillError):
+                    drill.owned_node()
 
     def test_sensitive_file_is_private_and_never_overwritten(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -6,6 +6,7 @@ import argparse
 import base64
 import contextlib
 import gzip
+import hashlib
 import json
 import os
 import secrets
@@ -47,19 +48,71 @@ def private_file(path, content):
 
 
 def check_config(config, context, server=None):
+    if not isinstance(config, dict) or set(config) - {
+        "apiVersion",
+        "kind",
+        "preferences",
+        "clusters",
+        "contexts",
+        "current-context",
+        "users",
+    }:
+        raise DrillError("Refusing unexpected kubeconfig fields")
+    if (
+        config.get("apiVersion") != "v1"
+        or config.get("kind") != "Config"
+        or config.get("preferences") not in (None, {})
+    ):
+        raise DrillError("Refusing unexpected kubeconfig format")
     if config.get("current-context") != context or len(config.get("contexts", [])) != 1:
         raise DrillError("Refusing unexpected kubeconfig context")
     entries = config.get("clusters", [])
-    if len(entries) != 1 or entries[0]["name"] != context:
+    if len(entries) != 1 or set(entries[0]) != {"name", "cluster"} or entries[0]["name"] != context:
         raise DrillError("Refusing unexpected kubeconfig cluster")
-    target = entries[0]["cluster"]["server"]
+    cluster = entries[0]["cluster"]
+    if set(cluster) != {"server", "certificate-authority-data"}:
+        raise DrillError("Refusing TLS overrides or external CA references")
+    target = cluster["server"]
     parsed = urlparse(target)
-    if parsed.scheme != "https" or parsed.hostname != "127.0.0.1" or not parsed.port:
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "127.0.0.1"
+        or not parsed.port
+        or parsed.username
+        or parsed.password
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
         raise DrillError("Refusing non-loopback Kubernetes endpoint")
     if server is not None and server != target:
         raise DrillError("Refusing changed Kubernetes endpoint")
-    if config["contexts"][0]["context"]["cluster"] != context:
-        raise DrillError("Refusing context/cluster mismatch")
+    entry = config["contexts"][0]
+    if (
+        set(entry) != {"name", "context"}
+        or entry["name"] != context
+        or entry["context"] != {"cluster": context, "user": context}
+    ):
+        raise DrillError("Refusing context/cluster/user mismatch")
+    users = config.get("users", [])
+    if len(users) != 1 or set(users[0]) != {"name", "user"} or users[0]["name"] != context:
+        raise DrillError("Refusing ambiguous Kubernetes user")
+    user = users[0]["user"]
+    if set(user) != {"client-certificate-data", "client-key-data"}:
+        raise DrillError("Refusing plugins or external credential references")
+    for value in (
+        cluster["certificate-authority-data"],
+        user["client-certificate-data"],
+        user["client-key-data"],
+    ):
+        if not isinstance(value, str) or not value or len(value) > 65536:
+            raise DrillError("Refusing unbounded embedded credentials")
+        try:
+            decoded = base64.b64decode(value, validate=True)
+        except ValueError:
+            raise DrillError("Refusing malformed embedded credentials") from None
+        if not decoded.startswith(b"-----BEGIN ") or b"-----END " not in decoded:
+            raise DrillError("Refusing malformed embedded credentials")
     return target
 
 
@@ -71,6 +124,8 @@ class Drill:
         self.namespace = "qualification"
         self.kubeconfig = folder / "kubeconfig"
         self.server = None
+        self.node_id = None
+        self.config_digest = None
         self.env = {**os.environ, "KUBECONFIG": str(self.kubeconfig), "KIND_EXPERIMENTAL_PROVIDER": "docker"}
         self.results = {"checks": [], "cluster": self.cluster, "node_image": NODE_IMAGE}
         self.metrics_token = secrets.token_hex(32)
@@ -89,6 +144,10 @@ class Drill:
         )
         if len(result) != 1 or result[0]["Config"]["Labels"].get("io.x-k8s.kind.cluster") != self.cluster:
             raise DrillError("Refusing node ownership mismatch")
+        node_id = result[0]["Id"]
+        if self.node_id is not None and node_id != self.node_id:
+            raise DrillError("Refusing replaced control-plane container")
+        self.node_id = node_id
 
     def guard(self):
         if (
@@ -100,6 +159,10 @@ class Drill:
         self.owned_node()
         config = yaml.safe_load(self.kubeconfig.read_text())
         self.server = check_config(config, self.context, self.server)
+        digest = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
+        if self.config_digest is not None and digest != self.config_digest:
+            raise DrillError("Refusing changed owned kubeconfig")
+        self.config_digest = digest
 
     def kubectl(self, *args, **kwargs):
         self.guard()
