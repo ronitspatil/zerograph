@@ -47,8 +47,13 @@ async function login(context, username) {
   await page.locator('#username').fill(username);
   await page.locator('#password').fill(accounts[username]);
   await page.locator('#kc-login').click();
-  step('actual browser callback and hydrated console');
+  step('provider returns browser to console origin');
+  await page.waitForURL(url => url.origin === consoleOrigin, { timeout: 15000 });
+  step('authorized callback lands workspace');
+  require(new URL(page.url()).pathname === '/');
+  step('workspace graph heading rendered');
   await visible(page.getByRole('heading', { name: 'Identity & data graph', exact: true }));
+  step('hydrated console API connection');
   await visible(page.getByText('API connected', { exact: true }));
   require(new URL(page.url()).origin === consoleOrigin);
   require(await page.getByRole('alert').count() === 0);
@@ -75,6 +80,20 @@ async function run(label, action) {
 
 try {
   accounts = JSON.parse(await readFile(join(process.env.ZG_OIDC_FIXTURE_DIR, 'accounts.json'), 'utf8'));
+  step('real HTTPS provider discovery readiness');
+  const deadline = Date.now() + 120000;
+  let ready = false;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch('https://auth.oidc.test:8443/realms/zerograph/.well-known/openid-configuration',
+        { signal: AbortSignal.timeout(5000) });
+      ready = response.ok && (await response.json()).issuer === 'https://auth.oidc.test:8443/realms/zerograph';
+      if (ready) break;
+    } catch { /* Only fixed stages escape this runner. */ }
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+  require(ready);
+  step('launch verified Chromium');
   browser = await chromium.launch({ headless: true, channel: 'chromium',
     env: { ...process.env, HOME: process.env.ZG_BROWSER_HOME, DEBUG: '', PWDEBUG: '' } });
 
