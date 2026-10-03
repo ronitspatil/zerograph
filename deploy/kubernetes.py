@@ -298,6 +298,9 @@ class Drill:
                 "/var/lib/memgraph",
                 [
                     "--data-directory=/var/lib/memgraph",
+                    # No log PVC: follow vendor chart and use stdout only.
+                    "--log-file=",
+                    "--also-log-to-stderr=true",
                     "--storage-snapshot-interval-sec=5",
                     "--storage-wal-enabled=true",
                     "--data-recovery-on-startup=true",
@@ -351,7 +354,7 @@ class Drill:
                                                 "command": [
                                                     "/bin/sh",
                                                     "-ec",
-                                                    "chown 101:101 /var/lib/memgraph; test $(stat -c %u /var/lib/memgraph) = 101",
+                                                    "chown 101:103 /var/lib/memgraph; test $(stat -c %u /var/lib/memgraph) = 101",
                                                 ],
                                                 "securityContext": {
                                                     "runAsUser": 0,
@@ -368,8 +371,8 @@ class Drill:
                                         ],
                                         "securityContext": {
                                             "runAsUser": 101,
-                                            "runAsGroup": 101,
-                                            "fsGroup": 101,
+                                            "runAsGroup": 103,
+                                            "fsGroup": 103,
                                             "runAsNonRoot": True,
                                         },
                                     }

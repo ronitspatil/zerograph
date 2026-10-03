@@ -149,7 +149,7 @@ class SafetyTests(unittest.TestCase):
             )
             self.assertEqual(
                 graph["spec"]["template"]["spec"]["securityContext"],
-                {"runAsUser": 101, "runAsGroup": 101, "fsGroup": 101, "runAsNonRoot": True},
+                {"runAsUser": 101, "runAsGroup": 103, "fsGroup": 103, "runAsNonRoot": True},
             )
             self.assertEqual(
                 graph["spec"]["template"]["spec"]["containers"][0]["volumeMounts"][0]["mountPath"],
@@ -163,6 +163,13 @@ class SafetyTests(unittest.TestCase):
             self.assertTrue(init["securityContext"]["readOnlyRootFilesystem"])
             self.assertNotIn("-R", init["command"][-1])
             self.assertEqual(init["command"][-1].count("chown"), 1)
+            self.assertIn("chown 101:103 /var/lib/memgraph", init["command"][-1])
+            container = graph["spec"]["template"]["spec"]["containers"][0]
+            self.assertNotIn("command", container)
+            self.assertIn("--log-file=", container["args"])
+            self.assertIn("--also-log-to-stderr=true", container["args"])
+            self.assertFalse(any(arg.startswith("--log-file=/") for arg in container["args"]))
+            self.assertEqual(len(container["volumeMounts"]), 1)
 
     def test_fixture_logs_export_only_bounded_boolean_categories(self):
         categories = classify_fixture_log(
