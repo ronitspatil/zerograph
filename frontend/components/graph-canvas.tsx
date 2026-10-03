@@ -2,6 +2,7 @@
 import { useEffect, useRef } from "react";
 import cytoscape, { type Core, type StylesheetCSS } from "cytoscape";
 import { Maximize2, Minus, Plus } from "lucide-react";
+import { circlePositions, layoutInput, startLayout } from "@/lib/graph-layout";
 import type { GraphData, GraphNode, Simulation } from "@/lib/types";
 
 export const nodeColors: Record<string, string> = {
@@ -14,17 +15,6 @@ export const nodeColors: Record<string, string> = {
   VectorStore: "#81b9ff",
   S3Bucket: "#81b9ff",
   DataCategory: "#73849a",
-};
-const columns: Record<string, number> = {
-  HumanUser: 0,
-  ServiceAccount: 0,
-  AIAgent: 0,
-  MCPServer: 1,
-  CloudRole: 2,
-  Database: 3,
-  VectorStore: 3,
-  S3Bucket: 3,
-  DataCategory: 4,
 };
 export function GraphCanvas({
   graph,
@@ -45,12 +35,9 @@ export function GraphCanvas({
   callback.current = onSelect;
   useEffect(() => {
     if (!container.current) return;
-    const counts: Record<number, number> = {};
-    const totals: Record<number, number> = {};
-    graph.nodes.forEach((n) => {
-      const c = columns[n.type] || 0;
-      totals[c] = (totals[c] || 0) + 1;
-    });
+    const input = layoutInput(graph);
+    if (!input) return;
+    const positions = circlePositions(input.nodes);
     const style: StylesheetCSS[] = [
       {
         selector: "node",
@@ -136,37 +123,57 @@ export function GraphCanvas({
         },
       },
       { selector: ".dimmed", css: { opacity: 0.22 } },
+      { selector: "node.overview", css: { label: "" } },
+      { selector: "edge.overview", css: { label: "" } },
     ];
     cy.current = cytoscape({
       container: container.current,
       elements: [
-        ...graph.nodes.map((n) => {
-          const c = columns[n.type] || 0;
-          const i = counts[c] || 0;
-          counts[c] = i + 1;
-          return {
-            data: {
-              id: n.id,
-              label: n.name,
-              color: nodeColors[n.type],
-              type: n.type,
-            },
-            position: {
-              x: 90 + c * 215,
-              y: 210 + (i - (totals[c] - 1) / 2) * 105,
-            },
-          };
-        }),
+        ...graph.nodes.map((n, i) => ({
+          data: {
+            id: n.id,
+            label: n.name,
+            color: nodeColors[n.type],
+            type: n.type,
+          },
+          position: { x: positions[i].x, y: positions[i].y },
+        })),
         ...graph.edges.map((e) => ({
           data: { ...e, label: e.type.replaceAll("_", " ").toLowerCase() },
         })),
       ],
       style,
       layout: { name: "preset", fit: true, padding: 55 },
-      minZoom: 0.3,
+      minZoom: 0.05,
       maxZoom: 2.5,
       wheelSensitivity: 0.2,
     });
+    const instance = cy.current;
+    let userMoved = false;
+    instance.on("pan zoom", () => {
+      userMoved = true;
+    });
+    const stopLayout = startLayout(input, (positions) => {
+      if (cy.current !== instance || instance.destroyed()) return;
+      instance.batch(() => {
+        for (const p of positions)
+          instance.getElementById(p.id).position({ x: p.x, y: p.y });
+      });
+      if (!userMoved) instance.fit(undefined, 55);
+    });
+    const detail = () => {
+      const instance = cy.current;
+      if (!instance) return;
+      instance.nodes().toggleClass("overview", instance.zoom() < 0.65);
+      instance
+        .edges()
+        .toggleClass(
+          "overview",
+          instance.zoom() < 1.1 || graph.edges.length > 250,
+        );
+    };
+    cy.current.on("zoom", detail);
+    detail();
     cy.current.on("tap", "node", (event) => {
       const node = graph.nodes.find((n) => n.id === event.target.id());
       if (node) callback.current(node);
@@ -174,6 +181,7 @@ export function GraphCanvas({
     const observer = new ResizeObserver(() => cy.current?.resize());
     observer.observe(container.current);
     return () => {
+      stopLayout();
       observer.disconnect();
       cy.current?.destroy();
       cy.current = null;
@@ -209,6 +217,13 @@ export function GraphCanvas({
         renderedPosition: { x: c.width() / 2, y: c.height() / 2 },
       });
   }
+  if (!layoutInput(graph))
+    return (
+      <div role="alert">
+        This view exceeds visualization bounds or contains invalid endpoints.
+        Reset to a bounded view.
+      </div>
+    );
   return (
     <div className="canvas-wrap">
       <div
@@ -218,10 +233,7 @@ export function GraphCanvas({
         aria-label={`Identity and data graph with ${graph.nodes.length} nodes. Use the identity list to select a node with the keyboard.`}
       />
       <div className="canvas-labels">
-        <span>IDENTITIES</span>
-        <span>TOOLS</span>
-        <span>ROLES</span>
-        <span>DATA ASSETS</span>
+        <span>CONNECTED VIEW · ZOOM IN FOR LABELS</span>
       </div>
       <div className="graph-controls">
         <button aria-label="Zoom in" onClick={() => zoom(1.2)}>

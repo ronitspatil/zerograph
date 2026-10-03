@@ -1651,4 +1651,36 @@
       grid-template-columns: 1fr;
     }
   }
+  .exploration-status {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    padding: 12px 20px;
+    color: #a9bbd2;
+    font-size: 12px;
+    border-bottom: 1px solid #243143;
+  }
+  .graph-search-results {
+    max-height: 280px;
+    overflow: auto;
+    padding: 12px 20px;
+    border-bottom: 1px solid #243143;
+  }
+  .graph-search-results button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 8px;
+    border-radius: 6px;
+  }
+  .graph-search-results button:hover,
+  .graph-search-results button:focus-visible {
+    background: #1b293c;
+  }
+  .graph-search-results small {
+    display: block;
+    color: #a9bbd2;
+    overflow-wrap: anywhere;
+  }
 }

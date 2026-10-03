@@ -38,6 +38,22 @@ export interface GraphData {
   edges: GraphEdge[];
   warnings: string[];
 }
+export interface GraphView extends GraphData {
+  view: {
+    mode: "sample" | "neighborhood";
+    root_id: string | null;
+    node_limit: number;
+    edge_limit: number;
+    truncated: boolean;
+    total_nodes: number;
+    total_edges: number;
+  };
+}
+export interface GraphSearch {
+  revision: string;
+  nodes: GraphNode[];
+  has_more: boolean;
+}
 export interface Overview {
   total_nhis: number;
   ai_agents: number;
