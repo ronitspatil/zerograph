@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from deploy.kubernetes import Drill, DrillError, check_config, classify_fixture_log, private_file, run
+from deploy.kubernetes import Drill, DrillError, check_config, classify_fixture_log, main, private_file, run
 
 
 def config():
