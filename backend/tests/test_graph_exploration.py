@@ -62,8 +62,15 @@ def test_memory_dense_bounds_endpoints_directions_annotation_and_no_full_snapsho
         assert len(nodes) == 50 and more
         assert store.search("tenant", "rev", "n:0599", 1)[0][0].id == "n:0599"
         assert store.search("other", "rev", "customer", 50) == ([], False)
+    copied_id = view.nodes[0].id
+    published_name = next(
+        node.name for node in store.snapshots[("tenant", "rev")].nodes if node.id == copied_id
+    )
     view.nodes[0].name = "mutated"
-    assert store.snapshots[("tenant", "rev")].nodes[-1].name == "Dense Hub"
+    assert (
+        next(node.name for node in store.snapshots[("tenant", "rev")].nodes if node.id == copied_id)
+        == published_name
+    )
 
 
 def test_api_samples_counts_search_bounds_and_revision(client, environment):
@@ -175,6 +182,7 @@ class Transaction:
     def __init__(self):
         self.calls = []
         self.missing_meta = False
+        self.missing_root = False
         self.root = Node(id="root", name="Root", type=NodeType.AGENT)
         self.neighbor = Node(id="neighbor", name="Neighbor", type=NodeType.MCP)
         self.edge = Edge(source="neighbor", target="root", type=EdgeType.INVOKES)
@@ -186,12 +194,14 @@ class Transaction:
         if "count(" in query:
             return Rows([{"count": 2 if "count(n)" in query else 1}])
         if "r.payload" in query:
+            if self.edge.source not in params["ids"] or self.edge.target not in params["ids"]:
+                return Rows([])
             return Rows([{"payload": self.edge.model_dump_json()}])
         if "CONTAINS" in query:
             return Rows([{"payload": node.model_dump_json()} for node in (self.neighbor, self.root)])
         if "WITH DISTINCT" in query:
             return Rows([{"payload": self.neighbor.model_dump_json()}])
-        return Rows([{"payload": self.root.model_dump_json()}])
+        return Rows([] if self.missing_root else [{"payload": self.root.model_dump_json()}])
 
 
 def cypher_store():
@@ -232,6 +242,19 @@ def test_cypher_queries_bound_rows_parameterize_and_scope_all_entities_and_relat
     edges = next((q, p) for q, p in queries if "r.payload" in q)
     assert edges[1]["limit"] == 4 and set(edges[1]["ids"]) == {"neighbor", "root"}
     tx.calls.clear()
+    sample = store.explore("tenant", "revision", None, 500, 2000)
+    assert sample.truncated
+    payload_query = next((q, p) for q, p in tx.calls if "n.payload" in q)
+    assert "ORDER BY n.id LIMIT $limit" in payload_query[0] and payload_query[1]["limit"] == 500
+    tx.calls.clear()
+    root_only = store.explore("tenant", "revision", "root", 1, 1)
+    assert [node.id for node in root_only.nodes] == ["root"] and root_only.edges == []
+    assert not any("WITH DISTINCT" in query for query, _ in tx.calls)
+    tx.missing_root = True
+    with pytest.raises(RootNotFound):
+        store.explore("tenant", "revision", "root", 5, 5)
+    tx.missing_root = False
+    tx.calls.clear()
     nodes, more = store.search("tenant", "revision", " x' MATCH (secret) ", 1)
     assert len(nodes) == 1 and more
     query, params = tx.calls[-1]
@@ -247,3 +270,21 @@ def test_cypher_queries_bound_rows_parameterize_and_scope_all_entities_and_relat
             operation()
     assert store.explore("tenant", "", None, 2, 2).total_nodes == 0
     assert store.search("tenant", "", "x", 2) == ([], False)
+
+
+@pytest.mark.parametrize(
+    "node_limit,edge_limit,root", [(0, 1, None), (501, 1, None), (1, 2001, None), (1, 1, "")]
+)
+def test_store_rejects_invalid_bounds_before_driver(node_limit, edge_limit, root):
+    store, _ = cypher_store()
+    with pytest.raises(ValueError):
+        store.explore("tenant", "revision", root, node_limit, edge_limit)
+    store.driver.session.assert_not_called()
+
+
+@pytest.mark.parametrize("q,limit", [(" ", 1), ("x" * 129, 1), ("x", 0), ("x", 51)])
+def test_search_rejects_invalid_bounds_before_driver(q, limit):
+    store, _ = cypher_store()
+    with pytest.raises(ValueError):
+        store.search("tenant", "revision", q, limit)
+    store.driver.session.assert_not_called()
