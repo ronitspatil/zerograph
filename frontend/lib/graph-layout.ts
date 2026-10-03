@@ -7,6 +7,7 @@ export interface Position {
 export interface LayoutInput {
   nodes: string[];
   edges: { id: string; source: string; target: string }[];
+  attributes?: Record<string, { type: string; account: string }>;
 }
 export function layoutInput(graph: GraphData): LayoutInput | null {
   if (graph.nodes.length > 500 || graph.edges.length > 2000) return null;
@@ -18,6 +19,9 @@ export function layoutInput(graph: GraphData): LayoutInput | null {
     return null;
   return {
     nodes: graph.nodes.map((n) => n.id),
+    attributes: Object.fromEntries(
+      graph.nodes.map((n) => [n.id, { type: n.type, account: n.account_id }]),
+    ),
     edges: graph.edges.map((e) => ({
       id: e.id,
       source: e.source,
@@ -89,4 +93,25 @@ export function startLayout(
     stop();
   }
   return stop;
+}
+
+/** Label priority within this visible slice only; never a global importance score. */
+export function overviewAnchors(graph: GraphData): Set<string> {
+  const degree = new Map(graph.nodes.map((n) => [n.id, 0]));
+  for (const edge of graph.edges) {
+    if (degree.has(edge.source))
+      degree.set(edge.source, degree.get(edge.source)! + 1);
+    if (degree.has(edge.target))
+      degree.set(edge.target, degree.get(edge.target)! + 1);
+  }
+  return new Set(
+    graph.nodes
+      .filter((n) => n.type === "CloudRole")
+      .sort(
+        (a, b) =>
+          degree.get(b.id)! - degree.get(a.id)! || a.id.localeCompare(b.id),
+      )
+      .slice(0, 16)
+      .map((n) => n.id),
+  );
 }

@@ -669,9 +669,8 @@
   }
   .canvas-wrap {
     position: relative;
-    height: 425px;
-    background-image: radial-gradient(#29374a 1px, transparent 1px);
-    background-size: 20px 20px;
+    height: 560px;
+    background: #0d1522;
   }
   .graph-canvas {
     height: 100%;
@@ -739,7 +738,7 @@
     background: #f294a1;
   }
   .identity-list {
-    max-height: 128px;
+    max-height: 88px;
     overflow-y: auto;
     align-content: flex-start;
     display: flex;
@@ -1442,7 +1441,7 @@
       min-height: 490px;
     }
     .canvas-wrap {
-      height: 465px;
+      height: 580px;
     }
     .node-sidebar {
       width: 260px;
@@ -1623,7 +1622,7 @@
       display: none;
     }
     .canvas-wrap {
-      height: 360px;
+      height: 540px;
     }
     .panel-heading {
       padding: 15px;

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   circlePositions,
+  overviewAnchors,
   layoutInput,
   startLayout,
   type LayoutInput,
@@ -117,4 +118,44 @@ describe("bounded off-thread layout lifecycle", () => {
     failed.onerror?.(new Event("error"));
     expect(failed.terminate).toHaveBeenCalledOnce();
   });
+});
+
+it("caps overview role labels by visible degree with deterministic ties", () => {
+  const nodes = Array.from({ length: 40 }, (_, i) => ({
+    id: `r${String(i).padStart(2, "0")}`,
+    name: "Role",
+    type: "CloudRole" as const,
+    provider: "fixture",
+    account_id: "a",
+    sensitivity: "internal" as const,
+    tags: [],
+    internet_exposed: false,
+    authenticated: true,
+    encrypted: true,
+    privileged: false,
+    metadata: {},
+  }));
+  const graph = {
+    revision: "r",
+    nodes,
+    edges: [
+      {
+        id: "e",
+        source: "r39",
+        target: "r38",
+        type: "ASSUMES_ROLE" as const,
+        actions: [],
+        certainty: "confirmed" as const,
+        evidence: [],
+      },
+    ],
+    warnings: [],
+  };
+  const anchors = overviewAnchors(graph);
+  expect(anchors.size).toBe(16);
+  expect(anchors.has("r39")).toBe(true);
+  expect(anchors.has("r38")).toBe(true);
+  expect([
+    ...overviewAnchors({ ...graph, nodes: [...nodes].reverse() }),
+  ]).toEqual([...anchors]);
 });
