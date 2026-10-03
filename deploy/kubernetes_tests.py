@@ -1,5 +1,6 @@
 """Safety regressions: no cluster access or Docker required."""
 
+import ast
 import base64
 import copy
 import json
@@ -7,8 +8,9 @@ import os
 import shutil
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from deploy.kubernetes import Drill, DrillError, check_config, classify_fixture_log, main, private_file, run
 
@@ -292,6 +294,109 @@ class SafetyTests(unittest.TestCase):
                     ] = value
                     with self.assertRaisesRegex(DrillError, "runtime container security controls"):
                         drill.runtime()
+
+    def test_http_contract_and_sanitized_failures(self):
+        # Read the actual Counter declaration; no backend dependency install needed in kind CI.
+        source = Path(__file__).resolve().parents[1] / "backend/app/core/telemetry.py"
+        tree = ast.parse(source.read_text())
+        names = [
+            node.args[0].value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "Counter"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+        ]
+        self.assertIn("zg_http_requests_total", names)
+        self.http_fixture(b"# HELP " + names[0].encode() + b" requests")
+        with self.assertRaisesRegex(DrillError, "HTTP content: metrics_authorized"):
+            self.http_fixture(b"zerograph_wrong_metric secret-body")
+        with self.assertRaisesRegex(DrillError, "HTTP status: graph_denied"):
+            self.http_fixture(b"zg_http_requests_total", denied=200)
+
+    def http_fixture(self, metrics, denied=401):
+        with tempfile.TemporaryDirectory() as folder:
+            drill = Drill(Path(folder))
+            statuses = [
+                (200, b""),
+                (200, b""),
+                (denied, b"private"),
+                (401, b""),
+                (401, b""),
+                (200, metrics),
+                (200, b""),
+                (403, b"Demo disabled"),
+            ]
+            responses = []
+            for status, body in statuses:
+                response = Mock(status=status)
+                response.read.return_value = body
+                response.__enter__ = Mock(return_value=response)
+                response.__exit__ = Mock(return_value=False)
+                responses.append(response)
+            with (
+                patch.object(drill, "forward", side_effect=lambda *a: nullcontext("http://127.0.0.1:1234")),
+                patch("deploy.kubernetes.build_opener") as opener,
+            ):
+                opener.return_value.open.side_effect = responses
+                try:
+                    drill.http_checks()
+                finally:
+                    self.assertTrue(all(isinstance(v, int) for v in drill.results["http_statuses"].values()))
+                    self.assertNotIn("private", json.dumps(drill.results))
+
+    def test_actual_telemetry_render_contract(self):
+        try:
+            from app.core.telemetry import Telemetry
+        except ImportError:
+            self.skipTest("Backend dependencies/PYTHONPATH absent; AST contract runs independently")
+        with patch("app.core.telemetry.IngestionCollector._refresh"):
+            telemetry = Telemetry({"health"})
+            telemetry.observe_http("health", "GET", 200, 0.01)
+            self.http_fixture(telemetry.render())
+
+    def test_restart_exact_names_and_nonvacuous_uid_proof(self):
+        components = ("backend", "frontend", "worker", "scheduler")
+
+        def pods(suffix):
+            return {
+                "items": [{"metadata": {"labels": {"component": c}, "uid": c + suffix}} for c in components]
+            }
+
+        with tempfile.TemporaryDirectory() as folder:
+            drill = Drill(Path(folder))
+            old, new = pods("old"), pods("new")
+            # A terminating previous generation must never overwrite the active baseline.
+            terminating = copy.deepcopy(old["items"][0])
+            terminating["metadata"]["deletionTimestamp"] = "fixture"
+            terminating["metadata"]["uid"] = "obsolete"
+            old["items"].append(terminating)
+            with (
+                patch.object(drill, "get", side_effect=[old, new]),
+                patch.object(drill, "kubectl") as kubectl,
+                patch.object(drill, "rollouts"),
+            ):
+                drill.restart_applications()
+                kubectl.assert_called_once_with(
+                    "rollout", "restart", *["deployment/zerograph-" + c for c in components]
+                )
+                self.assertEqual(set(drill.results["application_restart_components"]), set(components))
+            with (
+                patch.object(drill, "get", side_effect=[old, old]),
+                patch.object(drill, "kubectl"),
+                patch.object(drill, "rollouts"),
+            ):
+                with self.assertRaisesRegex(DrillError, "application restart pod UID proof"):
+                    drill.restart_applications()
+            for invalid in (
+                {"items": []},
+                {"items": new["items"][:-1]},
+                {"items": new["items"] + [new["items"][0]]},
+            ):
+                with patch.object(drill, "get", return_value=invalid):
+                    with self.assertRaisesRegex(DrillError, "application active pod inventory"):
+                        drill.active_pod_ids()
 
     def test_commands_refuse_before_cluster_ownership(self):
         with tempfile.TemporaryDirectory() as folder:

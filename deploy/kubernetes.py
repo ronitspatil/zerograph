@@ -546,24 +546,74 @@ class Drill:
             except URLError:
                 raise DrillError("Loopback HTTP probe failed") from None
 
+        def expect(label, expected, result, content=None):
+            status, body = result
+            # Only fixed keys and numeric HTTP outcomes reach the evidence artifact.
+            self.results.setdefault("http_statuses", {})[label] = (
+                status if isinstance(status, int) and 100 <= status <= 599 else 0
+            )
+            if status != expected:
+                raise DrillError("HTTP status: " + label)
+            if content is not None and content not in body:
+                raise DrillError("HTTP content: " + label)
+
         with self.forward("zerograph-backend", 8000) as base:
-            assert request(base, "/health/live")[0] == 200
-            assert request(base, "/health/ready")[0] == 200
-            assert request(base, "/api/v1/graph")[0] == 401
-            assert request(base, "/metrics")[0] == 401
-            assert request(base, "/metrics", "incorrect-fixture-token")[0] == 401
-            status, body = request(base, "/metrics", self.metrics_token)
-            assert status == 200 and b"zerograph_" in body
+            expect("live", 200, request(base, "/health/live"))
+            expect("ready", 200, request(base, "/health/ready"))
+            expect("graph_denied", 401, request(base, "/api/v1/graph"))
+            expect("metrics_denied", 401, request(base, "/metrics"))
+            expect("metrics_invalid", 401, request(base, "/metrics", "incorrect-fixture-token"))
+            expect(
+                "metrics_authorized",
+                200,
+                request(base, "/metrics", self.metrics_token),
+                b"zg_http_requests_total",
+            )
         with self.forward("zerograph-frontend", 3100) as base:
-            assert request(base, "/login")[0] == 200
+            expect("login", 200, request(base, "/login"))
             status, body = request(
                 base,
                 "/api/auth/demo",
                 method="POST",
                 extra_headers={"Origin": "https://qualification.invalid"},
             )
-            assert status == 403 and b"Demo disabled" in body
+            expect("demo_disabled", 403, (status, body), b"Demo disabled")
         self.check("production API denial, protected metrics and web readiness")
+
+    def active_pod_ids(self):
+        ids = {}
+        components = {"backend", "frontend", "worker", "scheduler"}
+        for pod in self.get("pods", "-l", "app=zerograph")["items"]:
+            metadata = pod["metadata"]
+            if metadata.get("deletionTimestamp"):
+                continue
+            component = metadata.get("labels", {}).get("component")
+            uid = metadata.get("uid")
+            if component not in components or component in ids or not uid:
+                raise DrillError("application active pod inventory")
+            ids[component] = uid
+        if set(ids) != components:
+            raise DrillError("application active pod inventory")
+        return ids
+
+    def changed_pods(self, before, label):
+        after = self.active_pod_ids()
+        if set(before) != set(after) or any(before[c] == after[c] for c in before):
+            raise DrillError(label)
+
+    def restart_applications(self):
+        before = self.active_pod_ids()
+        self.kubectl(
+            "rollout",
+            "restart",
+            *[
+                "deployment/zerograph-" + component
+                for component in ("backend", "frontend", "worker", "scheduler")
+            ],
+        )
+        self.rollouts()
+        self.changed_pods(before, "application restart pod UID proof")
+        self.results["application_restart_components"] = sorted(before)
 
     def seed(self, mode):
         script = (ROOT / "deploy/kubernetes_seed.py").read_text()
@@ -658,10 +708,7 @@ class Drill:
         self.seed("seed")
         self.check("fresh migration head and coherent synthetic SQL/graph seed")
         self.stage = "upgrade configuration"
-        before = {
-            p["metadata"]["labels"]["component"]: p["metadata"]["uid"]
-            for p in self.get("pods", "-l", "app=zerograph")["items"]
-        }
+        before = self.active_pod_ids()
         self.helm(
             "upgrade",
             "zerograph",
@@ -681,12 +728,7 @@ class Drill:
         assert (
             self.results["migration_hook_v1"]["started_at"] != self.results["migration_hook_v2"]["started_at"]
         )
-        after = {
-            p["metadata"]["labels"]["component"]: p["metadata"]["uid"]
-            for p in self.get("pods", "-l", "app=zerograph")["items"]
-            if not p["metadata"].get("deletionTimestamp")
-        }
-        assert set(before) == set(after) and all(before[c] != after[c] for c in before)
+        self.changed_pods(before, "configuration rollout pod UID proof")
         self.seed("verify")
         self.check("upgrade migration and ConfigMap rollout preserve revision")
         self.stage = "restart persistent fixture pods and application"
@@ -702,8 +744,7 @@ class Drill:
         )
         for name in ("postgres", "redis", "memgraph"):
             self.kubectl("rollout", "status", "statefulset/" + name, "--timeout=240s", timeout=270)
-        self.kubectl("rollout", "restart", "deployment", "-l", "app=zerograph")
-        self.rollouts()
+        self.restart_applications()
         self.seed("verify")
         self.runtime()
         self.http_checks()
