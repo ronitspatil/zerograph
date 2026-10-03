@@ -1,0 +1,224 @@
+"""Safety regressions: no cluster access or Docker required."""
+
+import base64
+import json
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from deploy.kubernetes import Drill, DrillError, check_config, classify_fixture_log, private_file, run
+
+
+def config():
+    embedded = base64.b64encode(b"-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----").decode()
+    return {
+        "apiVersion": "v1",
+        "kind": "Config",
+        "users": [
+            {"name": "kind-owned", "user": {"client-certificate-data": embedded, "client-key-data": embedded}}
+        ],
+        "current-context": "kind-owned",
+        "clusters": [
+            {
+                "name": "kind-owned",
+                "cluster": {"server": "https://127.0.0.1:1234", "certificate-authority-data": embedded},
+            }
+        ],
+        "contexts": [{"name": "kind-owned", "context": {"cluster": "kind-owned", "user": "kind-owned"}}],
+    }
+
+
+class SafetyTests(unittest.TestCase):
+    def test_context_and_endpoint_are_pinned(self):
+        current = config()
+        self.assertEqual(check_config(current, "kind-owned"), "https://127.0.0.1:1234")
+        for mutate in (
+            lambda c: c.update({"current-context": "live"}),
+            lambda c: c["clusters"][0]["cluster"].update(server="https://customer.example.com"),
+            lambda c: c["clusters"][0]["cluster"].update(server="http://127.0.0.1:1234"),
+            lambda c: c["contexts"].append(c["contexts"][0]),
+            lambda c: c["contexts"][0]["context"].update(cluster="live"),
+        ):
+            current = config()
+            mutate(current)
+            with self.assertRaises(DrillError):
+                check_config(current, "kind-owned")
+        with self.assertRaises(DrillError):
+            check_config(config(), "kind-owned", "https://127.0.0.1:4567")
+
+    def test_tls_plugins_and_external_credentials_refused(self):
+        mutations = [
+            lambda c: c["clusters"][0]["cluster"].update({"insecure-skip-tls-verify": True}),
+            lambda c: c["clusters"][0]["cluster"].update({"tls-server-name": "customer"}),
+            lambda c: c["clusters"][0]["cluster"].update({"certificate-authority": "/customer/ca"}),
+            lambda c: c["users"][0]["user"].update({"exec": {"command": "credential-plugin"}}),
+            lambda c: c["users"][0]["user"].update({"auth-provider": {"name": "plugin"}}),
+            lambda c: c["users"][0]["user"].update({"client-key": "/customer/key"}),
+            lambda c: c["users"].append(c["users"][0]),
+            lambda c: c["contexts"][0]["context"].update(user="customer"),
+            lambda c: c["users"][0]["user"].update({"client-key-data": "malformed"}),
+        ]
+        for mutate in mutations:
+            current = config()
+            mutate(current)
+            with self.assertRaises(DrillError):
+                check_config(current, "kind-owned")
+
+    def test_replacement_control_plane_refused(self):
+        with tempfile.TemporaryDirectory() as folder:
+            drill = Drill(Path(folder))
+            node = {"Id": "original", "Config": {"Labels": {"io.x-k8s.kind.cluster": drill.cluster}}}
+            with patch.object(drill, "command", return_value=json.dumps([node])):
+                drill.owned_node()
+            node["Id"] = "replacement"
+            with patch.object(drill, "command", return_value=json.dumps([node])):
+                with self.assertRaises(DrillError):
+                    drill.owned_node()
+
+    def test_sensitive_file_is_private_and_never_overwritten(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "private"
+            private_file(path, "sensitive")
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            with self.assertRaises(FileExistsError):
+                private_file(path, "replacement")
+            self.assertEqual(path.read_text(), "sensitive")
+
+    def test_environment_cannot_override_helm_cluster_or_storage(self):
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            patch.dict(
+                os.environ,
+                {
+                    "HELM_KUBEAPISERVER": "https://customer.example.com",
+                    "HELM_KUBETOKEN": "customer-token",
+                    "HELM_KUBEINSECURE_SKIP_TLS_VERIFY": "true",
+                    "HELM_DRIVER": "sql",
+                    "KUBECONFIG": "/customer/config",
+                    "KUBERNETES_MASTER": "https://customer.example.com",
+                    "HELM_DATA_HOME": "/customer/helm",
+                },
+            ),
+        ):
+            drill = Drill(Path(folder))
+            self.assertFalse(any(key.startswith("HELM_KUBE") for key in drill.env))
+            self.assertNotIn("KUBERNETES_MASTER", drill.env)
+            self.assertEqual(drill.env["HELM_DRIVER"], "secret")
+            self.assertEqual(drill.env["KUBECONFIG"], str(Path(folder) / "kubeconfig"))
+            self.assertEqual(drill.env["HELM_DATA_HOME"], str(Path(folder) / "helm-data"))
+
+    def test_docker_bootstrap_cannot_use_remote_context_or_credentials(self):
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            patch.dict(
+                os.environ,
+                {
+                    "DOCKER_HOST": "tcp://customer.example.com:2376",
+                    "DOCKER_CONTEXT": "customer",
+                    "DOCKER_CONFIG": "/customer/docker",
+                    "DOCKER_CERT_PATH": "/customer/certs",
+                    "DOCKER_TLS_VERIFY": "1",
+                },
+            ),
+        ):
+            drill = Drill(Path(folder))
+            self.assertEqual(drill.env["DOCKER_HOST"], "unix:///var/run/docker.sock")
+            self.assertEqual(drill.env["DOCKER_CONFIG"], str(Path(folder) / "docker-config"))
+            self.assertFalse(
+                any(key in drill.env for key in ("DOCKER_CONTEXT", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY"))
+            )
+            config_file = Path(drill.env["DOCKER_CONFIG"]) / "config.json"
+            self.assertEqual(config_file.read_text(), "{}")
+            self.assertEqual(config_file.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(config_file.parent.stat().st_mode & 0o777, 0o700)
+
+    def test_memgraph_fixture_uses_vendor_nonroot_volume_group(self):
+        with tempfile.TemporaryDirectory() as folder:
+            drill = Drill(Path(folder))
+            with (
+                patch.object(drill, "apply") as apply,
+                patch.object(drill, "kubectl"),
+                patch.object(drill, "get", return_value={"items": []}),
+            ):
+                drill.fixtures()
+            resources = apply.call_args.args[0]
+            graph = next(
+                r for r in resources if r["kind"] == "StatefulSet" and r["metadata"]["name"] == "memgraph"
+            )
+            self.assertEqual(
+                graph["spec"]["template"]["spec"]["securityContext"],
+                {"runAsUser": 101, "runAsGroup": 101, "fsGroup": 101, "runAsNonRoot": True},
+            )
+            self.assertEqual(
+                graph["spec"]["template"]["spec"]["containers"][0]["volumeMounts"][0]["mountPath"],
+                "/var/lib/memgraph",
+            )
+
+    def test_fixture_logs_export_only_bounded_boolean_categories(self):
+        categories = classify_fixture_log(
+            "sensitive-value Permission denied ERROR unknown command line flag Out of memory No space left on device"
+        )
+        self.assertEqual(
+            categories, {"permission_denied": True, "invalid_flag": True, "oom": True, "no_space": True}
+        )
+        self.assertNotIn("sensitive-value", str(categories))
+        self.assertFalse(any(classify_fixture_log("x" * 10000 + " Permission denied").values()))
+        self.assertFalse(
+            any(classify_fixture_log("Unclassified segmentation fault sensitive-value").values())
+        )
+
+    def test_commands_refuse_before_cluster_ownership(self):
+        with tempfile.TemporaryDirectory() as folder:
+            drill = Drill(Path(folder))
+            with patch.object(drill, "command") as command:
+                for operation in (
+                    lambda: drill.kubectl("delete", "namespace", "customer"),
+                    lambda: drill.helm("uninstall", "customer"),
+                ):
+                    with self.assertRaises(DrillError):
+                        operation()
+                command.assert_not_called()
+
+    def test_node_label_mismatch_refuses_cleanup(self):
+        with tempfile.TemporaryDirectory() as folder:
+            drill = Drill(Path(folder))
+            with patch.object(
+                drill, "command", return_value='[{"Config":{"Labels":{"io.x-k8s.kind.cluster":"customer"}}}]'
+            ):
+                with self.assertRaises(DrillError):
+                    drill.owned_node()
+
+    def test_subprocess_errors_do_not_expose_sensitive_inputs(self):
+        with patch("deploy.kubernetes.subprocess.run") as command:
+            command.return_value.returncode = 1
+            command.return_value.stdout = "secret output"
+            command.return_value.stderr = "secret error"
+            with self.assertRaisesRegex(DrillError, "safe operation: exit 1") as error:
+                run(
+                    ["tool", "secret argument"],
+                    env={"SECRET": "secret value"},
+                    data="secret manifest",
+                    label="safe operation",
+                )
+            self.assertNotIn("secret", str(error.exception))
+
+    def test_symlink_and_public_kubeconfig_refused(self):
+        with tempfile.TemporaryDirectory() as folder:
+            drill = Drill(Path(folder))
+            drill.created = True
+            private_file(drill.kubeconfig, "unused")
+            os.chmod(drill.kubeconfig, 0o644)
+            with self.assertRaises(DrillError):
+                drill.guard()
+            drill.kubeconfig.unlink()
+            target = Path(folder) / "target"
+            private_file(target, "unused")
+            drill.kubeconfig.symlink_to(target)
+            with self.assertRaises(DrillError):
+                drill.guard()
+
+
+if __name__ == "__main__":
+    unittest.main()
