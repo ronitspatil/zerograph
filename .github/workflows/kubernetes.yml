@@ -1,11 +1,14 @@
 name: ZeroGraph Kubernetes qualification
-on: [push, pull_request]
+on: [workflow_dispatch]
+concurrency:
+  group: zerograph-kubernetes-qualification
+  cancel-in-progress: false
 permissions:
   contents: read
 jobs:
   kind-helm:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 25
     env:
       ZG_KUBE_SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
