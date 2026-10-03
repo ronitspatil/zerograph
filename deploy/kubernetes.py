@@ -116,6 +116,25 @@ def check_config(config, context, server=None):
     return target
 
 
+def classify_fixture_log(output):
+    """Return fixed categories only; never retain or emit raw fixture log text."""
+    bounded = output[:10000].lower()
+    return {
+        "permission_denied": "permission denied" in bounded,
+        "invalid_flag": any(
+            term in bounded
+            for term in (
+                "unknown command line flag",
+                "unrecognized option",
+                "unknown option",
+                "invalid value for flag",
+            )
+        ),
+        "oom": any(term in bounded for term in ("out of memory", "bad_alloc", "cannot allocate memory")),
+        "no_space": "no space left on device" in bounded,
+    }
+
+
 class Drill:
     def __init__(self, folder):
         self.folder = folder
@@ -644,6 +663,14 @@ class Drill:
         self.check("release uninstall and owned namespace removal")
 
     def diagnostics(self):
+        try:
+            output = self.kubectl(
+                "logs", "memgraph-0", "--previous", "--tail=80", "--limit-bytes=10000", timeout=15
+            )
+            self.results["memgraph_failure_categories"] = classify_fixture_log(output)
+            del output
+        except Exception:
+            self.results["memgraph_failure_categories"] = "unavailable"
         try:
             pods = self.get("pods")["items"]
             self.results["pod_status"] = [

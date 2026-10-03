@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from deploy.kubernetes import Drill, DrillError, check_config, private_file, run
+from deploy.kubernetes import Drill, DrillError, check_config, classify_fixture_log, private_file, run
 
 
 def config():
@@ -155,6 +155,19 @@ class SafetyTests(unittest.TestCase):
                 graph["spec"]["template"]["spec"]["containers"][0]["volumeMounts"][0]["mountPath"],
                 "/var/lib/memgraph",
             )
+
+    def test_fixture_logs_export_only_bounded_boolean_categories(self):
+        categories = classify_fixture_log(
+            "sensitive-value Permission denied ERROR unknown command line flag Out of memory No space left on device"
+        )
+        self.assertEqual(
+            categories, {"permission_denied": True, "invalid_flag": True, "oom": True, "no_space": True}
+        )
+        self.assertNotIn("sensitive-value", str(categories))
+        self.assertFalse(any(classify_fixture_log("x" * 10000 + " Permission denied").values()))
+        self.assertFalse(
+            any(classify_fixture_log("Unclassified segmentation fault sensitive-value").values())
+        )
 
     def test_commands_refuse_before_cluster_ownership(self):
         with tempfile.TemporaryDirectory() as folder:
