@@ -9,6 +9,17 @@ from neo4j import GraphDatabase, Query, unit_of_work
 from neo4j.exceptions import Neo4jError
 
 from app.core.config import get_settings
+from app.graph.exploration import (
+    GraphSlice,
+    RevisionUnavailable,
+    RootNotFound,
+    cypher_explore,
+    cypher_search,
+    memory_explore,
+    memory_search,
+    search_text,
+    validate_bounds,
+)
 from app.graph.schema import Edge, EdgeType, GraphSnapshot, Node, NodeType
 
 
@@ -22,6 +33,10 @@ class GraphStore(Protocol):
     def migrate(self) -> None: ...
     def publish(self, tenant: str, revision: str, snapshot: GraphSnapshot) -> None: ...
     def snapshot(self, tenant: str, revision: str) -> GraphSnapshot: ...
+    def explore(
+        self, tenant: str, revision: str, root: str | None, node_limit: int, edge_limit: int
+    ) -> GraphSlice: ...
+    def search(self, tenant: str, revision: str, q: str, limit: int) -> tuple[list[Node], bool]: ...
     def retention_candidates(
         self, tenant: str, protected: str, cutoff_ms: int, keep: int, limit: int
     ) -> list[RevisionMetadata]: ...
@@ -48,6 +63,20 @@ class MemoryGraphStore:
 
     def snapshot(self, tenant: str, revision: str) -> GraphSnapshot:
         return self.snapshots.get((tenant, revision), GraphSnapshot()).model_copy(deep=True)
+
+    def explore(
+        self, tenant: str, revision: str, root: str | None, node_limit: int, edge_limit: int
+    ) -> GraphSlice:
+        if revision and (tenant, revision) not in self.snapshots:
+            raise RevisionUnavailable("Published graph revision unavailable")
+        return memory_explore(
+            self.snapshots[(tenant, revision)] if revision else GraphSnapshot(), root, node_limit, edge_limit
+        )
+
+    def search(self, tenant: str, revision: str, q: str, limit: int) -> tuple[list[Node], bool]:
+        if revision and (tenant, revision) not in self.snapshots:
+            raise RevisionUnavailable("Published graph revision unavailable")
+        return memory_search(self.snapshots[(tenant, revision)] if revision else GraphSnapshot(), q, limit)
 
     def retention_candidates(
         self, tenant: str, protected: str, cutoff_ms: int, keep: int, limit: int
@@ -220,6 +249,30 @@ class CypherGraphStore:
             source=meta["source"] if meta else "snapshot",
             warnings=meta["warnings"] if meta else [],
         )
+
+    def explore(
+        self, tenant: str, revision: str, root: str | None, node_limit: int, edge_limit: int
+    ) -> GraphSlice:
+        validate_bounds(node_limit, edge_limit, root)
+        if not revision:
+            if root is not None:
+                raise RootNotFound("Graph root not found")
+            return GraphSlice()
+        with self.driver.session(fetch_size=500) as session:
+            return session.execute_read(
+                unit_of_work(timeout=self.timeout)(
+                    lambda tx: cypher_explore(tx, tenant, revision, root, node_limit, edge_limit)
+                )
+            )
+
+    def search(self, tenant: str, revision: str, q: str, limit: int) -> tuple[list[Node], bool]:
+        q = search_text(q, limit)
+        if not revision:
+            return [], False
+        with self.driver.session(fetch_size=51) as session:
+            return session.execute_read(
+                unit_of_work(timeout=self.timeout)(lambda tx: cypher_search(tx, tenant, revision, q, limit))
+            )
 
     def retention_candidates(
         self, tenant: str, protected: str, cutoff_ms: int, keep: int, limit: int

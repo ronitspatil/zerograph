@@ -5,7 +5,6 @@ import time
 from uuid import uuid4
 
 import pytest
-
 from app.core.config import get_settings
 from app.graph.demo import demo_snapshot
 from app.graph.repository import CypherGraphStore
@@ -138,6 +137,105 @@ def test_real_graph_retention_age_scope_bounds_and_atomic_rollback(environment, 
         store.publish(tenant, "revision-4", demo_snapshot())
         after = store.retention_candidates(tenant, "revision-0", plan.cutoff_ms, 2, 10)
         assert next(item.created_at_ms for item in after if item.revision == "revision-4") == before
+    finally:
+        with store.driver.session() as session:
+            session.run(
+                "MATCH (n) WHERE n.tenant_id IN $tenants DETACH DELETE n", tenants=[tenant, other]
+            ).consume()
+        store.close()
+        get_settings.cache_clear()
+
+
+@pytest.mark.skipif(not os.getenv("ZG_INTEGRATION_GRAPH"), reason="No real graph database configured")
+def test_real_bounded_exploration_search_scopes_and_dense_neighbors(monkeypatch):
+    from unittest.mock import patch
+
+    from app.graph.exploration import RevisionUnavailable, RootNotFound
+    from app.graph.repository import MemoryGraphStore
+    from app.graph.schema import Edge, EdgeType, GraphSnapshot, Node, NodeType
+
+    monkeypatch.setenv("ZG_GRAPH_VENDOR", os.environ["ZG_INTEGRATION_GRAPH"])
+    get_settings.cache_clear()
+    store = CypherGraphStore()
+    for attempt in range(45):
+        try:
+            store.driver.verify_connectivity()
+            break
+        except Exception:
+            if attempt == 44:
+                raise
+            time.sleep(1)
+    store.migrate()
+    tenant, other, revision = "explore-" + str(uuid4()), "explore-other-" + str(uuid4()), str(uuid4())
+    root = Node(id="root", name="Root", type=NodeType.AGENT)
+    nodes = [root] + [
+        Node(id=f"neighbor:{index:03}", name=f"Customer {index}", type=NodeType.DATABASE)
+        for index in range(60)
+    ]
+    nodes.append(Node(id="category", name="PII", type=NodeType.CATEGORY))
+    edges = [Edge(source=root.id, target=node.id, type=EdgeType.READ) for node in nodes[1:-1]]
+    edges += [Edge(source=node.id, target=root.id, type=EdgeType.INVOKES) for node in nodes[1:-1]]
+    edges.append(Edge(source=root.id, target="category", type=EdgeType.PII))
+    snapshot = GraphSnapshot(nodes=nodes, edges=edges)
+    memory = MemoryGraphStore()
+    memory.publish(tenant, revision, snapshot)
+    try:
+        store.publish(tenant, revision, snapshot)
+        store.publish(other, revision, snapshot)
+        store.publish(tenant, "old", snapshot)
+        # Deliberately malformed links must not enter scoped counts/neighborhoods.
+        with store.driver.session() as session:
+            session.run(
+                "MATCH (a:Entity {tenant_id:$tenant, revision:$revision, id:'root'}), "
+                "(b:Entity {tenant_id:$other, revision:$revision, id:'neighbor:059'}) "
+                "CREATE (a)-[:CAN_READ {tenant_id:$tenant, revision:$revision, id:'cross-tenant'}]->(b)",
+                tenant=tenant,
+                other=other,
+                revision=revision,
+            ).consume()
+            session.run(
+                "MATCH (a:Entity {tenant_id:$tenant, revision:$revision, id:'root'}), "
+                "(b:Entity {tenant_id:$tenant, revision:'old', id:'neighbor:059'}) "
+                "CREATE (a)-[:CAN_READ {tenant_id:$tenant, revision:$revision, id:'cross-revision'}]->(b)",
+                tenant=tenant,
+                revision=revision,
+            ).consume()
+            session.run(
+                "MATCH (a:Entity {tenant_id:$tenant, revision:$revision, id:'root'}), "
+                "(b:Entity {tenant_id:$tenant, revision:$revision, id:'neighbor:059'}) "
+                "CREATE (a)-[:CAN_WRITE {tenant_id:$other, revision:$revision, id:'wrong-owner'}]->(b) "
+                "CREATE (a)-[:CAN_WRITE {tenant_id:$tenant, revision:'old', id:'wrong-revision'}]->(b) "
+                "CREATE (a)-[:UNRECOGNIZED {tenant_id:$tenant, revision:$revision, id:'unknown-type'}]->(b)",
+                tenant=tenant,
+                other=other,
+                revision=revision,
+            ).consume()
+        with patch.object(store, "snapshot", side_effect=AssertionError("Full snapshot forbidden")):
+            for source, node_limit, edge_limit in (
+                (None, 3, 4),
+                ("root", 25, 7),
+                ("root", 1, 1),
+                ("root", 100, 200),
+                ("category", 5, 5),
+            ):
+                actual = store.explore(tenant, revision, source, node_limit, edge_limit)
+                expected = memory.explore(tenant, revision, source, node_limit, edge_limit)
+                assert actual == expected
+                ids = {node.id for node in actual.nodes}
+                assert all(edge.source in ids and edge.target in ids for edge in actual.edges)
+            for q, limit in (
+                (" CUSTOMER ", 5),
+                ("neighbor:059", 1),
+                ("missing", 3),
+                ("x' MATCH (secret)", 3),
+            ):
+                assert store.search(tenant, revision, q, limit) == memory.search(tenant, revision, q, limit)
+            with pytest.raises(RootNotFound):
+                store.explore(tenant, revision, "missing", 20, 20)
+            with pytest.raises(RevisionUnavailable):
+                store.explore(tenant, "missing", None, 20, 20)
+            with pytest.raises(RevisionUnavailable):
+                store.search(tenant, "missing", "customer", 20)
     finally:
         with store.driver.session() as session:
             session.run(
