@@ -1,15 +1,17 @@
 name: Production-mode OIDC qualification
 on:
   workflow_dispatch:
+  workflow_call:
 permissions:
   contents: read
 concurrency:
-  group: ${{ github.workflow }}
+  group: zerograph-oidc-qualification
   cancel-in-progress: false
 jobs:
   oidc-qualification:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.head_ref == 'fm/zerograph-runtime-qualification' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'main')
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     env:
       COMPOSE_PROJECT_NAME: zerograph-oidc-qualification-ci
       ZG_OIDC_E2E: "true"

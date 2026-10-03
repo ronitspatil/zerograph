@@ -1,6 +1,7 @@
 name: Production-mode Chromium qualification
 on:
   workflow_dispatch:
+  workflow_call:
 concurrency:
   group: zerograph-browser-qualification
   cancel-in-progress: false
@@ -8,8 +9,9 @@ permissions:
   contents: read
 jobs:
   browser-qualification:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.head_ref == 'fm/zerograph-runtime-qualification' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'main')
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     env:
       COMPOSE_PROJECT_NAME: zerograph-browser-qualification-ci
       PLAYWRIGHT_BROWSERS_PATH: /tmp/zerograph-browser-qualification-browsers

@@ -33,15 +33,55 @@ def runs(job):
     return "\n".join(step.get("run", "") for step in job["steps"])
 
 
+def runner_minutes(name, ancestors=()):
+    """Expand local calls and finite matrices; reject hidden or recursive fanout."""
+    if name in ancestors:
+        raise ValueError("recursive workflow call")
+    total = 0
+    for job in load(name)["jobs"].values():
+        copies = 1
+        matrix = job.get("strategy", {}).get("matrix", {})
+        if not isinstance(matrix, dict):
+            raise ValueError("dynamic matrix is not budgetable")
+        for key, values in matrix.items():
+            if key in {"include", "exclude"} or not isinstance(values, list) or not values:
+                raise ValueError("matrix must have nonempty finite dimensions")
+            copies *= len(values)
+        if "uses" in job:
+            prefix = "./.github/workflows/"
+            reference = job["uses"]
+            if not reference.startswith(prefix):
+                raise ValueError("only same-commit local calls are budgetable")
+            child = reference[len(prefix):]
+            if Path(child).name != child or not child.endswith(".yml"):
+                raise ValueError("invalid local workflow reference")
+            minutes = runner_minutes(child, (*ancestors, name))
+        else:
+            if job.get("runs-on") != "ubuntu-latest":
+                raise ValueError("campaign must use ordinary Linux runners")
+            minutes = job.get("timeout-minutes")
+            if type(minutes) is not int or minutes <= 0:
+                raise ValueError("positive fixed timeout required")
+        total += copies * minutes
+    return total
+
+
 class WorkflowBudgetTests(unittest.TestCase):
     def test_standard_ci_only_pr_and_main_push(self):
         workflow = load("ci.yml")
         self.assertEqual(set(workflow["on"]), {"push", "pull_request"})
         self.assertEqual(workflow["on"]["push"], {"branches": ["main"]})
         self.assertIsNone(workflow["on"]["pull_request"])
-        self.assertEqual(set(workflow["jobs"]), {"backend", "frontend", "helm"})
+        self.assertEqual(
+            {name for name, job in workflow["jobs"].items() if "uses" not in job},
+            {"backend", "frontend", "helm"},
+        )
         concurrency = workflow["concurrency"]
-        self.assertIs(concurrency["cancel-in-progress"], True)
+        self.assertEqual(
+            concurrency["cancel-in-progress"],
+            "${{ github.event_name != 'pull_request' || "
+            "github.head_ref != 'fm/zerograph-runtime-qualification' }}",
+        )
         self.assertIn("github.event.pull_request.number || github.ref", concurrency["group"])
         self.assertIn("github.workflow", concurrency["group"])
 
@@ -49,9 +89,12 @@ class WorkflowBudgetTests(unittest.TestCase):
         for name in ("compose.yml", "graph.yml", "restore.yml", "oidc.yml"):
             with self.subTest(workflow=name):
                 workflow = load(name)
-                self.assertEqual(workflow["on"], {"workflow_dispatch": None})
+                self.assertEqual(workflow["on"], {"workflow_dispatch": None, "workflow_call": None})
                 self.assertIs(workflow["concurrency"]["cancel-in-progress"], False)
-                self.assertEqual(workflow["concurrency"]["group"], "${{ github.workflow }}")
+                self.assertEqual(
+                    workflow["concurrency"]["group"],
+                    f"zerograph-{Path(name).stem}-qualification",
+                )
                 for job in workflow["jobs"].values():
                     self.assertTrue(any(step.get("if") == "always()" for step in job["steps"]))
 
@@ -61,6 +104,8 @@ class WorkflowBudgetTests(unittest.TestCase):
                 workflow = load(name)
                 self.assertEqual(workflow["permissions"], {"contents": "read"})
                 for job in workflow["jobs"].values():
+                    if "uses" in job:
+                        continue
                     self.assertIs(type(job["timeout-minutes"]), int)
                     self.assertGreater(job["timeout-minutes"], 0)
                     self.assertLessEqual(job["timeout-minutes"], 25)
@@ -74,13 +119,54 @@ class WorkflowBudgetTests(unittest.TestCase):
                 continue  # Their implementation branches are not part of this base.
             with self.subTest(workflow=name):
                 workflow = load(name)
-                self.assertEqual(set(workflow["on"]), {"workflow_dispatch"})
+                self.assertEqual(set(workflow["on"]), {"workflow_dispatch", "workflow_call"})
                 self.assertEqual(workflow["permissions"], {"contents": "read"})
                 self.assertIs(workflow["concurrency"]["cancel-in-progress"], False)
                 for job in workflow["jobs"].values():
                     self.assertIs(type(job["timeout-minutes"]), int)
                     self.assertGreater(job["timeout-minutes"], 0)
                     self.assertLessEqual(job["timeout-minutes"], 25)
+
+    def test_campaign_calls_are_exact_branch_guarded_serial_and_same_commit(self):
+        guard = (
+            "github.event_name == 'pull_request' && "
+            "github.head_ref == 'fm/zerograph-runtime-qualification' && "
+            "github.event.pull_request.head.repo.full_name == github.repository && "
+            "github.base_ref == 'main'"
+        )
+        jobs = load("ci.yml")["jobs"]
+        names = ("compose", "graph", "restore", "oidc", "browser", "kubernetes")
+        self.assertEqual(len(jobs), 9)
+        previous = ["backend", "frontend", "helm"]
+        groups = set()
+        for name in names:
+            caller = jobs[f"qualify-{name}"]
+            self.assertEqual(caller["if"], guard)
+            self.assertEqual(caller["needs"], previous)
+            self.assertEqual(caller["uses"], f"./.github/workflows/{name}.yml")
+            self.assertEqual(caller["permissions"], {"contents": "read"})
+            self.assertNotIn("secrets", caller)
+            self.assertNotIn("strategy", caller)
+            child = load(f"{name}.yml")
+            self.assertEqual(child["on"], {"workflow_dispatch": None, "workflow_call": None})
+            group = child["concurrency"]["group"]
+            self.assertNotIn("github.workflow", group)
+            self.assertNotIn(group, groups)
+            groups.add(group)
+            for job in child["jobs"].values():
+                self.assertEqual(job["if"], f"github.event_name == 'workflow_dispatch' || ({guard})")
+                self.assertNotIn("uses", job)  # No nested fanout or reusable-call loops.
+            previous = [f"qualify-{name}"]
+
+    def test_campaign_exact_timeout_budget_includes_both_graph_runners(self):
+        self.assertEqual(runner_minutes("ci.yml"), 95)
+        self.assertEqual(runner_minutes("graph.yml"), 10)
+        limits = {"compose": 10, "graph": 5, "restore": 10, "oidc": 10, "browser": 10, "kubernetes": 20}
+        for name, limit in limits.items():
+            for job in load(f"{name}.yml")["jobs"].values():
+                self.assertEqual(job["timeout-minutes"], limit)
+        for name, limit in {"backend": 10, "frontend": 10, "helm": 5}.items():
+            self.assertEqual(load("ci.yml")["jobs"][name]["timeout-minutes"], limit)
 
     def test_python_setup_consolidates_without_dropping_validation(self):
         jobs = load("ci.yml")["jobs"]

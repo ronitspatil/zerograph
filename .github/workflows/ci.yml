@@ -7,11 +7,11 @@ permissions:
   contents: read
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name != 'pull_request' || github.head_ref != 'fm/zerograph-runtime-qualification' }}
 jobs:
   backend:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     services:
       postgres:
         image: postgres:16-alpine
@@ -47,7 +47,7 @@ jobs:
       - run: pip-audit -r backend/requirements.lock --no-deps --disable-pip
   frontend:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     defaults:
       run: {working-directory: frontend}
     steps:
@@ -71,3 +71,39 @@ jobs:
       - run: pip install PyYAML==6.0.2
       - run: helm lint deploy/helm/zerograph --strict
       - run: python -m unittest discover -s deploy/tests -v
+  qualify-compose:
+    if: github.event_name == 'pull_request' && github.head_ref == 'fm/zerograph-runtime-qualification' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'main'
+    needs: [backend, frontend, helm]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/compose.yml
+  qualify-graph:
+    if: github.event_name == 'pull_request' && github.head_ref == 'fm/zerograph-runtime-qualification' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'main'
+    needs: [qualify-compose]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/graph.yml
+  qualify-restore:
+    if: github.event_name == 'pull_request' && github.head_ref == 'fm/zerograph-runtime-qualification' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'main'
+    needs: [qualify-graph]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/restore.yml
+  qualify-oidc:
+    if: github.event_name == 'pull_request' && github.head_ref == 'fm/zerograph-runtime-qualification' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'main'
+    needs: [qualify-restore]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/oidc.yml
+  qualify-browser:
+    if: github.event_name == 'pull_request' && github.head_ref == 'fm/zerograph-runtime-qualification' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'main'
+    needs: [qualify-oidc]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/browser.yml
+  qualify-kubernetes:
+    if: github.event_name == 'pull_request' && github.head_ref == 'fm/zerograph-runtime-qualification' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'main'
+    needs: [qualify-browser]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/kubernetes.yml
