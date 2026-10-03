@@ -1,0 +1,37 @@
+name: ZeroGraph graph qualification
+on:
+  workflow_dispatch:
+  workflow_call:
+permissions:
+  contents: read
+concurrency:
+  group: zerograph-graph-qualification
+  cancel-in-progress: false
+jobs:
+  graph-integration:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.head_ref == 'fm/zerograph-runtime-qualification' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: true
+      max-parallel: 1
+      matrix:
+        graph: [memgraph, neo4j]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -r backend/requirements-dev.lock -e backend
+      - if: matrix.graph == 'memgraph'
+        run: docker run -d --name graph -p 7687:7687 memgraph/memgraph:3.2.0
+      - if: matrix.graph == 'neo4j'
+        run: docker run -d --name graph -p 7687:7687 -e NEO4J_AUTH=none neo4j:5.26-community
+      - run: pytest tests/test_graph_integration.py -v --no-cov
+        working-directory: backend
+        env:
+          ZG_INTEGRATION_GRAPH: ${{ matrix.graph }}
+          ZG_GRAPH_URI: bolt://localhost:7687
+      - if: failure()
+        run: docker logs graph
+      - if: always()
+        run: docker rm -f graph

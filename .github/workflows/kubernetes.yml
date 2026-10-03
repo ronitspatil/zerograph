@@ -1,0 +1,47 @@
+name: ZeroGraph Kubernetes qualification
+on:
+  workflow_dispatch:
+  workflow_call:
+concurrency:
+  group: zerograph-kubernetes-qualification
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  kind-helm:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.head_ref == 'fm/zerograph-runtime-qualification' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ZG_KUBE_SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - uses: azure/setup-helm@v4.3.1
+        with: {version: v3.17.3}
+      - name: Install pinned disposable cluster tools
+        run: |
+          mkdir -m 700 /tmp/zerograph-kubernetes-tools
+          cd /tmp/zerograph-kubernetes-tools
+          curl --fail --silent --show-error --location -o kind-linux-amd64 https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64
+          curl --fail --silent --show-error --location -o kind-linux-amd64.sha256sum https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64.sha256sum
+          sha256sum --check kind-linux-amd64.sha256sum
+          curl --fail --silent --show-error --location -o kubectl https://dl.k8s.io/release/v1.36.4/bin/linux/amd64/kubectl
+          curl --fail --silent --show-error --location -o kubectl.sha256 https://dl.k8s.io/release/v1.36.4/bin/linux/amd64/kubectl.sha256
+          python -c 'import hashlib,pathlib; p=pathlib.Path("kubectl"); assert hashlib.sha256(p.read_bytes()).hexdigest()==pathlib.Path("kubectl.sha256").read_text().strip()'
+          chmod 700 kind-linux-amd64 kubectl
+          mv kind-linux-amd64 kind
+          echo /tmp/zerograph-kubernetes-tools >> "$GITHUB_PATH"
+      - run: pip install PyYAML==6.0.2 ruff==0.11.2
+      - run: ruff check --config backend/pyproject.toml deploy
+      - run: python -m unittest deploy.kubernetes_tests -v
+      - run: helm lint deploy/helm/zerograph --strict
+      - name: Install, upgrade and restart actual production Helm release
+        run: python deploy/kubernetes.py --ci-disposable --output kubernetes-qualification.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kubernetes-qualification
+          path: kubernetes-qualification.json
+          if-no-files-found: warn

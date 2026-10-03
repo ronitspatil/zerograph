@@ -1,0 +1,10 @@
+{
+  "name": "zerograph-browser-qualification",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node qualification.mjs",
+    "check": "node --check qualification.mjs && node --test reporter.test.mjs"
+  },
+  "devDependencies": { "playwright": "1.63.0" }
+}
