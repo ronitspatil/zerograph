@@ -1,7 +1,11 @@
 name: ZeroGraph restore drill
-on: [push, pull_request]
+on:
+  workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 jobs:
   restore-drill:
     runs-on: ubuntu-latest

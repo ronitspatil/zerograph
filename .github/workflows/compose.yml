@@ -1,0 +1,44 @@
+name: ZeroGraph Compose qualification
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+jobs:
+  compose-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      COMPOSE_PROJECT_NAME: zerograph-ci
+      ZG_E2E_URL: http://localhost:3100
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -r backend/requirements-dev.lock -e backend
+      - name: Generate disposable local configuration
+        run: python deploy/init_env.py
+      - name: Build and start real application stack
+        run: docker compose up --build --detach --wait --wait-timeout 240
+      - name: Exercise session, ingestion queue, analysis and remediation
+        run: pytest tests/test_stack_e2e.py -v --no-cov
+        working-directory: backend
+      - name: Restart persistent stores and wait for application recovery
+        run: |
+          docker compose restart postgres redis memgraph
+          docker compose up --detach --wait --wait-timeout 240
+      - name: Verify graph revision and SQL records survived restart
+        run: pytest tests/test_stack_e2e.py -k survive_database_restart -v --no-cov
+        working-directory: backend
+        env:
+          ZG_E2E_VERIFY_PERSISTENCE: "true"
+      - name: Capture bounded failure diagnostics
+        if: failure()
+        run: |
+          docker compose ps --all
+          docker compose logs --no-color --tail 150
+      - name: Remove disposable services and volumes
+        if: always()
+        run: docker compose down --volumes --remove-orphans
