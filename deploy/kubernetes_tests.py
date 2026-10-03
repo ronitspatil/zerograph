@@ -182,6 +182,22 @@ class SafetyTests(unittest.TestCase):
             any(classify_fixture_log("Unclassified segmentation fault sensitive-value").values())
         )
 
+    def test_interrupted_drill_cannot_publish_passed_artifact(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / "result.json"
+            with (
+                patch.dict(os.environ, {"CI": "true"}),
+                patch("sys.argv", ["kubernetes.py", "--ci-disposable", "--output", str(output)]),
+                patch.object(Drill, "execute", side_effect=KeyboardInterrupt),
+                patch.object(Drill, "diagnostics"),
+                patch.object(Drill, "cleanup"),
+            ):
+                with self.assertRaises(SystemExit):
+                    main()
+            evidence = json.loads(output.read_text())
+            self.assertEqual(evidence["status"], "failed")
+            self.assertIn("KeyboardInterrupt", evidence["failure"])
+
     def test_commands_refuse_before_cluster_ownership(self):
         with tempfile.TemporaryDirectory() as folder:
             drill = Drill(Path(folder))

@@ -783,7 +783,7 @@ def main():
         failure = None
         try:
             drill.execute()
-        except Exception as error:
+        except (Exception, KeyboardInterrupt) as error:
             failure = f"{drill.stage}: {type(error).__name__}"
             if isinstance(error, DrillError):
                 failure += " (" + str(error) + ")"
