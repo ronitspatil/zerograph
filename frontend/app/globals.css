@@ -739,6 +739,9 @@
     background: #f294a1;
   }
   .identity-list {
+    max-height: 128px;
+    overflow-y: auto;
+    align-content: flex-start;
     display: flex;
     gap: 6px;
     padding: 10px 15px;
