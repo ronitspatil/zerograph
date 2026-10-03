@@ -155,6 +155,14 @@ class SafetyTests(unittest.TestCase):
                 graph["spec"]["template"]["spec"]["containers"][0]["volumeMounts"][0]["mountPath"],
                 "/var/lib/memgraph",
             )
+            init = graph["spec"]["template"]["spec"]["initContainers"][0]
+            self.assertEqual(init["image"], "memgraph/memgraph:3.2.0")
+            self.assertEqual(init["volumeMounts"], [{"name": "data", "mountPath": "/var/lib/memgraph"}])
+            self.assertEqual(init["securityContext"]["capabilities"], {"drop": ["ALL"], "add": ["CHOWN"]})
+            self.assertFalse(init["securityContext"]["allowPrivilegeEscalation"])
+            self.assertTrue(init["securityContext"]["readOnlyRootFilesystem"])
+            self.assertNotIn("-R", init["command"][-1])
+            self.assertEqual(init["command"][-1].count("chown"), 1)
 
     def test_fixture_logs_export_only_bounded_boolean_categories(self):
         categories = classify_fixture_log(
@@ -164,6 +172,11 @@ class SafetyTests(unittest.TestCase):
             categories, {"permission_denied": True, "invalid_flag": True, "oom": True, "no_space": True}
         )
         self.assertNotIn("sensitive-value", str(categories))
+        self.assertTrue(
+            classify_fixture_log(
+                "The process is running as user synthetic, but the data directory is owned by user root. Please start the process as user root!"
+            )["permission_denied"]
+        )
         self.assertFalse(any(classify_fixture_log("x" * 10000 + " Permission denied").values()))
         self.assertFalse(
             any(classify_fixture_log("Unclassified segmentation fault sensitive-value").values())

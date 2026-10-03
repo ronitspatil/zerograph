@@ -120,7 +120,10 @@ def classify_fixture_log(output):
     """Return fixed categories only; never retain or emit raw fixture log text."""
     bounded = output[:10000].lower()
     return {
-        "permission_denied": "permission denied" in bounded,
+        "permission_denied": "permission denied" in bounded
+        or all(
+            term in bounded for term in ("process is running as user", "data directory is", "owned by user")
+        ),
         "invalid_flag": any(
             term in bounded
             for term in (
@@ -340,12 +343,35 @@ class Drill:
                                 "containers": [container],
                                 **(
                                     {
+                                        # Memgraph3.2 requires directory UID ownership, not only fsGroup access.
+                                        "initContainers": [
+                                            {
+                                                "name": "prepare-owned-storage",
+                                                "image": image,
+                                                "command": [
+                                                    "/bin/sh",
+                                                    "-ec",
+                                                    "chown 101:101 /var/lib/memgraph; test $(stat -c %u /var/lib/memgraph) = 101",
+                                                ],
+                                                "securityContext": {
+                                                    "runAsUser": 0,
+                                                    "runAsGroup": 0,
+                                                    "runAsNonRoot": False,
+                                                    "allowPrivilegeEscalation": False,
+                                                    "readOnlyRootFilesystem": True,
+                                                    "capabilities": {"drop": ["ALL"], "add": ["CHOWN"]},
+                                                },
+                                                "volumeMounts": [
+                                                    {"name": "data", "mountPath": "/var/lib/memgraph"}
+                                                ],
+                                            }
+                                        ],
                                         "securityContext": {
                                             "runAsUser": 101,
                                             "runAsGroup": 101,
                                             "fsGroup": 101,
                                             "runAsNonRoot": True,
-                                        }
+                                        },
                                     }
                                     if name == "memgraph"
                                     else {}
