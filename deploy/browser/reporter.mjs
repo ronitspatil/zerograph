@@ -9,6 +9,7 @@ export async function report(outcomes, destination) {
       ...(diagnostics ? { diagnostics: Object.fromEntries([
         'page_errors', 'console_errors', 'csp_errors', 'api_success', 'api_denied', 'api_server_errors',
         'document_nonce_present', 'script_count', 'script_nonce_match', 'script_nonce_mismatch',
+        'favicon_errors', 'resource_errors',
       ].map(key => [key, Number.isSafeInteger(diagnostics[key]) ? diagnostics[key] : 0])) } : {}),
     })),
   };

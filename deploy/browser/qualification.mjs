@@ -20,6 +20,8 @@ const snapshot = {
   edges: [{ source: 'agent:browser', target: 'data:browser', type: 'CAN_READ',
     certainty: 'confirmed', evidence: ['Disposable browser fixture'] }],
 };
+const policy = { Version: '2012-10-17', Statement: [{ Effect: 'Allow',
+  Action: ['s3:GetObject', 's3:DeleteObject'], Resource: '*' }] };
 
 async function api(page, method, path, body) {
   return page.evaluate(async ({ method, path, body }) => {
@@ -45,6 +47,10 @@ async function login(context, username) {
   });
   page.on('response', response => {
     const url = new URL(response.url());
+    if (health.active && response.status() >= 400 && response.request().resourceType() !== 'document') {
+      if (url.pathname === '/favicon.ico') diagnostics.favicon_errors++;
+      else if (!url.pathname.startsWith('/api/zg/')) diagnostics.resource_errors++;
+    }
     if (url.origin === consoleOrigin && url.pathname === '/' && response.request().resourceType() === 'document') {
       documentPolicy = response.headers()['content-security-policy'] || '';
     }
@@ -98,7 +104,8 @@ async function login(context, username) {
 async function run(label, action) {
   diagnostics = { page_errors: 0, console_errors: 0, csp_errors: 0,
     api_success: 0, api_denied: 0, api_server_errors: 0,
-    document_nonce_present: 0, script_count: 0, script_nonce_match: 0, script_nonce_mismatch: 0 };
+    document_nonce_present: 0, script_count: 0, script_nonce_match: 0, script_nonce_mismatch: 0,
+    favicon_errors: 0, resource_errors: 0 };
   const context = await browser.newContext({ ignoreHTTPSErrors: false, viewport: { width: 1440, height: 1000 } });
   try {
     await action(context);
@@ -175,7 +182,21 @@ try {
         await page.getByRole('button', { name: 'Return to graph', exact: true }).click();
       }
       await page.getByRole('button', { name: 'Remediation', exact: true }).click();
+      step('production policy input enables role-bound preview');
+      await page.getByLabel('Original IAM policy').fill(JSON.stringify(policy));
       require(await page.getByRole('button', { name: 'Generate least-privilege preview', exact: true }).isEnabled() === writable);
+      if (writable) {
+        step('analyst actual UI preview and disabled PR control');
+        await page.getByLabel('Observed IAM actions').fill('s3:GetObject');
+        await page.getByLabel('Services with complete event coverage').fill('s3');
+        await page.getByLabel('I verified complete coverage, including data events').check();
+        const preview = page.waitForResponse(response => response.url() === consoleOrigin + '/api/zg/remediations/preview');
+        await page.getByRole('button', { name: 'Generate least-privilege preview', exact: true }).click();
+        require((await preview).status() === 200);
+        const pr = page.getByRole('button', { name: 'Generate least-privilege PR', exact: true });
+        await visible(pr);
+        require(await pr.isDisabled());
+      }
       await page.getByRole('button', { name: 'Data sources', exact: true }).click();
       await page.getByLabel('JSON inventory').fill(JSON.stringify(snapshot));
       require(await page.getByRole('button', { name: 'Queue ingestion', exact: true }).isDisabled());
