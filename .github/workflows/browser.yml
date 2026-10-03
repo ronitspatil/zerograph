@@ -1,11 +1,15 @@
 name: Production-mode Chromium qualification
-on: [push, pull_request]
+on:
+  workflow_dispatch:
+concurrency:
+  group: zerograph-browser-qualification
+  cancel-in-progress: false
 permissions:
   contents: read
 jobs:
   browser-qualification:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     env:
       COMPOSE_PROJECT_NAME: zerograph-browser-qualification-ci
       PLAYWRIGHT_BROWSERS_PATH: /tmp/zerograph-browser-qualification-browsers

@@ -3,6 +3,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "ZeroGraph · Identity & Data Security",
   description: "Understand every identity. Protect every access path.",
+  icons: { icon: "/favicon.svg" },
 };
 export default function RootLayout({
   children,
