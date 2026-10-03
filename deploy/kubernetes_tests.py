@@ -398,6 +398,43 @@ class SafetyTests(unittest.TestCase):
                     with self.assertRaisesRegex(DrillError, "application active pod inventory"):
                         drill.active_pod_ids()
 
+    def test_uninstall_absence_is_scoped_and_strict(self):
+        with tempfile.TemporaryDirectory() as folder:
+            drill = Drill(Path(folder))
+            expected = (
+                "get",
+                "deployment",
+                "zerograph-backend",
+                "zerograph-frontend",
+                "zerograph-worker",
+                "zerograph-scheduler",
+                "--ignore-not-found=true",
+                "-o",
+                "json",
+            )
+            for output in ("", " \n", '{"items":[]}'):
+                with patch.object(drill, "kubectl", return_value=output) as kubectl:
+                    drill.verify_release_absent()
+                    kubectl.assert_called_once_with(*expected)
+            with patch.object(
+                drill, "kubectl", return_value='{"items":[{"metadata":{"name":"zerograph-backend"}}]}'
+            ):
+                with self.assertRaisesRegex(DrillError, "release deployment uninstall incomplete"):
+                    drill.verify_release_absent()
+            for invalid in ("not JSON private-data", "{}", "[]", '{"items":null}'):
+                with patch.object(drill, "kubectl", return_value=invalid):
+                    with self.assertRaisesRegex(
+                        DrillError, "release deployment uninstall response invalid"
+                    ) as error:
+                        drill.verify_release_absent()
+                    self.assertNotIn("private-data", str(error.exception))
+            with patch.object(drill, "kubectl", side_effect=DrillError("fixed command failure")):
+                with self.assertRaisesRegex(DrillError, "fixed command failure"):
+                    drill.verify_release_absent()
+            with patch.object(drill, "kubectl", return_value=""):
+                with self.assertRaises(json.JSONDecodeError):
+                    drill.get("deployment", "zerograph-backend")
+
     def test_commands_refuse_before_cluster_ownership(self):
         with tempfile.TemporaryDirectory() as folder:
             drill = Drill(Path(folder))

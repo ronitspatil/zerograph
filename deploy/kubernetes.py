@@ -751,17 +751,33 @@ class Drill:
         self.check("PVC-backed store and application pod restart retain SQL/graph coherence")
         self.stage = "uninstall release"
         self.helm("uninstall", "zerograph", "--wait", "--timeout", "120s", timeout=150)
-        remaining = self.get(
-            "deployment",
-            *["zerograph-" + component for component in ("backend", "frontend", "worker", "scheduler")],
-            "--ignore-not-found=true",
-        )["items"]
-        if remaining:
-            raise DrillError("release deployment uninstall incomplete")
+        self.verify_release_absent()
         # Helm hooks are not ordinary release-managed resources; explicitly delete only owned hook ConfigMap.
         self.kubectl("delete", "configmap", "zerograph-config", "--ignore-not-found=true")
         self.kubectl("delete", "namespace", self.namespace, "--wait=true", "--timeout=120s", timeout=150)
         self.check("release uninstall and owned namespace removal")
+
+    def verify_release_absent(self):
+        # Successful kubectl returns no JSON when every explicitly requested name is absent.
+        # This exception is restricted to uninstall; ordinary get() remains strict.
+        output = self.kubectl(
+            "get",
+            "deployment",
+            *["zerograph-" + component for component in ("backend", "frontend", "worker", "scheduler")],
+            "--ignore-not-found=true",
+            "-o",
+            "json",
+        )
+        if not output.strip():
+            return
+        try:
+            remaining = json.loads(output)
+        except (ValueError, TypeError):
+            raise DrillError("release deployment uninstall response invalid") from None
+        if not isinstance(remaining, dict) or not isinstance(remaining.get("items"), list):
+            raise DrillError("release deployment uninstall response invalid")
+        if remaining["items"]:
+            raise DrillError("release deployment uninstall incomplete")
 
     def diagnostics(self):
         try:
