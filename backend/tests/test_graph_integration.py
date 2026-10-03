@@ -5,6 +5,7 @@ import time
 from uuid import uuid4
 
 import pytest
+
 from app.core.config import get_settings
 from app.graph.demo import demo_snapshot
 from app.graph.repository import CypherGraphStore

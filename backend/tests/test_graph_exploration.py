@@ -2,6 +2,11 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import DBAPIError
+
 from app.api import routes
 from app.core.auth import Actor, current_actor
 from app.db.models import TenantState
@@ -9,10 +14,6 @@ from app.graph.exploration import GraphSlice, RevisionUnavailable, RootNotFound
 from app.graph.repository import CypherGraphStore, MemoryGraphStore
 from app.graph.schema import Edge, EdgeType, GraphSnapshot, Node, NodeType
 from app.main import create_app
-from fastapi import HTTPException
-from fastapi.testclient import TestClient
-from sqlalchemy.dialects import postgresql
-from sqlalchemy.exc import DBAPIError
 
 
 def dense_snapshot(neighbors=600):
