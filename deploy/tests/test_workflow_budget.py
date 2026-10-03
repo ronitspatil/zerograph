@@ -127,7 +127,7 @@ class WorkflowBudgetTests(unittest.TestCase):
                     self.assertGreater(job["timeout-minutes"], 0)
                     self.assertLessEqual(job["timeout-minutes"], 25)
 
-    def test_campaign_calls_are_exact_branch_guarded_serial_and_same_commit(self):
+    def test_kubernetes_retry_only_calls_exact_guarded_same_commit_workflow(self):
         guard = (
             "github.event_name == 'pull_request' && "
             "github.head_ref == 'fm/zerograph-runtime-qualification' && "
@@ -136,17 +136,16 @@ class WorkflowBudgetTests(unittest.TestCase):
         )
         jobs = load("ci.yml")["jobs"]
         names = ("compose", "graph", "restore", "oidc", "browser", "kubernetes")
-        self.assertEqual(len(jobs), 9)
-        previous = ["backend", "frontend", "helm"]
+        self.assertEqual(set(jobs), {"backend", "frontend", "helm", "qualify-kubernetes"})
+        caller = jobs["qualify-kubernetes"]
+        self.assertEqual(caller["if"], guard)
+        self.assertEqual(caller["needs"], ["backend", "frontend", "helm"])
+        self.assertEqual(caller["uses"], "./.github/workflows/kubernetes.yml")
+        self.assertEqual(caller["permissions"], {"contents": "read"})
+        self.assertNotIn("secrets", caller)
+        self.assertNotIn("strategy", caller)
         groups = set()
         for name in names:
-            caller = jobs[f"qualify-{name}"]
-            self.assertEqual(caller["if"], guard)
-            self.assertEqual(caller["needs"], previous)
-            self.assertEqual(caller["uses"], f"./.github/workflows/{name}.yml")
-            self.assertEqual(caller["permissions"], {"contents": "read"})
-            self.assertNotIn("secrets", caller)
-            self.assertNotIn("strategy", caller)
             child = load(f"{name}.yml")
             self.assertEqual(child["on"], {"workflow_dispatch": None, "workflow_call": None})
             group = child["concurrency"]["group"]
@@ -156,10 +155,12 @@ class WorkflowBudgetTests(unittest.TestCase):
             for job in child["jobs"].values():
                 self.assertEqual(job["if"], f"github.event_name == 'workflow_dispatch' || ({guard})")
                 self.assertNotIn("uses", job)  # No nested fanout or reusable-call loops.
-            previous = [f"qualify-{name}"]
 
-    def test_campaign_exact_timeout_budget_includes_both_graph_runners(self):
-        self.assertEqual(runner_minutes("ci.yml"), 95)
+    def test_targeted_retry_budget_and_retained_historic_campaign_caps(self):
+        self.assertEqual(runner_minutes("ci.yml"), 45)
+        # Historic full campaign25+70; uncalled passing drills are not billed again.
+        historic_children = ("compose", "graph", "restore", "oidc", "browser", "kubernetes")
+        self.assertEqual(25 + sum(runner_minutes(f"{name}.yml") for name in historic_children), 95)
         self.assertEqual(runner_minutes("graph.yml"), 10)
         limits = {"compose": 10, "graph": 5, "restore": 10, "oidc": 10, "browser": 10, "kubernetes": 20}
         for name, limit in limits.items():
