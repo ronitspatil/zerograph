@@ -1,8 +1,10 @@
 """Safety regressions: no cluster access or Docker required."""
 
 import base64
+import copy
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -204,6 +206,92 @@ class SafetyTests(unittest.TestCase):
             evidence = json.loads(output.read_text())
             self.assertEqual(evidence["status"], "failed")
             self.assertIn("KeyboardInterrupt", evidence["failure"])
+
+    @unittest.skipUnless(shutil.which("helm"), "helm required for actual render regression")
+    def test_rendered_deployment_labels_are_pod_only(self):
+        from deploy.tests.test_chart import render
+
+        deployments = [item for item in render() if item["kind"] == "Deployment"]
+        self.assertEqual(len(deployments), 4)
+        for item in deployments:
+            self.assertNotIn("app", item["metadata"].get("labels", {}))
+            self.assertEqual(item["spec"]["template"]["metadata"]["labels"]["app"], "release-test")
+            self.assertEqual(item["spec"]["selector"]["matchLabels"]["app"], "release-test")
+
+    def test_runtime_uses_exact_unlabelled_deployment_metadata(self):
+        components = ("backend", "frontend", "worker", "scheduler")
+        deployments = {}
+        pods = []
+        for component in components:
+            security = {
+                "allowPrivilegeEscalation": False,
+                "readOnlyRootFilesystem": True,
+                "capabilities": {"drop": ["ALL"]},
+            }
+            container = {"name": component, "image": "qualification:commit", "securityContext": security}
+            if component in ("backend", "frontend"):
+                container.update(
+                    {
+                        key: {"httpGet": {"path": "/health", "port": 8000}}
+                        for key in ("startupProbe", "readinessProbe", "livenessProbe")
+                    }
+                )
+            deployments[component] = {
+                "metadata": {"name": "zerograph-" + component},
+                "spec": {
+                    "replicas": 1,
+                    "strategy": {"type": "Recreate" if component == "scheduler" else "RollingUpdate"},
+                    "template": {
+                        "metadata": {"labels": {"app": "zerograph", "component": component}},
+                        "spec": {
+                            "automountServiceAccountToken": False,
+                            "securityContext": {"runAsNonRoot": True, "runAsUser": 10001},
+                            "containers": [container],
+                        },
+                    },
+                },
+                "status": {"availableReplicas": 1},
+            }
+            pods.append(
+                {
+                    "metadata": {"labels": {"app": "zerograph", "component": component}},
+                    "spec": {"containers": [container]},
+                    "status": {"containerStatuses": [{"ready": True, "imageID": "sha256:proof"}]},
+                }
+            )
+
+        def get(kind, *args):
+            if kind == "deployment":
+                self.assertEqual(len(args), 1)
+                self.assertNotIn("-l", args)
+                return deployments[args[0].removeprefix("zerograph-")]
+            if kind == "pods":
+                return {"items": pods}
+            if kind == "endpoints":
+                return {"subsets": [{"addresses": [{"ip": "10.0.0.1"}]}]}
+            self.fail("Unexpected resource query")
+
+        with tempfile.TemporaryDirectory() as folder:
+            drill = Drill(Path(folder))
+            with (
+                patch.object(drill, "get", side_effect=get),
+                patch.object(drill, "kubectl"),
+                patch.object(drill, "check"),
+            ):
+                drill.runtime()
+                self.assertEqual(set(drill.results["application_images"]), set(components))
+                original = copy.deepcopy(deployments["backend"])
+                for key, value in (
+                    ("allowPrivilegeEscalation", True),
+                    ("readOnlyRootFilesystem", False),
+                    ("capabilities", {"drop": []}),
+                ):
+                    deployments["backend"] = copy.deepcopy(original)
+                    deployments["backend"]["spec"]["template"]["spec"]["containers"][0]["securityContext"][
+                        key
+                    ] = value
+                    with self.assertRaisesRegex(DrillError, "runtime container security controls"):
+                        drill.runtime()
 
     def test_commands_refuse_before_cluster_ownership(self):
         with tempfile.TemporaryDirectory() as folder:

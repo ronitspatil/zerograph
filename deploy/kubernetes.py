@@ -419,29 +419,51 @@ class Drill:
         self.check(f"release {revision} migration hook succeeded")
 
     def runtime(self):
-        deployments = self.get("deployments", "-l", "app=zerograph")["items"]
-        assert len(deployments) == 4
-        for deployment in deployments:
+        def require(condition, label):
+            if not condition:
+                raise DrillError(label)
+
+        components = ("backend", "frontend", "worker", "scheduler")
+        # Labels exist on pod templates/selectors, not Deployment metadata.
+        deployments = [self.get("deployment", "zerograph-" + component) for component in components]
+        require(len(deployments) == 4, "runtime deployment inventory")
+        for component, deployment in zip(components, deployments, strict=True):
+            require(deployment["metadata"]["name"] == "zerograph-" + component, "runtime deployment identity")
             template = deployment["spec"]["template"]
             spec = template["spec"]
-            assert spec["automountServiceAccountToken"] is False
-            assert spec["securityContext"]["runAsNonRoot"] is True
-            assert spec["securityContext"]["runAsUser"] == 10001
+            require(spec["automountServiceAccountToken"] is False, "runtime service account token disabled")
+            require(spec["securityContext"]["runAsNonRoot"] is True, "runtime nonroot required")
+            require(spec["securityContext"]["runAsUser"] == 10001, "runtime user identity")
             container = spec["containers"][0]
-            assert container["securityContext"] == {
-                "allowPrivilegeEscalation": False,
-                "readOnlyRootFilesystem": True,
-                "capabilities": {"drop": ["ALL"]},
-            }
-            if container["name"] in ("backend", "frontend"):
-                assert all(key in container for key in ("startupProbe", "readinessProbe", "livenessProbe"))
-            assert deployment["status"]["availableReplicas"] == 1
-        scheduler = next(d for d in deployments if d["metadata"]["name"] == "zerograph-scheduler")
-        assert scheduler["spec"]["replicas"] == 1 and scheduler["spec"]["strategy"]["type"] == "Recreate"
+            require(
+                container["securityContext"]
+                == {
+                    "allowPrivilegeEscalation": False,
+                    "readOnlyRootFilesystem": True,
+                    "capabilities": {"drop": ["ALL"]},
+                },
+                "runtime container security controls",
+            )
+            if component in ("backend", "frontend"):
+                require(
+                    all(key in container for key in ("startupProbe", "readinessProbe", "livenessProbe")),
+                    "runtime web probes",
+                )
+            require(deployment["status"].get("availableReplicas") == 1, "runtime deployment availability")
+        scheduler = deployments[3]
+        require(
+            scheduler["spec"]["replicas"] == 1 and scheduler["spec"]["strategy"]["type"] == "Recreate",
+            "runtime singleton scheduler strategy",
+        )
         pods = self.get("pods", "-l", "app=zerograph")["items"]
         ready = [p for p in pods if not p["metadata"].get("deletionTimestamp")]
-        assert len(ready) == 4 and all(
-            all(c["ready"] for c in p["status"]["containerStatuses"]) for p in ready
+        require(
+            len(ready) == 4 and all(all(c["ready"] for c in p["status"]["containerStatuses"]) for p in ready),
+            "runtime application pods ready",
+        )
+        require(
+            {p["metadata"]["labels"]["component"] for p in ready} == set(components),
+            "runtime application pod identity",
         )
         self.results["application_images"] = {
             p["metadata"]["labels"]["component"]: {
@@ -452,7 +474,10 @@ class Drill:
         }
         for component in ("backend", "frontend"):
             endpoint = self.get("endpoints", "zerograph-" + component)
-            assert endpoint["subsets"][0]["addresses"]
+            require(
+                endpoint.get("subsets") and endpoint["subsets"][0].get("addresses"),
+                "runtime service endpoints ready",
+            )
         self.kubectl(
             "exec",
             "deployment/zerograph-frontend",
@@ -685,7 +710,13 @@ class Drill:
         self.check("PVC-backed store and application pod restart retain SQL/graph coherence")
         self.stage = "uninstall release"
         self.helm("uninstall", "zerograph", "--wait", "--timeout", "120s", timeout=150)
-        assert not self.get("deployments", "-l", "app=zerograph")["items"]
+        remaining = self.get(
+            "deployment",
+            *["zerograph-" + component for component in ("backend", "frontend", "worker", "scheduler")],
+            "--ignore-not-found=true",
+        )["items"]
+        if remaining:
+            raise DrillError("release deployment uninstall incomplete")
         # Helm hooks are not ordinary release-managed resources; explicitly delete only owned hook ConfigMap.
         self.kubectl("delete", "configmap", "zerograph-config", "--ignore-not-found=true")
         self.kubectl("delete", "namespace", self.namespace, "--wait=true", "--timeout=120s", timeout=150)
