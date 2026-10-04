@@ -115,3 +115,44 @@ export function overviewAnchors(graph: GraphData): Set<string> {
       .map((n) => n.id),
   );
 }
+
+export interface LabelBounds {
+  id: string;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+/** Greedy visible-priority labels using actual rendered bounds, with breathing room. */
+export function spacedLabels(
+  labels: LabelBounds[],
+  width: number,
+  height: number,
+): Set<string> {
+  const chosen: LabelBounds[] = [];
+  for (const box of labels) {
+    if (
+      ![box.x1, box.y1, box.x2, box.y2].every(Number.isFinite) ||
+      box.x1 < 0 ||
+      box.y1 < 0 ||
+      box.x2 > width ||
+      box.y2 > height ||
+      box.x2 <= box.x1 ||
+      box.y2 <= box.y1
+    )
+      continue;
+    if (
+      chosen.some(
+        (other) =>
+          box.x1 < other.x2 + 6 &&
+          box.x2 + 6 > other.x1 &&
+          box.y1 < other.y2 + 6 &&
+          box.y2 + 6 > other.y1,
+      )
+    )
+      continue;
+    chosen.push(box);
+  }
+  return new Set(chosen.map((box) => box.id));
+}

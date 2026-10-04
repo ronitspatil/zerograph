@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   circlePositions,
   overviewAnchors,
+  spacedLabels,
   layoutInput,
   startLayout,
   type LayoutInput,
@@ -158,4 +159,24 @@ it("caps overview role labels by visible degree with deterministic ties", () => 
   expect([
     ...overviewAnchors({ ...graph, nodes: [...nodes].reverse() }),
   ]).toEqual([...anchors]);
+});
+
+it("thins dense role labels using rendered boxes, priority, viewport and breathing room", () => {
+  const boxes = [
+    { id: "first", x1: 0, y1: 10, x2: 82, y2: 20 },
+    { id: "overlap", x1: 55, y1: 10, x2: 137, y2: 20 },
+    { id: "next", x1: 110, y1: 10, x2: 192, y2: 20 },
+    { id: "too-close", x1: 193, y1: 10, x2: 250, y2: 20 },
+    { id: "second-row", x1: 55, y1: 50, x2: 137, y2: 60 },
+    { id: "clipped", x1: 260, y1: 10, x2: 340, y2: 20 },
+    { id: "invalid", x1: NaN, y1: 0, x2: 20, y2: 20 },
+  ];
+  expect([...spacedLabels(boxes, 300, 100)]).toEqual([
+    "first",
+    "next",
+    "second-row",
+  ]);
+  expect([...spacedLabels([boxes[1], boxes[0], boxes[2]], 300, 100)]).toEqual([
+    "overlap",
+  ]);
 });

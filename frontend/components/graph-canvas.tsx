@@ -7,6 +7,7 @@ import {
   layoutInput,
   startLayout,
   overviewAnchors,
+  spacedLabels,
 } from "@/lib/graph-layout";
 import type { GraphData, GraphNode, Simulation } from "@/lib/types";
 
@@ -28,7 +29,7 @@ export function GraphCanvas({
   simulation,
   onSelect,
 }: {
-  graph: GraphData;
+  graph: GraphData & { view?: { mode: "sample" | "neighborhood" | "roles" } };
   selected: string | null;
   riskNodes: Set<string>;
   simulation: Simulation | null;
@@ -216,11 +217,38 @@ export function GraphCanvas({
     });
     let hovered: string | null = null;
     function labelSizing() {
+      const roleOnly = graph.view?.mode === "roles";
+      const overview =
+        !hovered && !selectedRef.current && instance.zoom() <= 1.35;
+      if (roleOnly && overview) {
+        // Restore candidates before measuring labels; never hide the focused full label.
+        instance.nodes().removeClass("role-anchor");
+        for (const id of anchors)
+          instance.getElementById(id).addClass("role-anchor");
+      }
       instance.nodes().removeStyle("font-size text-max-width");
       instance.nodes("[type='CloudRole']").style({
         "font-size": Math.min(48, 10 / instance.zoom()),
         "text-max-width": `${(instance.width() < 700 ? 82 : 110) / instance.zoom()}px`,
       });
+      if (roleOnly && overview) {
+        const labels = [...anchors].map((id) => ({
+          id,
+          ...instance.getElementById(id).renderedBoundingBox({
+            includeNodes: false,
+            includeEdges: false,
+            includeLabels: true,
+          }),
+        }));
+        const visible = spacedLabels(
+          labels,
+          instance.width(),
+          instance.height(),
+        );
+        for (const id of anchors)
+          if (!visible.has(id))
+            instance.getElementById(id).removeClass("role-anchor");
+      }
       instance.nodes(".focus-root").style({
         "font-size": Math.min(80, 12 / instance.zoom()),
         "text-max-width": `${170 / instance.zoom()}px`,
@@ -273,7 +301,11 @@ export function GraphCanvas({
       const node = graph.nodes.find((n) => n.id === event.target.id());
       if (node) callback.current(node);
     });
-    const observer = new ResizeObserver(() => cy.current?.resize());
+    const observer = new ResizeObserver(() => {
+      if (cy.current !== instance || instance.destroyed()) return;
+      instance.resize();
+      labelSizing();
+    });
     observer.observe(container.current);
     return () => {
       stopLayout();
