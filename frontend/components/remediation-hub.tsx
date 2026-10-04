@@ -1,11 +1,6 @@
 "use client";
 import { useState } from "react";
-import {
-  ArrowUpRight,
-  FileCode2,
-  GitPullRequest,
-  ShieldCheck,
-} from "lucide-react";
+import { ArrowUpRight } from "lucide-react";
 import { api } from "@/lib/api";
 import type { GraphNode, Preview, Remediation } from "@/lib/types";
 import { Button } from "@/components/ui/button";
@@ -103,18 +98,6 @@ export function RemediationHub({
   }
   return (
     <section className="remediation-page">
-      <div className="section-intro">
-        <div className="intro-icon">
-          <GitPullRequest size={24} />
-        </div>
-        <div>
-          <h2>Reduce permissions. Preserve control.</h2>
-          <p>
-            Generate evidence-backed policy proposals for review in your
-            existing Git workflow.
-          </p>
-        </div>
-      </div>
       {demo && (
         <div className="notice">
           The sample policy and action history below are synthetic. Connect real
@@ -125,7 +108,7 @@ export function RemediationHub({
         <div className="panel form-panel">
           <div className="panel-heading">
             <h3>Policy optimization</h3>
-            <span className="muted-label">REVIEW REQUIRED</span>
+            <span className="muted">Proposals require review</span>
           </div>
           <label>
             Identity
@@ -227,21 +210,19 @@ export function RemediationHub({
             onClick={generate}
             disabled={busy || !identity || !policy || !canWrite}
           >
-            <ShieldCheck size={16} />
             {busy ? "Working…" : "Generate least-privilege preview"}
           </Button>
         </div>
         <div className="panel diff-panel">
           <div className="panel-heading">
             <h3>Policy diff</h3>
-            <FileCode2 size={16} />
           </div>
           {preview ? (
             <>
               <div className="diff-summary">
-                <span className="pill green">
+                <strong>
                   {preview.optimization.removed_actions.length} actions removed
-                </span>
+                </strong>
                 <span className="muted">Proposal only</span>
               </div>
               <pre className="policy-diff">
@@ -278,7 +259,6 @@ export function RemediationHub({
                     !preview.optimization.removed_actions.length
                   }
                 >
-                  <GitPullRequest size={16} />
                   Generate least-privilege PR
                 </Button>
                 <Button variant="outline" asChild>
@@ -304,8 +284,7 @@ export function RemediationHub({
             </>
           ) : (
             <div className="empty-state">
-              <FileCode2 size={34} />
-              <h3>Your policy proposal appears here</h3>
+              <h3>No proposal yet</h3>
               <p>
                 Supply a policy and audit observation window to compare the
                 original and proposed permissions.
@@ -337,11 +316,7 @@ export function RemediationHub({
                       r.identity_id}
                   </td>
                   <td>{r.removed_actions.length}</td>
-                  <td>
-                    <span className="pill">
-                      {r.status.replaceAll("_", " ")}
-                    </span>
-                  </td>
+                  <td>{r.status.replaceAll("_", " ")}</td>
                   <td>
                     {r.pr_url ? (
                       <a
@@ -351,7 +326,7 @@ export function RemediationHub({
                         rel="noreferrer"
                       >
                         Open PR
-                        <ArrowUpRight size={12} />
+                        <ArrowUpRight size={12} aria-hidden="true" />
                       </a>
                     ) : (
                       "Preview"

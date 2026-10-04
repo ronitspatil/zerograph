@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 export const metadata: Metadata = {
   title: "ZeroGraph · Identity & Data Security",
-  description: "Understand every identity. Protect every access path.",
+  description: "Identity and data access security console.",
   icons: { icon: "/favicon.svg" },
 };
 export default function RootLayout({

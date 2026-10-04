@@ -61,7 +61,8 @@ export function GraphCanvas({
           label: "",
           color: "#cbd5e1",
           "font-size": 11,
-          "font-family": "Arial",
+          "font-family":
+            '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
           "text-valign": "bottom",
           "text-events": "yes",
           "text-margin-y": 9,
@@ -347,7 +348,7 @@ export function GraphCanvas({
   }
   if (!layoutInput(graph))
     return (
-      <div role="alert">
+      <div role="alert" className="empty-line">
         This view exceeds visualization bounds or contains invalid endpoints.
         Reset to a bounded view.
       </div>
@@ -360,42 +361,39 @@ export function GraphCanvas({
         role="img"
         aria-label={`Identity and data graph with ${graph.nodes.length} nodes. Use the identity list to select a node with the keyboard.`}
       />
-      <div className="canvas-labels">
-        <span>ROLE COMMUNITIES · HOVER FOR ACCESS PATHS</span>
-      </div>
       <div className="graph-controls">
         <button aria-label="Zoom in" onClick={() => zoom(1.2)}>
-          <Plus size={15} />
+          <Plus size={14} />
         </button>
         <button aria-label="Zoom out" onClick={() => zoom(0.8)}>
-          <Minus size={15} />
+          <Minus size={14} />
         </button>
         <button
           aria-label="Fit graph"
           onClick={() => cy.current?.fit(undefined, 55)}
         >
-          <Maximize2 size={14} />
+          <Maximize2 size={13} />
         </button>
       </div>
-      <div className="graph-legend">
+      <div className="graph-legend" aria-label="Legend">
         <span>
-          <i style={{ background: nodeColors.ServiceAccount }} />
+          <i className="legend-service-account" />
           Service account
         </span>
         <span>
-          <i style={{ background: nodeColors.AIAgent }} />
+          <i className="legend-ai-agent" />
           AI agent
         </span>
         <span>
-          <i style={{ background: nodeColors.MCPServer }} />
+          <i className="legend-mcp-server" />
           MCP server
         </span>
         <span>
-          <i style={{ background: nodeColors.CloudRole }} />
+          <i className="legend-cloud-role" />
           Cloud role
         </span>
         <span>
-          <i style={{ background: nodeColors.Database }} />
+          <i className="legend-data-asset" />
           Data asset
         </span>
         <span>

@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { Activity, ArrowRight, X } from "lucide-react";
+import { X } from "lucide-react";
 import { api } from "@/lib/api";
 import type { GraphNode, Simulation } from "@/lib/types";
 import { Button } from "@/components/ui/button";
@@ -51,19 +51,17 @@ export function Simulator({
   return (
     <aside className="simulator-drawer" aria-label="Blast radius simulator">
       <div className="drawer-heading">
-        <span>
-          <Activity size={18} /> Blast radius simulator
-        </span>
+        <span>Blast radius simulator</span>
         <button
           className="icon-button"
           onClick={onClose}
           aria-label="Close simulator"
         >
-          <X size={18} />
+          <X size={16} />
         </button>
       </div>
-      <span className="eyebrow">COMPROMISE SCENARIO</span>
-      <h2>{node.name}</h2>
+      <span className="section-label">Compromise scenario</span>
+      <h2 title={node.name}>{node.name}</h2>
       <p>
         Explore the downstream access available if this identity is compromised.
       </p>
@@ -97,7 +95,7 @@ export function Simulator({
         </p>
       )}
       <div className="simulation-score">
-        <span>BLAST RADIUS SCORE</span>
+        <span>Blast radius score</span>
         <strong>
           {busy ? "…" : (result?.risk_score ?? "—")}
           <small>/100</small>
@@ -124,8 +122,7 @@ export function Simulator({
           {result.affected_assets.length ? (
             result.affected_assets.map((id) => (
               <div className="affected-asset" key={id}>
-                <ArrowRight size={13} />
-                <span>{id}</span>
+                <span title={id}>{id}</span>
               </div>
             ))
           ) : (
