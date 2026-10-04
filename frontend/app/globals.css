@@ -669,9 +669,8 @@
   }
   .canvas-wrap {
     position: relative;
-    height: 425px;
-    background-image: radial-gradient(#29374a 1px, transparent 1px);
-    background-size: 20px 20px;
+    height: 560px;
+    background: #0d1522;
   }
   .graph-canvas {
     height: 100%;
@@ -739,6 +738,9 @@
     background: #f294a1;
   }
   .identity-list {
+    max-height: 88px;
+    overflow-y: auto;
+    align-content: flex-start;
     display: flex;
     gap: 6px;
     padding: 10px 15px;
@@ -1439,7 +1441,7 @@
       min-height: 490px;
     }
     .canvas-wrap {
-      height: 465px;
+      height: 580px;
     }
     .node-sidebar {
       width: 260px;
@@ -1620,7 +1622,7 @@
       display: none;
     }
     .canvas-wrap {
-      height: 360px;
+      height: 540px;
     }
     .panel-heading {
       padding: 15px;
@@ -1650,5 +1652,55 @@
     .two-columns {
       grid-template-columns: 1fr;
     }
+  }
+  .exploration-status {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    padding: 12px 20px;
+    color: #a9bbd2;
+    font-size: 12px;
+    border-bottom: 1px solid #243143;
+  }
+  .graph-search-results {
+    max-height: 280px;
+    overflow: auto;
+    padding: 12px 20px;
+    border-bottom: 1px solid #243143;
+  }
+  .graph-search-results button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 8px;
+    border-radius: 6px;
+  }
+  .graph-search-results button:hover,
+  .graph-search-results button:focus-visible {
+    background: #1b293c;
+  }
+  .graph-search-results small {
+    display: block;
+    color: #a9bbd2;
+    overflow-wrap: anywhere;
+  }
+  .graph-view-switch {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+  }
+  .graph-view-switch button[aria-pressed="true"] {
+    border-color: #80e8ce;
+    color: #80e8ce;
+  }
+  .role-direct-summary {
+    padding: 12px 0;
+    color: #a9bbd2;
+    font-size: 12px;
+  }
+  .role-direct-summary p {
+    line-height: 1.5;
   }
 }

@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import {
   Activity,
@@ -39,6 +39,9 @@ import type {
   AuditEvent,
   Finding,
   GraphData,
+  GraphView,
+  RoleMap,
+  GraphSearch,
   GraphNode,
   Job,
   Overview,
@@ -95,15 +98,30 @@ const nav = [
   { id: "sources", label: "Data sources", icon: Unplug },
   { id: "activity", label: "Audit activity", icon: Activity },
 ] as const;
-const emptyGraph: GraphData = {
+const emptyGraph: GraphView = {
   revision: "",
   nodes: [],
   edges: [],
   warnings: [],
+  view: {
+    mode: "sample",
+    root_id: null,
+    node_limit: 250,
+    edge_limit: 1000,
+    truncated: false,
+    total_nodes: 0,
+    total_edges: 0,
+  },
 };
 export function Console({ demo }: { demo: boolean }) {
   const [view, setView] = useState<View>("graph");
-  const [graph, setGraph] = useState<GraphData>(emptyGraph);
+  const [graph, setGraph] = useState<GraphView | RoleMap>(emptyGraph);
+  const [graphMode, setGraphMode] = useState<"identities" | "roles">(
+    "identities",
+  );
+  const graphModeRef = useRef<"identities" | "roles">("identities");
+  const [graphBusy, setGraphBusy] = useState(false);
+  const roles = graph.view.mode === "roles" ? (graph as RoleMap) : null;
   const [overview, setOverview] = useState<Overview | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -116,45 +134,224 @@ export function Console({ demo }: { demo: boolean }) {
   const [simulating, setSimulating] = useState(false);
   const [simulation, setSimulation] = useState<Simulation | null>(null);
   const [search, setSearch] = useState("");
+  const [searchResults, setSearchResults] = useState<GraphSearch | null>(null);
+  const [searchBusy, setSearchBusy] = useState(false);
+  const [revisionStale, setRevisionStale] = useState(false);
+  const graphRequest = useRef<AbortController | null>(null);
+  const searchRequest = useRef<AbortController | null>(null);
   const [account, setAccount] = useState("");
   const [type, setType] = useState("");
   const [risk, setRisk] = useState("");
   const [showHelp, setShowHelp] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
+  const simulationKey = `${graph.revision}:${selected?.id ?? ""}:${simulating}`;
+  const currentSimulationKey = useRef(simulationKey);
+  currentSimulationKey.current = simulationKey;
+  const acceptSimulation = useCallback(
+    (result: Simulation) => {
+      if (currentSimulationKey.current === simulationKey) setSimulation(result);
+    },
+    [simulationKey],
+  );
   const canWrite = !!actor?.roles.some((r) => r === "analyst" || r === "admin");
   const canAdmin = !!actor?.roles.includes("admin");
   const refresh = useCallback(async () => {
+    graphRequest.current?.abort();
+    searchRequest.current?.abort();
+    const controller = new AbortController();
+    graphRequest.current = controller;
+    setSearchResults(null);
+    setSearch("");
     setError("");
     try {
       const [g, o, f, j, r, a] = await Promise.all([
-        api<GraphData>("graph"),
+        api<GraphView | RoleMap>(
+          graphModeRef.current === "roles"
+            ? "graph/roles?role_limit=50&edge_limit=1000"
+            : "graph/explore?node_limit=250&edge_limit=1000",
+          {
+            signal: controller.signal,
+          },
+        ),
         api<Overview>("overview"),
         api<Finding[]>("findings"),
         api<Job[]>("ingestions"),
         api<Remediation[]>("remediations"),
         api<Actor>("me"),
       ]);
+      if (controller.signal.aborted) return;
       setGraph(g);
+      setSelected(
+        (previous) => g.nodes.find((n) => n.id === previous?.id) ?? null,
+      );
+      setSimulation(null);
+      setSimulating(false);
+      setRevisionStale(false);
+      setGraphBusy(false);
       setOverview(o);
       setFindings(f);
       setJobs(j);
       setRecords(r);
       setActor(a);
-      if (a.roles.includes("admin"))
-        setEvents(await api<AuditEvent[]>("audit"));
+      if (a.roles.includes("admin")) {
+        const audit = await api<AuditEvent[]>("audit", {
+          signal: controller.signal,
+        });
+        if (!controller.signal.aborted) setEvents(audit);
+      }
     } catch (e) {
+      if (controller.signal.aborted) return;
       if (e instanceof ApiError && e.status === 401) {
         window.location.assign("/login");
         return;
       }
       setError(e instanceof Error ? e.message : "Could not load workspace");
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   }, []);
   useEffect(() => {
     void refresh();
+    return () => {
+      graphRequest.current?.abort();
+      searchRequest.current?.abort();
+    };
   }, [refresh]);
+  const explorationError = useCallback((e: unknown) => {
+    if (e instanceof ApiError && e.status === 401) {
+      window.location.assign("/login");
+      return;
+    }
+    if (e instanceof ApiError && e.status === 409) {
+      setRevisionStale(true);
+      setSelected(null);
+      setSimulation(null);
+      setSimulating(false);
+      setSearchResults(null);
+      setError(
+        "The graph revision changed. Refresh the workspace to reset this view.",
+      );
+    } else setError(e instanceof Error ? e.message : "Could not explore graph");
+  }, []);
+  const loadRoles = useCallback(
+    async (cursor?: string) => {
+      graphModeRef.current = "roles";
+      setGraphMode("roles");
+      graphRequest.current?.abort();
+      searchRequest.current?.abort();
+      const controller = new AbortController();
+      graphRequest.current = controller;
+      setSearch("");
+      setSearchResults(null);
+      setAccount("");
+      setType("");
+      setRisk("");
+      setSelected(null);
+      setSimulation(null);
+      setSimulating(false);
+      setError("");
+      setGraphBusy(true);
+      const params = new URLSearchParams({
+        role_limit: "50",
+        edge_limit: "1000",
+      });
+      if (cursor) {
+        params.set("cursor", cursor);
+        params.set("revision", graph.revision);
+      }
+      try {
+        const result = await api<RoleMap>(`graph/roles?${params}`, {
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) return;
+        setGraph(result);
+        setRevisionStale(false);
+      } catch (e) {
+        if (!controller.signal.aborted) explorationError(e);
+      } finally {
+        if (!controller.signal.aborted) setGraphBusy(false);
+      }
+    },
+    [graph.revision, explorationError],
+  );
+  const showIdentities = () => {
+    graphModeRef.current = "identities";
+    setGraphMode("identities");
+    setAccount("");
+    setType("");
+    setRisk("");
+    setGraphBusy(false);
+    void refresh();
+  };
+  const explore = useCallback(
+    async (root: string) => {
+      graphModeRef.current = "identities";
+      setGraphMode("identities");
+      setGraphBusy(true);
+      graphRequest.current?.abort();
+      searchRequest.current?.abort();
+      const controller = new AbortController();
+      graphRequest.current = controller;
+      setSearchResults(null);
+      setSearch("");
+      setSimulation(null);
+      setSimulating(false);
+      const params = new URLSearchParams({
+        root_id: root,
+        node_limit: "250",
+        edge_limit: "1000",
+        revision: graph.revision,
+      });
+      try {
+        const result = await api<GraphView>(`graph/explore?${params}`, {
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) return;
+        setGraph(result);
+        setSelected(result.nodes.find((n) => n.id === root) ?? null);
+        setAccount("");
+        setType("");
+        setRisk("");
+        setError("");
+      } catch (e) {
+        if (!controller.signal.aborted) explorationError(e);
+      } finally {
+        if (!controller.signal.aborted) setGraphBusy(false);
+      }
+    },
+    [graph.revision, explorationError],
+  );
+  useEffect(() => {
+    searchRequest.current?.abort();
+    const controller = new AbortController();
+    searchRequest.current = controller;
+    setSearchResults(null);
+    setSearchBusy(false);
+    const q = search.trim();
+    if (!q || revisionStale) return;
+    setSearchBusy(true);
+    const timer = setTimeout(async () => {
+      try {
+        const params = new URLSearchParams({
+          q,
+          limit: "25",
+          revision: graph.revision,
+        });
+        const result = await api<GraphSearch>(`graph/search?${params}`, {
+          signal: controller.signal,
+        });
+        if (!controller.signal.aborted) setSearchResults(result);
+      } catch (e) {
+        if (!controller.signal.aborted) explorationError(e);
+      } finally {
+        if (!controller.signal.aborted) setSearchBusy(false);
+      }
+    }, 300);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [search, graph.revision, revisionStale, explorationError]);
   useEffect(() => {
     if (!jobs.some((j) => ["queued", "running", "retrying"].includes(j.status)))
       return;
@@ -169,13 +366,8 @@ export function Console({ demo }: { demo: boolean }) {
     const nodes = graph.nodes.filter(
       (n) =>
         (!account || n.account_id === account) &&
-        (!type ||
-          n.type === type ||
-          ["Database", "S3Bucket", "VectorStore"].includes(n.type)) &&
-        (!risk || riskNodes.has(n.id)) &&
-        (!search ||
-          n.name.toLowerCase().includes(search.toLowerCase()) ||
-          n.id.toLowerCase().includes(search.toLowerCase())),
+        (!type || n.type === type) &&
+        (!risk || riskNodes.has(n.id)),
     );
     const ids = new Set(nodes.map((n) => n.id));
     return {
@@ -183,7 +375,18 @@ export function Console({ demo }: { demo: boolean }) {
       nodes,
       edges: graph.edges.filter((e) => ids.has(e.source) && ids.has(e.target)),
     };
-  }, [graph, account, type, risk, search, riskNodes]);
+  }, [graph, account, type, risk, riskNodes]);
+  useEffect(() => {
+    if (selected && !filtered.nodes.some((n) => n.id === selected.id)) {
+      setSelected(null);
+      setSimulation(null);
+      setSimulating(false);
+    }
+  }, [filtered, selected]);
+  const outsideView =
+    simulation?.affected_nodes.filter(
+      (id) => !filtered.nodes.some((n) => n.id === id),
+    ).length ?? 0;
   const identities = useMemo(
     () =>
       graph.nodes.filter((n) =>
@@ -203,11 +406,8 @@ export function Console({ demo }: { demo: boolean }) {
     setAccount("");
     setType("");
     setRisk("");
-    const node = graph.nodes.find((n) => n.id === f.source);
-    if (node) {
-      selectNode(node);
-      setView("graph");
-    }
+    setView("graph");
+    void explore(f.source);
   };
   async function loadDemo() {
     setActionBusy(true);
@@ -225,13 +425,36 @@ export function Console({ demo }: { demo: boolean }) {
     }
   }
   function exportGraph() {
-    const blob = new Blob([JSON.stringify(graph, null, 2)], {
-      type: "application/json",
-    });
+    const blob = new Blob(
+      [
+        JSON.stringify(
+          {
+            ...filtered,
+            ...(roles
+              ? {
+                  role_summaries: roles.role_summaries.filter((s) =>
+                    filtered.nodes.some((n) => n.id === s.role_id),
+                  ),
+                }
+              : {}),
+            export_scope: roles
+              ? "current visible role-map page"
+              : "current visible view",
+          },
+          null,
+          2,
+        ),
+      ],
+      {
+        type: "application/json",
+      },
+    );
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "zerograph-snapshot.json";
+    a.download = roles
+      ? "zerograph-visible-role-page.json"
+      : "zerograph-visible-view.json";
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -378,10 +601,10 @@ export function Console({ demo }: { demo: boolean }) {
               <Button
                 variant="outline"
                 onClick={exportGraph}
-                disabled={!graph.nodes.length}
+                disabled={!filtered.nodes.length || revisionStale}
               >
                 <ArrowDownToLine size={15} />
-                Export graph
+                {roles ? "Export visible role page" : "Export visible view"}
               </Button>
               <Button onClick={() => setView("sources")}>
                 <Plus size={15} />
@@ -418,27 +641,129 @@ export function Console({ demo }: { demo: boolean }) {
               )}
               {view === "graph" && (
                 <>
+                  <div
+                    className="graph-view-switch"
+                    role="group"
+                    aria-label="Graph view"
+                  >
+                    <Button
+                      variant="outline"
+                      aria-pressed={graphMode === "identities"}
+                      onClick={showIdentities}
+                    >
+                      Identity & data
+                    </Button>
+                    <Button
+                      variant="outline"
+                      aria-pressed={graphMode === "roles"}
+                      onClick={() => void loadRoles()}
+                    >
+                      Role map
+                    </Button>
+                  </div>
                   <section className="panel graph-panel">
                     <div className="panel-heading">
                       <div>
-                        <h2>Access relationships</h2>
+                        <h2>
+                          {roles
+                            ? "Organization-wide role map"
+                            : "Access relationships"}
+                        </h2>
                         <span className="muted">
-                          {filtered.nodes.length} nodes ·{" "}
-                          {filtered.edges.length} relationships
+                          {roles ? (
+                            <>
+                              {filtered.nodes.length} / {roles.view.total_roles}{" "}
+                              roles · {filtered.edges.length} /{" "}
+                              {roles.view.total_role_edges} direct role links
+                              visible
+                              {roles.view.role_map_truncated ||
+                              filtered.nodes.length < roles.nodes.length ||
+                              filtered.edges.length < roles.edges.length
+                                ? " · Partial role map"
+                                : " · Complete role map"}
+                              . Other identities and data assets excluded.
+                              Workspace: {roles.view.total_nodes} nodes ·{" "}
+                              {roles.view.total_edges} relationships
+                              {roles.view.truncated
+                                ? " · Partial workspace"
+                                : " · Complete workspace"}
+                            </>
+                          ) : (
+                            <>
+                              {filtered.nodes.length} / {graph.view.total_nodes}{" "}
+                              nodes · {filtered.edges.length} /{" "}
+                              {graph.view.total_edges} relationships visible
+                              {graph.view.truncated ||
+                              filtered.nodes.length < graph.nodes.length ||
+                              filtered.edges.length < graph.edges.length
+                                ? " · Partial view"
+                                : " · Complete view"}
+                            </>
+                          )}
                         </span>
                       </div>
                       <span className="live-label">
                         <i className="status-dot" />
-                        {graph.revision
-                          ? "Snapshot loaded"
-                          : "Awaiting collection"}
+                        {revisionStale
+                          ? "Revision changed — refresh required"
+                          : graph.revision
+                            ? "Snapshot loaded"
+                            : "Awaiting collection"}
                       </span>
+                    </div>
+                    <div className="exploration-status" role="status">
+                      {roles
+                        ? "Structural direct role links across the organization (all certainties, not effective permissions). Current-page filters only."
+                        : graph.view.mode === "neighborhood"
+                          ? "One-hop neighborhood"
+                          : "Bounded initial view"}
+                      . Filters apply only to visible nodes. Search covers the
+                      whole tenant revision.
+                      <Button
+                        variant="outline"
+                        onClick={() =>
+                          roles ? void loadRoles() : void refresh()
+                        }
+                      >
+                        {roles ? "First role page" : "Reset to initial view"}
+                      </Button>
+                      {roles && (
+                        <Button
+                          variant="outline"
+                          disabled={
+                            graphBusy ||
+                            revisionStale ||
+                            !roles.view.has_more ||
+                            !roles.view.next_cursor
+                          }
+                          onClick={() =>
+                            void loadRoles(roles.view.next_cursor!)
+                          }
+                        >
+                          Next role page
+                        </Button>
+                      )}
+                      {roles && (
+                        <span>
+                          {roles.view.has_more
+                            ? "More role pages available."
+                            : "Last role page."}
+                        </span>
+                      )}
+                      {simulation && (
+                        <span>
+                          Server-side simulation: {outsideView} affected nodes
+                          outside the visible view.
+                        </span>
+                      )}
                     </div>
                     <div className="graph-toolbar">
                       <div className="search-field">
                         <Search size={15} />
                         <input
                           aria-label="Search identities"
+                          maxLength={128}
+                          disabled={revisionStale}
                           value={search}
                           onChange={(e) => setSearch(e.target.value)}
                           placeholder="Search identities or assets…"
@@ -484,9 +809,41 @@ export function Console({ demo }: { demo: boolean }) {
                         </select>
                       </div>
                     </div>
+                    {search.trim() && (
+                      <div
+                        className="graph-search-results"
+                        aria-label="Global identity search"
+                        aria-live="polite"
+                      >
+                        {searchBusy
+                          ? "Searching tenant revision…"
+                          : searchResults && (
+                              <>
+                                {searchResults.nodes.length === 0 && (
+                                  <p>No matching identities.</p>
+                                )}
+                                {searchResults.nodes.map((n) => (
+                                  <button
+                                    key={n.id}
+                                    onClick={() => void explore(n.id)}
+                                  >
+                                    {n.name} <small>{n.id}</small>
+                                  </button>
+                                ))}
+                                {searchResults.has_more && (
+                                  <p>More matches exist. Refine your search.</p>
+                                )}
+                              </>
+                            )}
+                      </div>
+                    )}
                     <div className="graph-body">
                       <div className="graph-main">
-                        {graph.nodes.length ? (
+                        {graphBusy ? (
+                          <div className="canvas-loading" role="status">
+                            Loading graph view…
+                          </div>
+                        ) : graph.nodes.length ? (
                           <GraphCanvas
                             graph={filtered}
                             selected={selected?.id || null}
@@ -497,12 +854,17 @@ export function Console({ demo }: { demo: boolean }) {
                         ) : (
                           <div className="empty-state">
                             <Network size={42} />
-                            <h3>Your access graph starts here</h3>
+                            <h3>
+                              {roles
+                                ? "No roles in this workspace"
+                                : "Your access graph starts here"}
+                            </h3>
                             <p>
-                              Connect an AWS account or import your agent
-                              inventory to map identity-to-data access.
+                              {roles
+                                ? "This role map excludes identities and data assets. Switch to Identity & data to explore them."
+                                : "Connect an AWS account or import your agent inventory to map identity-to-data access."}
                             </p>
-                            {demo ? (
+                            {roles ? null : demo ? (
                               <Button onClick={loadDemo} disabled={actionBusy}>
                                 {actionBusy
                                   ? "Queuing sample…"
@@ -579,6 +941,34 @@ export function Console({ demo }: { demo: boolean }) {
                                 : "None detected"}
                             </dd>
                           </dl>
+                          {roles &&
+                            roles.role_summaries.find(
+                              (s) => s.role_id === selected.id,
+                            ) && (
+                              <div className="role-direct-summary">
+                                <strong>
+                                  Direct structural links · whole revision
+                                </strong>
+                                <p>
+                                  Both directions, all certainties. Not
+                                  effective permissions or transitive exposure.
+                                </p>
+                                {roles.role_summaries
+                                  .filter((s) => s.role_id === selected.id)
+                                  .map((s) => (
+                                    <dl key={s.role_id}>
+                                      <dt>Distinct direct neighbors</dt>
+                                      <dd>{s.direct_neighbors}</dd>
+                                      <dt>
+                                        Linked identities (including roles)
+                                      </dt>
+                                      <dd>{s.linked_identities}</dd>
+                                      <dt>Linked data assets</dt>
+                                      <dd>{s.linked_data_assets}</dd>
+                                    </dl>
+                                  ))}
+                              </div>
+                            )}
                           {selected.tags.length > 0 && (
                             <div className="tag-row">
                               {selected.tags.map((t) => (
@@ -589,8 +979,15 @@ export function Console({ demo }: { demo: boolean }) {
                             </div>
                           )}
                           <Button
+                            variant="outline"
+                            disabled={revisionStale}
+                            onClick={() => void explore(selected.id)}
+                          >
+                            Explore neighborhood
+                          </Button>
+                          <Button
                             onClick={() => setSimulating(true)}
-                            disabled={!canWrite}
+                            disabled={!canWrite || revisionStale}
                           >
                             <Activity size={15} />
                             Simulate compromise
@@ -817,7 +1214,7 @@ export function Console({ demo }: { demo: boolean }) {
           />
           <Simulator
             node={selected}
-            onResult={setSimulation}
+            onResult={acceptSimulation}
             onClose={() => {
               setSimulating(false);
               setSimulation(null);
