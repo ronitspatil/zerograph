@@ -1685,4 +1685,22 @@
     color: #a9bbd2;
     overflow-wrap: anywhere;
   }
+  .graph-view-switch {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+  }
+  .graph-view-switch button[aria-pressed="true"] {
+    border-color: #80e8ce;
+    color: #80e8ce;
+  }
+  .role-direct-summary {
+    padding: 12px 0;
+    color: #a9bbd2;
+    font-size: 12px;
+  }
+  .role-direct-summary p {
+    line-height: 1.5;
+  }
 }

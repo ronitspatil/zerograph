@@ -40,6 +40,7 @@ import type {
   Finding,
   GraphData,
   GraphView,
+  RoleMap,
   GraphSearch,
   GraphNode,
   Job,
@@ -114,7 +115,13 @@ const emptyGraph: GraphView = {
 };
 export function Console({ demo }: { demo: boolean }) {
   const [view, setView] = useState<View>("graph");
-  const [graph, setGraph] = useState<GraphView>(emptyGraph);
+  const [graph, setGraph] = useState<GraphView | RoleMap>(emptyGraph);
+  const [graphMode, setGraphMode] = useState<"identities" | "roles">(
+    "identities",
+  );
+  const graphModeRef = useRef<"identities" | "roles">("identities");
+  const [graphBusy, setGraphBusy] = useState(false);
+  const roles = graph.view.mode === "roles" ? (graph as RoleMap) : null;
   const [overview, setOverview] = useState<Overview | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -158,9 +165,14 @@ export function Console({ demo }: { demo: boolean }) {
     setError("");
     try {
       const [g, o, f, j, r, a] = await Promise.all([
-        api<GraphView>("graph/explore?node_limit=250&edge_limit=1000", {
-          signal: controller.signal,
-        }),
+        api<GraphView | RoleMap>(
+          graphModeRef.current === "roles"
+            ? "graph/roles?role_limit=50&edge_limit=1000"
+            : "graph/explore?node_limit=250&edge_limit=1000",
+          {
+            signal: controller.signal,
+          },
+        ),
         api<Overview>("overview"),
         api<Finding[]>("findings"),
         api<Job[]>("ingestions"),
@@ -175,6 +187,7 @@ export function Console({ demo }: { demo: boolean }) {
       setSimulation(null);
       setSimulating(false);
       setRevisionStale(false);
+      setGraphBusy(false);
       setOverview(o);
       setFindings(f);
       setJobs(j);
@@ -220,8 +233,61 @@ export function Console({ demo }: { demo: boolean }) {
       );
     } else setError(e instanceof Error ? e.message : "Could not explore graph");
   }, []);
+  const loadRoles = useCallback(
+    async (cursor?: string) => {
+      graphModeRef.current = "roles";
+      setGraphMode("roles");
+      graphRequest.current?.abort();
+      searchRequest.current?.abort();
+      const controller = new AbortController();
+      graphRequest.current = controller;
+      setSearch("");
+      setSearchResults(null);
+      setAccount("");
+      setType("");
+      setRisk("");
+      setSelected(null);
+      setSimulation(null);
+      setSimulating(false);
+      setError("");
+      setGraphBusy(true);
+      const params = new URLSearchParams({
+        role_limit: "50",
+        edge_limit: "1000",
+      });
+      if (cursor) {
+        params.set("cursor", cursor);
+        params.set("revision", graph.revision);
+      }
+      try {
+        const result = await api<RoleMap>(`graph/roles?${params}`, {
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) return;
+        setGraph(result);
+        setRevisionStale(false);
+      } catch (e) {
+        if (!controller.signal.aborted) explorationError(e);
+      } finally {
+        if (!controller.signal.aborted) setGraphBusy(false);
+      }
+    },
+    [graph.revision, explorationError],
+  );
+  const showIdentities = () => {
+    graphModeRef.current = "identities";
+    setGraphMode("identities");
+    setAccount("");
+    setType("");
+    setRisk("");
+    setGraphBusy(false);
+    void refresh();
+  };
   const explore = useCallback(
     async (root: string) => {
+      graphModeRef.current = "identities";
+      setGraphMode("identities");
+      setGraphBusy(true);
       graphRequest.current?.abort();
       searchRequest.current?.abort();
       const controller = new AbortController();
@@ -249,6 +315,8 @@ export function Console({ demo }: { demo: boolean }) {
         setError("");
       } catch (e) {
         if (!controller.signal.aborted) explorationError(e);
+      } finally {
+        if (!controller.signal.aborted) setGraphBusy(false);
       }
     },
     [graph.revision, explorationError],
@@ -360,7 +428,19 @@ export function Console({ demo }: { demo: boolean }) {
     const blob = new Blob(
       [
         JSON.stringify(
-          { ...filtered, export_scope: "current visible view" },
+          {
+            ...filtered,
+            ...(roles
+              ? {
+                  role_summaries: roles.role_summaries.filter((s) =>
+                    filtered.nodes.some((n) => n.id === s.role_id),
+                  ),
+                }
+              : {}),
+            export_scope: roles
+              ? "current visible role-map page"
+              : "current visible view",
+          },
           null,
           2,
         ),
@@ -372,7 +452,9 @@ export function Console({ demo }: { demo: boolean }) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "zerograph-visible-view.json";
+    a.download = roles
+      ? "zerograph-visible-role-page.json"
+      : "zerograph-visible-view.json";
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -522,7 +604,7 @@ export function Console({ demo }: { demo: boolean }) {
                 disabled={!filtered.nodes.length || revisionStale}
               >
                 <ArrowDownToLine size={15} />
-                Export visible view
+                {roles ? "Export visible role page" : "Export visible view"}
               </Button>
               <Button onClick={() => setView("sources")}>
                 <Plus size={15} />
@@ -559,19 +641,65 @@ export function Console({ demo }: { demo: boolean }) {
               )}
               {view === "graph" && (
                 <>
+                  <div
+                    className="graph-view-switch"
+                    role="group"
+                    aria-label="Graph view"
+                  >
+                    <Button
+                      variant="outline"
+                      aria-pressed={graphMode === "identities"}
+                      onClick={showIdentities}
+                    >
+                      Identity & data
+                    </Button>
+                    <Button
+                      variant="outline"
+                      aria-pressed={graphMode === "roles"}
+                      onClick={() => void loadRoles()}
+                    >
+                      Role map
+                    </Button>
+                  </div>
                   <section className="panel graph-panel">
                     <div className="panel-heading">
                       <div>
-                        <h2>Access relationships</h2>
+                        <h2>
+                          {roles
+                            ? "Organization-wide role map"
+                            : "Access relationships"}
+                        </h2>
                         <span className="muted">
-                          {filtered.nodes.length} / {graph.view.total_nodes}{" "}
-                          nodes · {filtered.edges.length} /{" "}
-                          {graph.view.total_edges} relationships visible
-                          {graph.view.truncated ||
-                          filtered.nodes.length < graph.nodes.length ||
-                          filtered.edges.length < graph.edges.length
-                            ? " · Partial view"
-                            : " · Complete view"}
+                          {roles ? (
+                            <>
+                              {filtered.nodes.length} / {roles.view.total_roles}{" "}
+                              roles · {filtered.edges.length} /{" "}
+                              {roles.view.total_role_edges} direct role links
+                              visible
+                              {roles.view.role_map_truncated ||
+                              filtered.nodes.length < roles.nodes.length ||
+                              filtered.edges.length < roles.edges.length
+                                ? " · Partial role map"
+                                : " · Complete role map"}
+                              . Other identities and data assets excluded.
+                              Workspace: {roles.view.total_nodes} nodes ·{" "}
+                              {roles.view.total_edges} relationships
+                              {roles.view.truncated
+                                ? " · Partial workspace"
+                                : " · Complete workspace"}
+                            </>
+                          ) : (
+                            <>
+                              {filtered.nodes.length} / {graph.view.total_nodes}{" "}
+                              nodes · {filtered.edges.length} /{" "}
+                              {graph.view.total_edges} relationships visible
+                              {graph.view.truncated ||
+                              filtered.nodes.length < graph.nodes.length ||
+                              filtered.edges.length < graph.edges.length
+                                ? " · Partial view"
+                                : " · Complete view"}
+                            </>
+                          )}
                         </span>
                       </div>
                       <span className="live-label">
@@ -584,14 +712,44 @@ export function Console({ demo }: { demo: boolean }) {
                       </span>
                     </div>
                     <div className="exploration-status" role="status">
-                      {graph.view.mode === "neighborhood"
-                        ? "One-hop neighborhood"
-                        : "Bounded initial view"}
+                      {roles
+                        ? "Structural direct role links across the organization (all certainties, not effective permissions). Current-page filters only."
+                        : graph.view.mode === "neighborhood"
+                          ? "One-hop neighborhood"
+                          : "Bounded initial view"}
                       . Filters apply only to visible nodes. Search covers the
                       whole tenant revision.
-                      <Button variant="outline" onClick={() => void refresh()}>
-                        Reset to initial view
+                      <Button
+                        variant="outline"
+                        onClick={() =>
+                          roles ? void loadRoles() : void refresh()
+                        }
+                      >
+                        {roles ? "First role page" : "Reset to initial view"}
                       </Button>
+                      {roles && (
+                        <Button
+                          variant="outline"
+                          disabled={
+                            graphBusy ||
+                            revisionStale ||
+                            !roles.view.has_more ||
+                            !roles.view.next_cursor
+                          }
+                          onClick={() =>
+                            void loadRoles(roles.view.next_cursor!)
+                          }
+                        >
+                          Next role page
+                        </Button>
+                      )}
+                      {roles && (
+                        <span>
+                          {roles.view.has_more
+                            ? "More role pages available."
+                            : "Last role page."}
+                        </span>
+                      )}
                       {simulation && (
                         <span>
                           Server-side simulation: {outsideView} affected nodes
@@ -681,7 +839,11 @@ export function Console({ demo }: { demo: boolean }) {
                     )}
                     <div className="graph-body">
                       <div className="graph-main">
-                        {graph.nodes.length ? (
+                        {graphBusy ? (
+                          <div className="canvas-loading" role="status">
+                            Loading graph view…
+                          </div>
+                        ) : graph.nodes.length ? (
                           <GraphCanvas
                             graph={filtered}
                             selected={selected?.id || null}
@@ -692,12 +854,17 @@ export function Console({ demo }: { demo: boolean }) {
                         ) : (
                           <div className="empty-state">
                             <Network size={42} />
-                            <h3>Your access graph starts here</h3>
+                            <h3>
+                              {roles
+                                ? "No roles in this workspace"
+                                : "Your access graph starts here"}
+                            </h3>
                             <p>
-                              Connect an AWS account or import your agent
-                              inventory to map identity-to-data access.
+                              {roles
+                                ? "This role map excludes identities and data assets. Switch to Identity & data to explore them."
+                                : "Connect an AWS account or import your agent inventory to map identity-to-data access."}
                             </p>
-                            {demo ? (
+                            {roles ? null : demo ? (
                               <Button onClick={loadDemo} disabled={actionBusy}>
                                 {actionBusy
                                   ? "Queuing sample…"
@@ -774,6 +941,34 @@ export function Console({ demo }: { demo: boolean }) {
                                 : "None detected"}
                             </dd>
                           </dl>
+                          {roles &&
+                            roles.role_summaries.find(
+                              (s) => s.role_id === selected.id,
+                            ) && (
+                              <div className="role-direct-summary">
+                                <strong>
+                                  Direct structural links · whole revision
+                                </strong>
+                                <p>
+                                  Both directions, all certainties. Not
+                                  effective permissions or transitive exposure.
+                                </p>
+                                {roles.role_summaries
+                                  .filter((s) => s.role_id === selected.id)
+                                  .map((s) => (
+                                    <dl key={s.role_id}>
+                                      <dt>Distinct direct neighbors</dt>
+                                      <dd>{s.direct_neighbors}</dd>
+                                      <dt>
+                                        Linked identities (including roles)
+                                      </dt>
+                                      <dd>{s.linked_identities}</dd>
+                                      <dt>Linked data assets</dt>
+                                      <dd>{s.linked_data_assets}</dd>
+                                    </dl>
+                                  ))}
+                              </div>
+                            )}
                           {selected.tags.length > 0 && (
                             <div className="tag-row">
                               {selected.tags.map((t) => (
