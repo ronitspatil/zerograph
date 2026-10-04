@@ -28,6 +28,7 @@ from app.graph.exploration import (
     SearchResponse,
 )
 from app.graph.repository import GraphStore, get_graph_store
+from app.graph.role_map import RoleMapResponse, RoleMapView
 from app.graph.schema import IDENTITY_TYPES, GraphSnapshot, Node, NodeType
 from app.remediation.gitops_sync import GitOpsClient, GitOpsConflict, GitOpsError
 from app.remediation.policy_optimizer import Optimization, UsageEvidence, optimize, terraform_policy
@@ -177,6 +178,44 @@ def search_graph(
             503, "Published graph revision unavailable; retry shortly", headers={"Retry-After": "5"}
         ) from None
     return SearchResponse(revision=current, nodes=nodes, has_more=has_more)
+
+
+@router.get("/graph/roles", response_model=RoleMapResponse)
+def role_map(
+    db: DB,
+    graph: Graph,
+    actor: Viewer,
+    role_limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    edge_limit: Annotated[int, Query(ge=1, le=2000)] = 1000,
+    cursor: Annotated[str | None, Query(min_length=1, max_length=512)] = None,
+    revision: str | None = None,
+):
+    current = expected_revision(db, actor.tenant_id, revision)
+    try:
+        result = graph.roles(actor.tenant_id, current, role_limit, edge_limit, cursor)
+    except RevisionUnavailable:
+        raise HTTPException(
+            503, "Published graph revision unavailable; retry shortly", headers={"Retry-After": "5"}
+        ) from None
+    return RoleMapResponse(
+        revision=current,
+        nodes=result.nodes,
+        edges=[{**edge.model_dump(mode="json"), "id": edge.id} for edge in result.edges],
+        warnings=result.warnings,
+        role_summaries=result.role_summaries,
+        view=RoleMapView(
+            node_limit=role_limit,
+            edge_limit=edge_limit,
+            truncated=result.truncated,
+            total_nodes=result.total_nodes,
+            total_edges=result.total_edges,
+            total_roles=result.total_roles,
+            total_role_edges=result.total_role_edges,
+            role_map_truncated=result.role_map_truncated,
+            has_more=result.has_more,
+            next_cursor=result.next_cursor,
+        ),
+    )
 
 
 @router.get("/overview")

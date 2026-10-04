@@ -20,6 +20,7 @@ from app.graph.exploration import (
     search_text,
     validate_bounds,
 )
+from app.graph.role_map import RoleMapSlice, cypher_roles, memory_roles, validate_role_bounds
 from app.graph.schema import Edge, EdgeType, GraphSnapshot, Node, NodeType
 
 
@@ -37,6 +38,9 @@ class GraphStore(Protocol):
         self, tenant: str, revision: str, root: str | None, node_limit: int, edge_limit: int
     ) -> GraphSlice: ...
     def search(self, tenant: str, revision: str, q: str, limit: int) -> tuple[list[Node], bool]: ...
+    def roles(
+        self, tenant: str, revision: str, role_limit: int, edge_limit: int, cursor: str | None
+    ) -> RoleMapSlice: ...
     def retention_candidates(
         self, tenant: str, protected: str, cutoff_ms: int, keep: int, limit: int
     ) -> list[RevisionMetadata]: ...
@@ -77,6 +81,19 @@ class MemoryGraphStore:
         if revision and (tenant, revision) not in self.snapshots:
             raise RevisionUnavailable("Published graph revision unavailable")
         return memory_search(self.snapshots[(tenant, revision)] if revision else GraphSnapshot(), q, limit)
+
+    def roles(
+        self, tenant: str, revision: str, role_limit: int, edge_limit: int, cursor: str | None
+    ) -> RoleMapSlice:
+        validate_role_bounds(role_limit, edge_limit, cursor)
+        if revision and (tenant, revision) not in self.snapshots:
+            raise RevisionUnavailable("Published graph revision unavailable")
+        return memory_roles(
+            self.snapshots[(tenant, revision)] if revision else GraphSnapshot(),
+            role_limit,
+            edge_limit,
+            cursor,
+        )
 
     def retention_candidates(
         self, tenant: str, protected: str, cutoff_ms: int, keep: int, limit: int
@@ -272,6 +289,19 @@ class CypherGraphStore:
         with self.driver.session(fetch_size=51) as session:
             return session.execute_read(
                 unit_of_work(timeout=self.timeout)(lambda tx: cypher_search(tx, tenant, revision, q, limit))
+            )
+
+    def roles(
+        self, tenant: str, revision: str, role_limit: int, edge_limit: int, cursor: str | None
+    ) -> RoleMapSlice:
+        validate_role_bounds(role_limit, edge_limit, cursor)
+        if not revision:
+            return RoleMapSlice()
+        with self.driver.session(fetch_size=101) as session:
+            return session.execute_read(
+                unit_of_work(timeout=self.timeout)(
+                    lambda tx: cypher_roles(tx, tenant, revision, role_limit, edge_limit, cursor)
+                )
             )
 
     def retention_candidates(
