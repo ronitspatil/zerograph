@@ -5,11 +5,8 @@ import {
   Activity,
   ArrowDownToLine,
   ArrowRight,
-  Bot,
-  ChevronDown,
   ChevronRight,
   CircleHelp,
-  Database,
   GitPullRequest,
   LayoutDashboard,
   LoaderCircle,
@@ -18,9 +15,6 @@ import {
   Plus,
   RefreshCw,
   Search,
-  Shield,
-  ShieldAlert,
-  SlidersHorizontal,
   Unplug,
   X,
 } from "lucide-react";
@@ -52,6 +46,7 @@ import { Button } from "@/components/ui/button";
 import { Simulator } from "@/components/simulator";
 import { RemediationHub } from "@/components/remediation-hub";
 import { Sources } from "@/components/sources";
+import { Wordmark } from "@/components/ui/logo";
 const GraphCanvas = dynamic(
   () => import("@/components/graph-canvas").then((m) => m.GraphCanvas),
   {
@@ -98,6 +93,13 @@ const nav = [
   { id: "sources", label: "Data sources", icon: Unplug },
   { id: "activity", label: "Audit activity", icon: Activity },
 ] as const;
+const typeLabels: Record<string, string> = {
+  AIAgent: "AI agent",
+  MCPServer: "MCP server",
+  CloudRole: "Cloud role",
+  ServiceAccount: "Service account",
+  HumanUser: "Human user",
+};
 const emptyGraph: GraphView = {
   revision: "",
   nodes: [],
@@ -466,28 +468,24 @@ export function Console({ demo }: { demo: boolean }) {
     {
       label: "Non-human identities",
       value: overview?.total_nhis,
-      icon: Shield,
-      caption: "Service accounts, roles & agents",
-      accent: "blue",
+      caption: "Service accounts, roles and agents",
+      accent: "",
     },
     {
       label: "AI agents",
       value: overview?.ai_agents,
-      icon: Bot,
       caption: "Connected autonomous identities",
-      accent: "green",
+      accent: "",
     },
     {
       label: "Toxic combinations",
       value: overview?.toxic_combinations,
-      icon: ShieldAlert,
       caption: "Exposed paths to sensitive data",
       accent: "red",
     },
     {
       label: "High blast radius",
       value: overview?.high_blast_radius,
-      icon: Activity,
       caption: "Potential exposure score ≥ 70",
       accent: "amber",
     },
@@ -495,30 +493,24 @@ export function Console({ demo }: { demo: boolean }) {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <a className="brand" href="/">
-          <div className="brand-mark">
-            <Network size={23} />
-          </div>
-          ZeroGraph
+        <a className="brand" href="/" aria-label="ZeroGraph home">
+          <Wordmark />
         </a>
         <div className="workspace-switch">
-          <div className="workspace-avatar">{demo ? "D" : "W"}</div>
-          <div>
-            <strong>{demo ? "Demo workspace" : "Organization"}</strong>
-            <span>{actor?.tenant_id || "Connecting…"}</span>
-          </div>
-          <ChevronDown size={14} />
+          <strong>{demo ? "Demo workspace" : "Organization"}</strong>
+          <span title={actor?.tenant_id}>
+            {actor?.tenant_id || "Connecting…"}
+          </span>
         </div>
-        <span className="nav-label">WORKSPACE</span>
-        <nav>
+        <nav aria-label="Primary">
           {nav.map((n) => (
             <button
               key={n.id}
               className={view === n.id ? "nav-item active" : "nav-item"}
               onClick={() => setView(n.id)}
             >
-              <n.icon size={17} />
-              {n.label}
+              <n.icon size={16} aria-hidden="true" />
+              <span className="nav-text">{n.label}</span>
               {n.id === "remediation" && records.length > 0 && (
                 <span className="nav-count">{records.length}</span>
               )}
@@ -526,28 +518,13 @@ export function Console({ demo }: { demo: boolean }) {
           ))}
         </nav>
         <div className="sidebar-bottom">
-          <div className="posture-card">
-            <div>
-              <span className="status-dot" />
-              IDENTITY × DATA
-            </div>
-            <p>
-              Understand access.
-              <br />
-              Reduce exposure.
-            </p>
-            <button onClick={() => setShowHelp(true)}>
-              How ZeroGraph works
-              <ArrowRight size={13} />
-            </button>
-          </div>
           <button className="nav-item" onClick={() => setShowHelp(true)}>
-            <CircleHelp size={17} />
-            Platform guide
+            <CircleHelp size={16} aria-hidden="true" />
+            <span className="nav-text">Platform guide</span>
           </button>
           <button className="nav-item" onClick={logout}>
-            <LogOut size={17} />
-            Sign out
+            <LogOut size={16} aria-hidden="true" />
+            <span className="nav-text">Sign out</span>
           </button>
           <div className="user">
             <span className="user-avatar">
@@ -568,13 +545,15 @@ export function Console({ demo }: { demo: boolean }) {
         <header className="topbar">
           <div className="breadcrumb">
             Workspace
-            <ChevronRight size={13} />
+            <ChevronRight size={12} aria-hidden="true" />
             <span>{titles[view].title}</span>
           </div>
           <div className="topbar-right">
-            {demo && <span className="pill">DEMO DATA</span>}
             <span className="connection-status">
-              <i className={error ? "status-dot warning" : "status-dot"} />
+              <i
+                className={error ? "status-dot warning" : "status-dot"}
+                aria-hidden="true"
+              />
               {loading
                 ? "Connecting"
                 : error
@@ -586,14 +565,13 @@ export function Console({ demo }: { demo: boolean }) {
               onClick={() => void refresh()}
               aria-label="Refresh workspace"
             >
-              <RefreshCw size={16} className={loading ? "spin" : ""} />
+              <RefreshCw size={15} className={loading ? "spin" : ""} />
             </button>
           </div>
         </header>
         <main className="main-content">
           <div className="page-heading">
             <div>
-              <span className="eyebrow">ZEROGRAPH / SECURITY POSTURE</span>
               <h1>{titles[view].title}</h1>
               <p>{titles[view].description}</p>
             </div>
@@ -603,11 +581,11 @@ export function Console({ demo }: { demo: boolean }) {
                 onClick={exportGraph}
                 disabled={!filtered.nodes.length || revisionStale}
               >
-                <ArrowDownToLine size={15} />
+                <ArrowDownToLine size={14} aria-hidden="true" />
                 {roles ? "Export visible role page" : "Export visible view"}
               </Button>
               <Button onClick={() => setView("sources")}>
-                <Plus size={15} />
+                <Plus size={14} aria-hidden="true" />
                 Add source
               </Button>
             </div>
@@ -628,11 +606,15 @@ export function Console({ demo }: { demo: boolean }) {
               {(view === "graph" || view === "overview") && (
                 <div className="metric-grid">
                   {metrics.map((m) => (
-                    <div className={`metric-card ${m.accent}`} key={m.label}>
-                      <div>
-                        <span>{m.label}</span>
-                        <m.icon size={17} />
-                      </div>
+                    <div
+                      className={
+                        m.accent && m.value
+                          ? `metric-card ${m.accent}`
+                          : "metric-card"
+                      }
+                      key={m.label}
+                    >
+                      <span>{m.label}</span>
                       <strong>{m.value ?? 0}</strong>
                       <small>{m.caption}</small>
                     </div>
@@ -646,20 +628,20 @@ export function Console({ demo }: { demo: boolean }) {
                     role="group"
                     aria-label="Graph view"
                   >
-                    <Button
-                      variant="outline"
+                    <button
+                      type="button"
                       aria-pressed={graphMode === "identities"}
                       onClick={showIdentities}
                     >
                       Identity & data
-                    </Button>
-                    <Button
-                      variant="outline"
+                    </button>
+                    <button
+                      type="button"
                       aria-pressed={graphMode === "roles"}
                       onClick={() => void loadRoles()}
                     >
                       Role map
-                    </Button>
+                    </button>
                   </div>
                   <section className="panel graph-panel">
                     <div className="panel-heading">
@@ -702,14 +684,15 @@ export function Console({ demo }: { demo: boolean }) {
                           )}
                         </span>
                       </div>
-                      <span className="live-label">
-                        <i className="status-dot" />
-                        {revisionStale
-                          ? "Revision changed — refresh required"
-                          : graph.revision
-                            ? "Snapshot loaded"
-                            : "Awaiting collection"}
-                      </span>
+                      {revisionStale && (
+                        <span className="live-label warning">
+                          <i
+                            className="status-dot warning"
+                            aria-hidden="true"
+                          />
+                          Revision changed — refresh required
+                        </span>
+                      )}
                     </div>
                     <div className="exploration-status" role="status">
                       {roles
@@ -721,6 +704,7 @@ export function Console({ demo }: { demo: boolean }) {
                       whole tenant revision.
                       <Button
                         variant="outline"
+                        size="small"
                         onClick={() =>
                           roles ? void loadRoles() : void refresh()
                         }
@@ -730,6 +714,7 @@ export function Console({ demo }: { demo: boolean }) {
                       {roles && (
                         <Button
                           variant="outline"
+                          size="small"
                           disabled={
                             graphBusy ||
                             revisionStale ||
@@ -759,7 +744,7 @@ export function Console({ demo }: { demo: boolean }) {
                     </div>
                     <div className="graph-toolbar">
                       <div className="search-field">
-                        <Search size={15} />
+                        <Search size={14} aria-hidden="true" />
                         <input
                           aria-label="Search identities"
                           maxLength={128}
@@ -770,7 +755,6 @@ export function Console({ demo }: { demo: boolean }) {
                         />
                       </div>
                       <div className="filters">
-                        <SlidersHorizontal size={14} />
                         <select
                           aria-label="Filter by account"
                           value={account}
@@ -787,15 +771,9 @@ export function Console({ demo }: { demo: boolean }) {
                           onChange={(e) => setType(e.target.value)}
                         >
                           <option value="">All identity types</option>
-                          {[
-                            "AIAgent",
-                            "MCPServer",
-                            "CloudRole",
-                            "ServiceAccount",
-                            "HumanUser",
-                          ].map((t) => (
+                          {Object.entries(typeLabels).map(([t, label]) => (
                             <option key={t} value={t}>
-                              {t.replace(/([a-z])([A-Z])/g, "$1 $2")}
+                              {label}
                             </option>
                           ))}
                         </select>
@@ -827,7 +805,7 @@ export function Console({ demo }: { demo: boolean }) {
                                     key={n.id}
                                     onClick={() => void explore(n.id)}
                                   >
-                                    {n.name} <small>{n.id}</small>
+                                    <span>{n.name}</span> <small>{n.id}</small>
                                   </button>
                                 ))}
                                 {searchResults.has_more && (
@@ -853,7 +831,7 @@ export function Console({ demo }: { demo: boolean }) {
                           />
                         ) : (
                           <div className="empty-state">
-                            <Network size={42} />
+                            <Network size={28} aria-hidden="true" />
                             <h3>
                               {roles
                                 ? "No roles in this workspace"
@@ -898,8 +876,8 @@ export function Console({ demo }: { demo: boolean }) {
                       </div>
                       {selected ? (
                         <aside className="node-sidebar">
-                          <div className="panel-heading">
-                            <span className="eyebrow">NODE DETAILS</span>
+                          <div className="node-sidebar-heading">
+                            <span className="section-label">Details</span>
                             <button
                               className="icon-button"
                               onClick={() => {
@@ -912,11 +890,10 @@ export function Console({ demo }: { demo: boolean }) {
                               <X size={15} />
                             </button>
                           </div>
-                          <div className="node-symbol">
-                            <Bot size={25} />
-                          </div>
-                          <h3>{selected.name}</h3>
-                          <span className="pill green">{selected.type}</span>
+                          <h3 title={selected.name}>{selected.name}</h3>
+                          <span className="node-type">
+                            {typeLabels[selected.type] ?? selected.type}
+                          </span>
                           <dl>
                             <dt>Provider</dt>
                             <dd>{selected.provider}</dd>
@@ -971,11 +948,8 @@ export function Console({ demo }: { demo: boolean }) {
                             )}
                           {selected.tags.length > 0 && (
                             <div className="tag-row">
-                              {selected.tags.map((t) => (
-                                <span className="pill" key={t}>
-                                  {t}
-                                </span>
-                              ))}
+                              <span className="section-label">Tags</span>
+                              <p>{selected.tags.join(", ")}</p>
                             </div>
                           )}
                           <Button
@@ -989,19 +963,17 @@ export function Console({ demo }: { demo: boolean }) {
                             onClick={() => setSimulating(true)}
                             disabled={!canWrite || revisionStale}
                           >
-                            <Activity size={15} />
                             Simulate compromise
                           </Button>
-                          <small className="node-id">{selected.id}</small>
+                          <small className="node-id" title={selected.id}>
+                            {selected.id}
+                          </small>
                         </aside>
                       ) : (
                         <aside className="node-sidebar empty-sidebar">
-                          <div className="node-symbol">
-                            <Network size={25} />
-                          </div>
-                          <h3>Follow the access</h3>
+                          <span className="section-label">Details</span>
                           <p>
-                            Select any identity or asset to inspect its
+                            Select an identity or asset to inspect its
                             properties and simulate downstream exposure.
                           </p>
                           <div className="sidebar-stat">
@@ -1020,9 +992,9 @@ export function Console({ demo }: { demo: boolean }) {
                       )}
                     </div>
                     <div className="graph-footer">
-                      <Shield size={13} />
                       <span>
-                        Directed access paths · Maximum simulation depth: 5 hops
+                        Hover a node to trace its access paths · Simulation
+                        depth up to 5 hops
                       </span>
                       <span>
                         {graph.revision
@@ -1054,7 +1026,6 @@ export function Console({ demo }: { demo: boolean }) {
                     <div className="panel chart-panel">
                       <div className="panel-heading">
                         <h3>Data sensitivity</h3>
-                        <Database size={16} />
                       </div>
                       <p className="muted">
                         Classified data assets across the current snapshot
@@ -1068,30 +1039,31 @@ export function Console({ demo }: { demo: boolean }) {
                           >
                             <XAxis
                               dataKey="name"
-                              tick={{ fill: "#8091a8", fontSize: 11 }}
+                              tick={{ fill: "#8a96a8", fontSize: 11 }}
                               axisLine={false}
                               tickLine={false}
                             />
                             <YAxis
                               allowDecimals={false}
-                              tick={{ fill: "#8091a8", fontSize: 11 }}
+                              tick={{ fill: "#8a96a8", fontSize: 11 }}
                               axisLine={false}
                               tickLine={false}
                             />
                             <Tooltip
                               contentStyle={{
-                                background: "#152030",
-                                border: "1px solid #29394d",
-                                borderRadius: 8,
+                                background: "#131b27",
+                                border: "1px solid #263142",
+                                borderRadius: 6,
+                                fontSize: 12,
                               }}
-                              cursor={{ fill: "#1a293c" }}
+                              cursor={{ fill: "#182230" }}
                             />
                             <Bar
                               dataKey="value"
-                              radius={[5, 5, 0, 0]}
-                              maxBarSize={48}
+                              radius={[3, 3, 0, 0]}
+                              maxBarSize={40}
                             >
-                              {["#7b9cb4", "#81b9ff", "#f6c578", "#f18b94"].map(
+                              {["#5d6b7e", "#7f9bbd", "#d9a85b", "#e0707c"].map(
                                 (c) => (
                                   <Cell key={c} fill={c} />
                                 ),
@@ -1125,7 +1097,6 @@ export function Console({ demo }: { demo: boolean }) {
                         onClick={() => setView("graph")}
                       >
                         Explore access graph
-                        <ArrowRight size={14} />
                       </Button>
                     </div>
                   </div>
@@ -1197,10 +1168,6 @@ export function Console({ demo }: { demo: boolean }) {
             </>
           )}
         </main>
-        <footer className="app-footer">
-          <span>ZeroGraph · Identity × Data Intelligence</span>
-          <span>Tenant-scoped · Evidence-backed · Review-first</span>
-        </footer>
       </div>
       {simulating && selected && (
         <>
@@ -1237,7 +1204,7 @@ export function Console({ demo }: { demo: boolean }) {
                 onClick={() => setShowHelp(false)}
                 aria-label="Close guide"
               >
-                <X size={18} />
+                <X size={16} />
               </button>
             </div>
             <p>1. Add a source to collect identities and data relationships.</p>
@@ -1284,7 +1251,9 @@ function Findings({
             Prioritize exposed identities with access to sensitive data
           </span>
         </div>
-        <span className="pill red">{findings.length} findings</span>
+        <span className="muted count">
+          {findings.length} {findings.length === 1 ? "finding" : "findings"}
+        </span>
       </div>
       {findings.length ? (
         <table>
@@ -1300,10 +1269,8 @@ function Findings({
             {findings.map((f) => (
               <tr key={f.id}>
                 <td>
-                  <span
-                    className={`pill ${f.severity === "critical" ? "red" : "amber"}`}
-                  >
-                    <i />
+                  <span className={`severity ${f.severity}`}>
+                    <i aria-hidden="true" />
                     {f.severity}
                   </span>
                 </td>
@@ -1312,7 +1279,7 @@ function Findings({
                   <div className="path-preview">
                     {f.path.map((id, i) => (
                       <span key={id}>
-                        {i > 0 && <ChevronRight size={10} />}
+                        {i > 0 && <ChevronRight size={11} aria-hidden="true" />}
                         <span>{name(id)}</span>
                       </span>
                     ))}
@@ -1333,7 +1300,7 @@ function Findings({
                 <td>
                   <button className="text-link" onClick={() => onSelect(f)}>
                     Investigate
-                    <ArrowRight size={13} />
+                    <ArrowRight size={12} aria-hidden="true" />
                   </button>
                 </td>
               </tr>
@@ -1342,7 +1309,6 @@ function Findings({
         </table>
       ) : (
         <div className="empty-line">
-          <Shield size={18} />
           {graph.nodes.length
             ? "No exposed sensitive-data paths detected in the current snapshot."
             : "Collect an environment to evaluate toxic access paths."}
