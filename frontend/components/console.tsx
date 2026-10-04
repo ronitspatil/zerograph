@@ -93,6 +93,13 @@ const nav = [
   { id: "sources", label: "Data sources", icon: Unplug },
   { id: "activity", label: "Audit activity", icon: Activity },
 ] as const;
+const typeLabels: Record<string, string> = {
+  AIAgent: "AI agent",
+  MCPServer: "MCP server",
+  CloudRole: "Cloud role",
+  ServiceAccount: "Service account",
+  HumanUser: "Human user",
+};
 const emptyGraph: GraphView = {
   revision: "",
   nodes: [],
@@ -764,15 +771,9 @@ export function Console({ demo }: { demo: boolean }) {
                           onChange={(e) => setType(e.target.value)}
                         >
                           <option value="">All identity types</option>
-                          {[
-                            "AIAgent",
-                            "MCPServer",
-                            "CloudRole",
-                            "ServiceAccount",
-                            "HumanUser",
-                          ].map((t) => (
+                          {Object.entries(typeLabels).map(([t, label]) => (
                             <option key={t} value={t}>
-                              {t.replace(/([a-z])([A-Z])/g, "$1 $2")}
+                              {label}
                             </option>
                           ))}
                         </select>
@@ -891,7 +892,7 @@ export function Console({ demo }: { demo: boolean }) {
                           </div>
                           <h3 title={selected.name}>{selected.name}</h3>
                           <span className="node-type">
-                            {selected.type.replace(/([a-z])([A-Z])/g, "$1 $2")}
+                            {typeLabels[selected.type] ?? selected.type}
                           </span>
                           <dl>
                             <dt>Provider</dt>
