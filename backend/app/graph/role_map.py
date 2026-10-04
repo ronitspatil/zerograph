@@ -96,6 +96,8 @@ def memory_roles(
             neighbors[edge.source].add(edge.target)
         if edge.target in ids:
             neighbors[edge.target].add(edge.source)
+    for role_id, adjacent in neighbors.items():
+        adjacent.discard(role_id)
     by_id = {node.id: node for node in snapshot.nodes}
     summaries = [
         RoleSummary(
@@ -170,6 +172,7 @@ def cypher_roles(
             "OPTIONAL MATCH (role)"
             f"-[r:{TRAVERSAL_LABELS} {{tenant_id:$tenant, revision:$revision}}]-"
             "(neighbor:Entity {tenant_id:$tenant, revision:$revision}) "
+            "WHERE neighbor.id <> role.id "
             "RETURN role.id AS role_id, count(DISTINCT neighbor.id) AS direct_neighbors, "
             "count(DISTINCT CASE WHEN neighbor:HumanUser OR neighbor:ServiceAccount OR neighbor:AIAgent "
             "OR neighbor:MCPServer OR neighbor:CloudRole THEN neighbor.id ELSE null END) AS linked_identities, "

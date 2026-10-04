@@ -286,6 +286,12 @@ def test_real_role_map_label_counts_keyset_pages_and_scoped_structural_summaries
     ]
     edges.append(Edge(source="role:00", target="neighbor:DataCategory", type=EdgeType.PII))
     edges.append(Edge(source="role:00", target="role:05", type=EdgeType.PII))
+    edges.extend(
+        [
+            Edge(source="role:00", target="role:00", type=EdgeType.INHERITS),
+            Edge(source="role:07", target="role:07", type=EdgeType.ASSUMES),
+        ]
+    )
     snapshot = GraphSnapshot(nodes=list(reversed(roles + neighbors)), edges=list(reversed(edges)))
     memory = MemoryGraphStore()
     memory.publish(tenant, revision, snapshot)

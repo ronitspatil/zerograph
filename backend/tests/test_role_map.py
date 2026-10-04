@@ -106,6 +106,30 @@ def test_memory_global_pages_direct_distinct_counts_and_copy_isolation():
     )
 
 
+def test_self_loops_stay_in_role_edges_but_not_direct_neighbor_summaries():
+    store = MemoryGraphStore()
+    snapshot = role_snapshot()
+    snapshot.edges.extend(
+        [
+            Edge(source="role:00", target="role:00", type=EdgeType.INHERITS),
+            Edge(source="role:isolated", target="role:isolated", type=EdgeType.ASSUMES),
+        ]
+    )
+    store.publish("tenant", "revision", snapshot)
+    result = store.roles("tenant", "revision", 100, 100, None)
+    assert result.total_role_edges == 5
+    assert sum(edge.source == edge.target for edge in result.edges) == 2
+    summaries = {summary.role_id: summary for summary in result.role_summaries}
+    assert summaries["role:00"].direct_neighbors == 10
+    assert summaries["role:00"].linked_identities == 6
+    assert summaries["role:isolated"].model_dump() == {
+        "role_id": "role:isolated",
+        "direct_neighbors": 0,
+        "linked_identities": 0,
+        "linked_data_assets": 0,
+    }
+
+
 def test_memory_dense_role_edges_are_bounded_and_no_dangling_endpoints():
     nodes = [Node(id=f"role:{i:03}", name=f"Role {i}", type=NodeType.ROLE) for i in range(120)]
     edges = [
@@ -318,6 +342,7 @@ def test_cypher_role_queries_use_labels_parameter_scope_bounded_rows_and_aggrega
         )
     )
     assert "STORES_PII" not in summaries and "key:selected.key" in summaries
+    assert "WHERE neighbor.id <> role.id" in summaries
     assert params["limit"] == 2 and len(params["roles"]) == 2
     edges, params = next((q, p) for q, p in tx.calls if "r.payload" in q)
     assert edges.count(":Entity:CloudRole") == 2 and "STORES_PII" not in edges
