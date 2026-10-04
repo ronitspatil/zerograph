@@ -2,29 +2,25 @@
 import { useEffect, useRef } from "react";
 import cytoscape, { type Core, type StylesheetCSS } from "cytoscape";
 import { Maximize2, Minus, Plus } from "lucide-react";
+import {
+  circlePositions,
+  layoutInput,
+  startLayout,
+  overviewAnchors,
+  spacedLabels,
+} from "@/lib/graph-layout";
 import type { GraphData, GraphNode, Simulation } from "@/lib/types";
 
 export const nodeColors: Record<string, string> = {
   HumanUser: "#94a3b8",
-  ServiceAccount: "#82a9ff",
+  ServiceAccount: "#73b2f8",
   AIAgent: "#8ee8d0",
   MCPServer: "#be9aff",
   CloudRole: "#f8ca78",
-  Database: "#81b9ff",
-  VectorStore: "#81b9ff",
-  S3Bucket: "#81b9ff",
+  Database: "#e391bb",
+  VectorStore: "#e391bb",
+  S3Bucket: "#e391bb",
   DataCategory: "#73849a",
-};
-const columns: Record<string, number> = {
-  HumanUser: 0,
-  ServiceAccount: 0,
-  AIAgent: 0,
-  MCPServer: 1,
-  CloudRole: 2,
-  Database: 3,
-  VectorStore: 3,
-  S3Bucket: 3,
-  DataCategory: 4,
 };
 export function GraphCanvas({
   graph,
@@ -33,7 +29,7 @@ export function GraphCanvas({
   simulation,
   onSelect,
 }: {
-  graph: GraphData;
+  graph: GraphData & { view?: { mode: "sample" | "neighborhood" | "roles" } };
   selected: string | null;
   riskNodes: Set<string>;
   simulation: Simulation | null;
@@ -41,90 +37,134 @@ export function GraphCanvas({
 }) {
   const container = useRef<HTMLDivElement>(null);
   const cy = useRef<Core | null>(null);
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
+  const applyFocus = useRef<() => void>(() => {});
   const callback = useRef(onSelect);
   callback.current = onSelect;
   useEffect(() => {
     if (!container.current) return;
-    const counts: Record<number, number> = {};
-    const totals: Record<number, number> = {};
-    graph.nodes.forEach((n) => {
-      const c = columns[n.type] || 0;
-      totals[c] = (totals[c] || 0) + 1;
-    });
+    const input = layoutInput(graph);
+    if (!input) return;
+    const positions = circlePositions(input.nodes);
+    const anchors = overviewAnchors(graph);
     const style: StylesheetCSS[] = [
       {
         selector: "node",
         css: {
+          shape: "ellipse",
+          width: 8,
+          height: 8,
           "background-color": "data(color)",
-          "background-opacity": 0.16,
-          "border-color": "data(color)",
-          "border-width": 1.5,
-          width: 38,
-          height: 38,
-          label: "data(label)",
+          "background-opacity": 1,
+          "border-width": 0,
+          label: "",
           color: "#cbd5e1",
           "font-size": 11,
           "font-family": "Arial",
           "text-valign": "bottom",
-          "text-margin-y": 13,
-          "text-wrap": "wrap",
-          "text-max-width": "130px",
+          "text-events": "yes",
+          "text-margin-y": 9,
+          "text-wrap": "ellipsis",
+          "text-max-width": "145px",
           "overlay-opacity": 0,
         },
       },
       {
-        selector: "node[type='AIAgent']",
-        css: { shape: "hexagon", width: 48, height: 48 },
-      },
-      {
         selector: "node[type='CloudRole']",
-        css: { shape: "diamond", width: 44, height: 44 },
+        css: { width: 10, height: 10, "font-size": 10 },
       },
-      {
-        selector:
-          "node[type='Database'], node[type='VectorStore'], node[type='S3Bucket']",
-        css: { shape: "round-rectangle", width: 44, height: 36 },
-      },
+      { selector: "node.role-anchor", css: { label: "data(label)" } },
       {
         selector: "edge",
         css: {
-          width: 1.3,
-          "line-color": "#34465b",
-          "target-arrow-color": "#34465b",
-          "target-arrow-shape": "triangle",
-          "curve-style": "bezier",
-          label: "data(label)",
-          color: "#62758c",
-          "font-size": 7,
-          "text-background-color": "#0d1522",
-          "text-background-opacity": 1,
-          "text-background-padding": "3px",
-          "text-rotation": "autorotate",
-          "arrow-scale": 0.7,
+          width: 0.55,
+          opacity: 0.25,
+          "line-color": "#637b91",
+          "target-arrow-shape": "none",
+          "curve-style": "straight",
+          label: "",
         },
       },
       {
         selector: "edge[certainty!='confirmed']",
         css: { "line-style": "dashed" },
       },
+      { selector: "node.zoom-detail", css: { label: "data(label)" } },
+      { selector: ".focus-muted", css: { opacity: 0.13 } },
+      {
+        selector: "node.focus-neighbor",
+        css: {
+          label: "",
+          opacity: 1,
+          "text-background-color": "#0d1522",
+          "text-background-opacity": 0.85,
+          "text-background-padding": "3px",
+        },
+      },
+      { selector: "node.role-anchor.focus-muted", css: { label: "" } },
+      {
+        selector: "node.focus-neighbor.zoom-detail",
+        css: { label: "data(label)" },
+      },
+      {
+        selector: "node.focus-root",
+        css: {
+          label: "data(label)",
+          opacity: 1,
+          "border-width": 2,
+          "border-color": "#f5faff",
+          "font-size": 12,
+        },
+      },
+      {
+        selector: "edge.focus-neighbor",
+        css: {
+          width: 1.1,
+          opacity: 0.9,
+          "line-color": "#b7c7d8",
+          "target-arrow-color": "#b7c7d8",
+          "target-arrow-shape": "triangle",
+          "arrow-scale": 0.6,
+          label: "",
+          color: "#cbd5e1",
+          "font-size": 9,
+          "text-rotation": "autorotate",
+          "text-background-color": "#0d1522",
+          "text-background-opacity": 0.95,
+          "text-background-padding": "3px",
+        },
+      },
+      {
+        selector: "edge.edge-detail",
+        css: {
+          label: "data(label)",
+          opacity: 1,
+          width: 1.4,
+          "target-arrow-shape": "triangle",
+          "target-arrow-color": "#cbd5e1",
+          color: "#cbd5e1",
+          "font-size": 10,
+          "text-background-color": "#0d1522",
+          "text-background-opacity": 1,
+          "text-background-padding": "3px",
+        },
+      },
       {
         selector: ".risk",
-        css: { "border-color": "#f28b91", "border-width": 2.5 },
+        css: { "border-color": "#f28b91", "border-width": 2 },
       },
       {
         selector: ".selected",
-        css: {
-          "border-color": "#f5faff",
-          "border-width": 3,
-          "background-opacity": 0.4,
-        },
+        css: { "border-color": "#f5faff", "border-width": 2 },
       },
       {
         selector: ".affected",
         css: {
           "border-color": "#f9a66c",
+          "border-width": 2,
           "background-color": "#f9a66c",
-          "background-opacity": 0.35,
+          opacity: 1,
         },
       },
       {
@@ -132,48 +172,143 @@ export function GraphCanvas({
         css: {
           "line-color": "#f9a66c",
           "target-arrow-color": "#f9a66c",
-          width: 2.7,
+          "target-arrow-shape": "triangle",
+          opacity: 1,
+          width: 1.4,
         },
       },
-      { selector: ".dimmed", css: { opacity: 0.22 } },
+      { selector: ".dimmed", css: { opacity: 0.16 } },
     ];
     cy.current = cytoscape({
       container: container.current,
       elements: [
-        ...graph.nodes.map((n) => {
-          const c = columns[n.type] || 0;
-          const i = counts[c] || 0;
-          counts[c] = i + 1;
-          return {
-            data: {
-              id: n.id,
-              label: n.name,
-              color: nodeColors[n.type],
-              type: n.type,
-            },
-            position: {
-              x: 90 + c * 215,
-              y: 210 + (i - (totals[c] - 1) / 2) * 105,
-            },
-          };
-        }),
+        ...graph.nodes.map((n, i) => ({
+          classes: anchors.has(n.id) ? "role-anchor" : "",
+          data: {
+            id: n.id,
+            label: n.name,
+            color: nodeColors[n.type],
+            type: n.type,
+          },
+          position: { x: positions[i].x, y: positions[i].y },
+        })),
         ...graph.edges.map((e) => ({
           data: { ...e, label: e.type.replaceAll("_", " ").toLowerCase() },
         })),
       ],
       style,
       layout: { name: "preset", fit: true, padding: 55 },
-      minZoom: 0.3,
+      minZoom: 0.05,
       maxZoom: 2.5,
       wheelSensitivity: 0.2,
     });
+    const instance = cy.current;
+    let userMoved = false;
+    instance.on("pan zoom", () => {
+      userMoved = true;
+    });
+    const stopLayout = startLayout(input, (positions) => {
+      if (cy.current !== instance || instance.destroyed()) return;
+      instance.batch(() => {
+        for (const p of positions)
+          instance.getElementById(p.id).position({ x: p.x, y: p.y });
+      });
+      if (!userMoved) instance.fit(undefined, 55);
+    });
+    let hovered: string | null = null;
+    function labelSizing() {
+      const roleOnly = graph.view?.mode === "roles";
+      const overview =
+        !hovered && !selectedRef.current && instance.zoom() <= 1.35;
+      if (roleOnly && overview) {
+        // Restore candidates before measuring labels; never hide the focused full label.
+        instance.nodes().removeClass("role-anchor");
+        for (const id of anchors)
+          instance.getElementById(id).addClass("role-anchor");
+      }
+      instance.nodes().removeStyle("font-size text-max-width");
+      instance.nodes("[type='CloudRole']").style({
+        "font-size": Math.min(48, 10 / instance.zoom()),
+        "text-max-width": `${(instance.width() < 700 ? 82 : 110) / instance.zoom()}px`,
+      });
+      if (roleOnly && overview) {
+        const labels = [...anchors].map((id) => ({
+          id,
+          ...instance.getElementById(id).renderedBoundingBox({
+            includeNodes: false,
+            includeEdges: false,
+            includeLabels: true,
+          }),
+        }));
+        const visible = spacedLabels(
+          labels,
+          instance.width(),
+          instance.height(),
+        );
+        for (const id of anchors)
+          if (!visible.has(id))
+            instance.getElementById(id).removeClass("role-anchor");
+      }
+      instance.nodes(".focus-root").style({
+        "font-size": Math.min(80, 12 / instance.zoom()),
+        "text-max-width": `${170 / instance.zoom()}px`,
+      });
+      instance
+        .edges(".edge-detail")
+        .style({ "font-size": Math.min(64, 10 / instance.zoom()) });
+    }
+    const focus = () => {
+      instance.elements().removeClass("focus-root focus-neighbor focus-muted");
+      const id = hovered || selectedRef.current;
+      if (!id) {
+        labelSizing();
+        return;
+      }
+      const root = instance.getElementById(id);
+      if (root.empty()) return;
+      const neighborhood = root.closedNeighborhood();
+      instance.elements().difference(neighborhood).addClass("focus-muted");
+      neighborhood.addClass("focus-neighbor");
+      root.removeClass("focus-neighbor").addClass("focus-root");
+      labelSizing();
+    };
+    applyFocus.current = focus;
+    instance.on("mouseover", "edge", (event) => {
+      event.target.addClass("edge-detail");
+      labelSizing();
+    });
+    instance.on("mouseout", "edge", (event) =>
+      event.target.removeClass("edge-detail"),
+    );
+    instance.on("mouseover", "node", (event) => {
+      hovered = event.target.id();
+      focus();
+    });
+    instance.on("mouseout", "node", () => {
+      hovered = null;
+      focus();
+    });
+    const detail = () => {
+      const instance = cy.current;
+      if (!instance) return;
+      instance.nodes().toggleClass("zoom-detail", instance.zoom() > 1.35);
+      labelSizing();
+    };
+    cy.current.on("zoom", detail);
+    detail();
+    focus();
     cy.current.on("tap", "node", (event) => {
       const node = graph.nodes.find((n) => n.id === event.target.id());
       if (node) callback.current(node);
     });
-    const observer = new ResizeObserver(() => cy.current?.resize());
+    const observer = new ResizeObserver(() => {
+      if (cy.current !== instance || instance.destroyed()) return;
+      instance.resize();
+      labelSizing();
+    });
     observer.observe(container.current);
     return () => {
+      stopLayout();
       observer.disconnect();
       cy.current?.destroy();
       cy.current = null;
@@ -183,6 +318,7 @@ export function GraphCanvas({
     const instance = cy.current;
     if (!instance) return;
     instance.elements().removeClass("selected risk affected dimmed");
+    applyFocus.current();
     instance.nodes().forEach((n) => {
       if (riskNodes.has(n.id())) n.addClass("risk");
       if (n.id() === selected) n.addClass("selected");
@@ -209,6 +345,13 @@ export function GraphCanvas({
         renderedPosition: { x: c.width() / 2, y: c.height() / 2 },
       });
   }
+  if (!layoutInput(graph))
+    return (
+      <div role="alert">
+        This view exceeds visualization bounds or contains invalid endpoints.
+        Reset to a bounded view.
+      </div>
+    );
   return (
     <div className="canvas-wrap">
       <div
@@ -218,10 +361,7 @@ export function GraphCanvas({
         aria-label={`Identity and data graph with ${graph.nodes.length} nodes. Use the identity list to select a node with the keyboard.`}
       />
       <div className="canvas-labels">
-        <span>IDENTITIES</span>
-        <span>TOOLS</span>
-        <span>ROLES</span>
-        <span>DATA ASSETS</span>
+        <span>ROLE COMMUNITIES · HOVER FOR ACCESS PATHS</span>
       </div>
       <div className="graph-controls">
         <button aria-label="Zoom in" onClick={() => zoom(1.2)}>
@@ -238,6 +378,10 @@ export function GraphCanvas({
         </button>
       </div>
       <div className="graph-legend">
+        <span>
+          <i style={{ background: nodeColors.ServiceAccount }} />
+          Service account
+        </span>
         <span>
           <i style={{ background: nodeColors.AIAgent }} />
           AI agent

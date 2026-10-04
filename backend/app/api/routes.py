@@ -20,7 +20,15 @@ from app.db.session import audit, get_db
 from app.engine.analysis_index import AnalysisIndex
 from app.engine.blast_radius import BlastRadius, calculate
 from app.engine.toxic_combos import Finding, detect
+from app.graph.exploration import (
+    ExplorationResponse,
+    ExplorationView,
+    RevisionUnavailable,
+    RootNotFound,
+    SearchResponse,
+)
 from app.graph.repository import GraphStore, get_graph_store
+from app.graph.role_map import RoleMapResponse, RoleMapView
 from app.graph.schema import IDENTITY_TYPES, GraphSnapshot, Node, NodeType
 from app.remediation.gitops_sync import GitOpsClient, GitOpsConflict, GitOpsError
 from app.remediation.policy_optimizer import Optimization, UsageEvidence, optimize, terraform_policy
@@ -39,7 +47,7 @@ def tenant_state(db: Session, tenant: str) -> TenantState | None:
     return db.get(TenantState, tenant)
 
 
-def load_snapshot(db: Session, graph: GraphStore, tenant: str) -> tuple[GraphSnapshot, str]:
+def pin_revision(db: Session, tenant: str) -> str:
     # Pin the authoritative pointer for this request transaction. Publishers and
     # retention use FOR UPDATE, so the graph cannot disappear or advance while
     # snapshot and subsequent shortest-path queries materialize. Refresh any
@@ -63,7 +71,11 @@ def load_snapshot(db: Session, graph: GraphStore, tenant: str) -> tuple[GraphSna
         raise HTTPException(
             503, "Graph publication or maintenance is busy; retry shortly", headers={"Retry-After": "5"}
         ) from None
-    revision = state.revision if state else ""
+    return state.revision if state else ""
+
+
+def load_snapshot(db: Session, graph: GraphStore, tenant: str) -> tuple[GraphSnapshot, str]:
+    revision = pin_revision(db, tenant)
     return graph.snapshot(tenant, revision), revision
 
 
@@ -100,6 +112,109 @@ def graph_view(
             if e.source in ids and e.target in ids
         ],
         warnings=snapshot.warnings,
+    )
+
+
+def expected_revision(db: Session, tenant: str, expected: str | None) -> str:
+    revision = pin_revision(db, tenant)
+    if expected is not None and expected != revision:
+        raise HTTPException(409, "Graph revision changed; refresh the current view")
+    return revision
+
+
+@router.get("/graph/explore", response_model=ExplorationResponse)
+def explore_graph(
+    db: DB,
+    graph: Graph,
+    actor: Viewer,
+    root_id: Annotated[str | None, Query(min_length=1, max_length=512)] = None,
+    node_limit: Annotated[int, Query(ge=1, le=500)] = 250,
+    edge_limit: Annotated[int, Query(ge=1, le=2000)] = 1000,
+    revision: str | None = None,
+):
+    current = expected_revision(db, actor.tenant_id, revision)
+    try:
+        result = graph.explore(actor.tenant_id, current, root_id, node_limit, edge_limit)
+    except RootNotFound:
+        raise HTTPException(404, "Graph root not found") from None
+    except RevisionUnavailable:
+        raise HTTPException(
+            503, "Published graph revision unavailable; retry shortly", headers={"Retry-After": "5"}
+        ) from None
+    return ExplorationResponse(
+        revision=current,
+        nodes=result.nodes,
+        edges=[{**edge.model_dump(mode="json"), "id": edge.id} for edge in result.edges],
+        warnings=result.warnings,
+        view=ExplorationView(
+            mode="neighborhood" if root_id is not None else "sample",
+            root_id=root_id,
+            node_limit=node_limit,
+            edge_limit=edge_limit,
+            truncated=result.truncated,
+            total_nodes=result.total_nodes,
+            total_edges=result.total_edges,
+        ),
+    )
+
+
+@router.get("/graph/search", response_model=SearchResponse)
+def search_graph(
+    q: str,
+    db: DB,
+    graph: Graph,
+    actor: Viewer,
+    limit: Annotated[int, Query(ge=1, le=50)] = 25,
+    revision: str | None = None,
+):
+    q = q.strip()
+    if not 1 <= len(q) <= 128:
+        raise HTTPException(422, "Search query must contain 1 to 128 characters")
+    current = expected_revision(db, actor.tenant_id, revision)
+    try:
+        nodes, has_more = graph.search(actor.tenant_id, current, q, limit)
+    except RevisionUnavailable:
+        raise HTTPException(
+            503, "Published graph revision unavailable; retry shortly", headers={"Retry-After": "5"}
+        ) from None
+    return SearchResponse(revision=current, nodes=nodes, has_more=has_more)
+
+
+@router.get("/graph/roles", response_model=RoleMapResponse)
+def role_map(
+    db: DB,
+    graph: Graph,
+    actor: Viewer,
+    role_limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    edge_limit: Annotated[int, Query(ge=1, le=2000)] = 1000,
+    cursor: Annotated[str | None, Query(min_length=1, max_length=512)] = None,
+    revision: str | None = None,
+):
+    current = expected_revision(db, actor.tenant_id, revision)
+    try:
+        result = graph.roles(actor.tenant_id, current, role_limit, edge_limit, cursor)
+    except RevisionUnavailable:
+        raise HTTPException(
+            503, "Published graph revision unavailable; retry shortly", headers={"Retry-After": "5"}
+        ) from None
+    return RoleMapResponse(
+        revision=current,
+        nodes=result.nodes,
+        edges=[{**edge.model_dump(mode="json"), "id": edge.id} for edge in result.edges],
+        warnings=result.warnings,
+        role_summaries=result.role_summaries,
+        view=RoleMapView(
+            node_limit=role_limit,
+            edge_limit=edge_limit,
+            truncated=result.truncated,
+            total_nodes=result.total_nodes,
+            total_edges=result.total_edges,
+            total_roles=result.total_roles,
+            total_role_edges=result.total_role_edges,
+            role_map_truncated=result.role_map_truncated,
+            has_more=result.has_more,
+            next_cursor=result.next_cursor,
+        ),
     )
 
 

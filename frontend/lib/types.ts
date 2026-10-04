@@ -38,6 +38,39 @@ export interface GraphData {
   edges: GraphEdge[];
   warnings: string[];
 }
+export interface GraphView extends GraphData {
+  view: {
+    mode: "sample" | "neighborhood";
+    root_id: string | null;
+    node_limit: number;
+    edge_limit: number;
+    truncated: boolean;
+    total_nodes: number;
+    total_edges: number;
+  };
+}
+export interface RoleSummary {
+  role_id: string;
+  direct_neighbors: number;
+  linked_identities: number;
+  linked_data_assets: number;
+}
+export interface RoleMap extends GraphData {
+  role_summaries: RoleSummary[];
+  view: Omit<GraphView["view"], "mode"> & {
+    mode: "roles";
+    total_roles: number;
+    total_role_edges: number;
+    role_map_truncated: boolean;
+    has_more: boolean;
+    next_cursor: string | null;
+  };
+}
+export interface GraphSearch {
+  revision: string;
+  nodes: GraphNode[];
+  has_more: boolean;
+}
 export interface Overview {
   total_nhis: number;
   ai_agents: number;
