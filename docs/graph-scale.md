@@ -8,7 +8,7 @@ The dashboard can request a bounded view of the current tenant revision instead 
 
 Both endpoints accept an expected `revision`; a changed pointer returns 409 so clients can reset before mixing views. A missing root returns 404. An empty tenant returns revision `""` and zero counts; a nonempty publication pointer whose graph metadata is missing returns retryable 503 instead of claiming a complete empty graph. Viewer access is sufficient; tenant scope comes exclusively from the verified actor. The SQL revision pointer is held with a shared lock through graph query/materialization, using the existing five-second lock timeout and publisher/retention coordination. Cypher uses fixed, parameterized, timeout-bound queries, no variable-length traversal, and limits all entity/relationship payload rows; endpoints and relationships are scoped to tenant and revision and relationship types are whitelisted.
 
-This slice changes visualization retrieval only. Publication caps are `ZG_MAX_NODES`/`ZG_MAX_EDGES` (default 100,000/500,000 per revision; see "Publication at scale" below); the legacy `/graph` and blast-radius simulation still materialize the full snapshot, while overview and paged findings read analysis stored at publication. Visible nodes cannot establish complete effective access or blast radius. Filters/exports apply to the visible view, and analyses may include affected nodes outside it. Graph-free simulation remains separate work; the whole-revision overview is the [global map](global-map.md); 100,000-node publication is qualified below, million-node capacity is not.
+This slice changes visualization retrieval only. Publication caps are `ZG_MAX_NODES`/`ZG_MAX_EDGES` (default 100,000/500,000 per revision; see "Publication at scale" below); overview and paged findings read analysis stored at publication, and blast-radius simulation reads only the source's bounded neighborhood (below). The deprecated legacy `GET /graph` still materializes the whole revision, so it refuses revisions above `ZG_LEGACY_GRAPH_MAX_NODES`/`ZG_LEGACY_GRAPH_MAX_EDGES` (default 5,000/20,000) with 413 and sends `Deprecation: true`. Visible nodes cannot establish complete effective access or blast radius. Filters/exports apply to the visible view, and analyses may include affected nodes outside it. The whole-revision overview is the [global map](global-map.md); 100,000-node publication is qualified below, million-node capacity is not.
 
 Memory/API and Cypher query-contract tests cover bounds, tenant/revision isolation, dense hubs, both directions, annotations, visible endpoints, search sentinels and missing published metadata. Real Memgraph/Neo4j integration checks are opt-in via the existing `ZG_INTEGRATION_GRAPH` environment and deliberately insert malformed cross-tenant/revision/type relationships. They require disposable graph services; local query-contract tests do not replace that runtime evidence.
 
@@ -45,3 +45,30 @@ Measured 2026-10-04 on an M5 MacBook (10 cores, 16 GB), Memgraph 3.2.0 in Docker
 API peak RSS was 218 MB, so worker plus API peaked at 537 MB (3.75 GB for an in-process 100k publish before). Every read while replacing a revision returned 200. Retention deleted a full 100k revision in 1.9 s with no 503s. The streamed backup of all three revisions was 318 MB: export 27.9 s, validation 10.7 s, import 50.5 s, re-export 25.7 s, each under 140 MB peak RSS; the re-export is byte-identical to the archive. Memgraph resident memory grew to 1.86 GiB with three revisions (about 0.6 GiB per 100k revision of this shape); 20 tenants × 5 retained revisions at full size would need on the order of 60 GiB (inferred, not measured).
 
 Limits of this evidence: one machine, synthetic data, no network/TLS or Next.js proxy, no Redis broker (the worker is run directly; the 6 s `commit` time is the failed broker publish), no multi-worker or multi-tenant contention. Bounded exploration at 100k cost about 0.4–0.6 s per request on Memgraph here; key-anchored queries brought it to about 10–45 ms ([global-map.md](global-map.md#bounded-exploration-on-memgraph)). Neo4j passes the same functional integration tests but is not scale-qualified.
+
+## Blast-radius simulation (Phase 3)
+
+`POST /api/v1/simulate` no longer loads the revision. The graph store's `reach()` expands the source one BFS level per round trip: relationships of the current frontier (whitelisted traversal types, certainty-filtered, at most `max_hops` levels, frontier batches of 2,000 keys) and, for every newly reached node, its type and (data assets only) sensitivity, all through unique-key seeks scoped to the pinned tenant and revision. The reference breadth-first search then runs over that neighborhood in the API process, and the revision's node count (for centrality) and total asset weight (for exposure) come from the stored `revision_analysis` row; a legacy revision without one is measured from its snapshot, as before. The request may carry the `revision` it was issued for (409 when the pointer moved), and the response carries `X-Graph-Revision`. Authorization (analyst), 404 for an unknown source, the shared pointer pin and its 503 are unchanged.
+
+Vendor shortest-path operators are not used: Memgraph's `*BFS` returns an arbitrary one of several equal-length paths, and Neo4j's `shortestPath` needs one search per target (the former query paired the source with every entity of the revision). Results are therefore identical on the memory adapter, Memgraph and Neo4j and equal the in-process engine exactly: paths follow its discovery order (targets in ascending ID order), and `highlighted_edges` now lists edge IDs in ascending order (before, it followed snapshot order, which on Cypher stores was query order). The response shape is unchanged. Golden-parity tests compare every field, including path order, on the demo, dense random graphs and the 1k/5k enterprise fixtures on all three adapters (`tests/test_simulation.py`, `tests/test_graph_integration.py`).
+
+`backend/scripts/qualify_simulate.py` publishes a synthetic revision through the real upload and worker processes on Memgraph, then measures sequential warm `/simulate` requests (five hops, with and without uncertain relationships) over the ten highest out-degree entities, the exposed entry points and a seeded sample, checks every response against the reference engine over the same published revision, and times the former whole-snapshot path:
+
+```sh
+cd backend
+PYTHONPATH=. python scripts/qualify_simulate.py --database-url postgresql+psycopg://... \
+  --graph-uri bolt://127.0.0.1:7687 --size 100000 --output simulate-qualification.json
+```
+
+Measured 2026-10-05 on the same M5 MacBook, Memgraph 3.2.0 in Docker (colima), PostgreSQL 16, one 100,000-node / 417,009-edge revision:
+
+| | Result |
+|---|---|
+| `/simulate` p50 / p95 / max (240 requests, 120 sources) | 6.2 / 141 / 275 ms |
+| Largest reach / response | 8,284 affected entities / 1.4 MB |
+| Golden parity with the reference engine | 240 / 240 identical |
+| Former path (whole-snapshot load + `calculate`) | 6.0 s per request |
+| Publish: analysis + clustering / total | 10.8 s / 26.3 s |
+| Worker peak RSS | 442 MB |
+
+Response size grows with the reach (every affected path is returned); the five-hop bound and the revision cap bound it. Neo4j passes the same parity tests but is not scale-qualified.

@@ -1,4 +1,9 @@
-import type { LayoutInput, Position } from "./graph-layout";
+import {
+  EXPLORE_LIMITS,
+  MEMBER_LIMITS,
+  type LayoutInput,
+  type Position,
+} from "./graph-layout";
 
 /** Nearest role over real edges; account boundaries and other role seeds stay separate. */
 export function partitionCommunities(data: LayoutInput): string[][] {
@@ -67,7 +72,11 @@ function noise(seed: string): number {
 
 /** Spacious role-centered constellations on the worker, not a global permission analysis. */
 export function computePositions(data: LayoutInput): Position[] {
-  if (data.nodes.length > 500 || data.edges.length > 2000) return [];
+  if (
+    data.nodes.length > EXPLORE_LIMITS.nodes ||
+    data.edges.length > EXPLORE_LIMITS.edges
+  )
+    return [];
   const groups = partitionCommunities(data);
   const order = [
     "AIAgent",
@@ -125,4 +134,42 @@ export function computePositions(data: LayoutInput): Position[] {
     900 / Math.max(1, height),
   );
   return positions.map((p) => ({ id: p.id, x: p.x * scale, y: p.y * scale }));
+}
+
+const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
+
+/**
+ * In-place expansion layout for up to 5,000 members: a filled disc of radius
+ * about sqrt(n) (one member per pi square units), centred on the origin. Each
+ * role community (as in `partitionCommunities`) is a contiguous sunflower patch;
+ * patches are placed largest first on a golden-angle spiral by cumulative area,
+ * so loose members end up on the rim. O(nodes + edges), deterministic.
+ */
+export function packedPositions(data: LayoutInput): Position[] {
+  if (
+    data.nodes.length > MEMBER_LIMITS.nodes ||
+    data.edges.length > MEMBER_LIMITS.edges
+  )
+    return [];
+  const groups = partitionCommunities(data).sort(
+    (a, b) => b.length - a.length || a[0].localeCompare(b[0]),
+  );
+  const positions: Position[] = [];
+  let area = 0;
+  groups.forEach((group, k) => {
+    // Centre of this patch: where the spiral has covered half of its area.
+    const reach = Math.sqrt(area + group.length / 2);
+    const cx = k === 0 ? 0 : reach * Math.cos(k * GOLDEN_ANGLE);
+    const cy = k === 0 ? 0 : reach * Math.sin(k * GOLDEN_ANGLE);
+    group.forEach((id, i) => {
+      const r = Math.sqrt(i + 0.5);
+      positions.push({
+        id,
+        x: cx + r * Math.cos(i * GOLDEN_ANGLE),
+        y: cy + r * Math.sin(i * GOLDEN_ANGLE),
+      });
+    });
+    area += group.length;
+  });
+  return positions;
 }

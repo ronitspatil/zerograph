@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     # sessions, inline snapshots and the merged revision at publication time.
     max_nodes: int = Field(default=100_000, ge=1, le=1_000_000)
     max_edges: int = Field(default=500_000, ge=1, le=5_000_000)
+    # Deprecated whole-revision GET /graph: larger revisions get 413 instead of a full
+    # serialization (the pre-scale snapshot caps; use /graph/explore and /graph/clusters).
+    legacy_graph_max_nodes: int = Field(default=5_000, ge=1, le=1_000_000)
+    legacy_graph_max_edges: int = Field(default=20_000, ge=1, le=5_000_000)
     # Rows per graph write/delete transaction during publication and retention.
     graph_batch_size: int = Field(default=5000, ge=100, le=50_000)
     upload_session_ttl_seconds: int = Field(default=86_400, ge=300, le=7 * 86_400)

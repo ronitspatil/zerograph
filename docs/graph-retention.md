@@ -91,7 +91,7 @@ any still-present candidate.
 
 Do not run retention during backup/restore or while external tools write graph
 revisions or SQL tenant pointers outside the application's lock protocol. API graph readers pin the current SQL pointer using a shared tenant row lock
-held by the existing request database session through snapshot and shortest-path
+held by the existing request database session through snapshot and neighborhood
 materialization. Only a publisher's final pointer swap takes the row exclusively
 (milliseconds); it waits for existing readers, and new readers wait for it up to
 five seconds. A PostgreSQL lock acquisition timeout returns a sanitized HTTP503

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 from datetime import datetime, timedelta
 from typing import Annotated, Literal
 from uuid import uuid4
@@ -18,9 +19,20 @@ from app.collectors.tasks import ingest
 from app.core.auth import Actor, require_role
 from app.core.config import get_settings
 from app.db.locks import pin_pointer_gate
-from app.db.models import AuditEvent, IngestionJob, Remediation, StagedEntity, TenantState, UploadSession, now
+from app.db.models import (
+    AuditEvent,
+    IngestionJob,
+    Remediation,
+    RevisionAnalysis,
+    StagedEntity,
+    TenantState,
+    UploadSession,
+    now,
+)
 from app.db.session import audit, get_db
-from app.engine.blast_radius import BlastRadius, calculate
+from app.engine.analysis_index import WEIGHTS
+from app.engine.blast_radius import BlastRadius
+from app.engine.blast_radius import simulate as simulate_reach
 from app.engine.toxic_combos import Finding
 from app.graph.analysis import (
     UnknownCursor,
@@ -31,10 +43,14 @@ from app.graph.analysis import (
     stored_totals,
 )
 from app.graph.clusters import (
+    MAX_EXPANDED,
     ClusterDetailResponse,
     ClusterMapResponse,
+    ClusterMembersResponse,
     ClusterNotFound,
+    ExpansionTooLarge,
     cluster_detail,
+    cluster_expansion,
     cluster_map,
     stored_summary,
 )
@@ -45,9 +61,9 @@ from app.graph.exploration import (
     RootNotFound,
     SearchResponse,
 )
-from app.graph.repository import GraphStore, get_graph_store
+from app.graph.repository import MAX_VISIBLE_EDGES, MAX_VISIBLE_MEMBERS, GraphStore, get_graph_store
 from app.graph.role_map import RoleMapResponse, RoleMapView
-from app.graph.schema import IDENTITY_TYPES, GraphSnapshot, Node, NodeType
+from app.graph.schema import DATA_TYPES, IDENTITY_TYPES, GraphSnapshot, Node, NodeType
 from app.remediation.gitops_sync import GitOpsClient, GitOpsConflict, GitOpsError
 from app.remediation.policy_optimizer import Optimization, UsageEvidence, optimize, terraform_policy
 
@@ -114,9 +130,36 @@ def me(actor: Viewer):
 
 @router.get("/graph", response_model=GraphResponse)
 def graph_view(
-    db: DB, graph: Graph, actor: Viewer, account: str | None = None, identity_type: NodeType | None = None
+    response: Response,
+    db: DB,
+    graph: Graph,
+    actor: Viewer,
+    account: str | None = None,
+    identity_type: NodeType | None = None,
 ):
-    snapshot, revision = load_snapshot(db, graph, actor.tenant_id)
+    """Deprecated whole-revision view, kept for small revisions only.
+
+    Revisions above ``legacy_graph_max_nodes``/``legacy_graph_max_edges`` get 413
+    before anything is loaded; bounded views are ``/graph/explore``, ``/graph/roles``
+    and ``/graph/clusters``. Revisions without stored totals predate publish-time
+    analysis and therefore the scale work (published under the former 5k/20k caps).
+    """
+    settings = get_settings()
+    revision = pin_revision(db, actor.tenant_id)
+    response.headers["Deprecation"] = "true"
+    response.headers["Link"] = '</api/v1/graph/explore>; rel="successor-version"'
+    sized = db.get(RevisionAnalysis, (actor.tenant_id, revision)) if revision else None
+    if isinstance(sized, RevisionAnalysis) and (
+        sized.total_nodes > settings.legacy_graph_max_nodes
+        or sized.total_edges > settings.legacy_graph_max_edges
+    ):
+        raise HTTPException(
+            413,
+            f"Revision has {sized.total_nodes} entities and {sized.total_edges} relationships, above the "
+            "deprecated whole-graph view limit; use /graph/explore, /graph/roles or /graph/clusters",
+            headers={"Deprecation": "true"},
+        )
+    snapshot = graph.snapshot(actor.tenant_id, revision)
     nodes = [
         n
         for n in snapshot.nodes
@@ -182,15 +225,20 @@ def explore_graph(
 
 CLUSTER_ID = r"^c[0-9a-f]{15}$|^[A-Za-z0-9_-]{1,32}$"
 CLUSTERS_UNAVAILABLE = (
-    "The global map is not computed for this revision yet; it is built at the next publication "
-    "(or by an operator backfill)"
+    "The global map is not computed for this revision yet; the worker builds it within a few minutes"
 )
+# The worker's backfill sweep runs every 60 s; the console retries on this hint.
+CLUSTERS_RETRY_AFTER = "60"
+
+
+def _clusters_missing() -> HTTPException:
+    return HTTPException(404, CLUSTERS_UNAVAILABLE, headers={"Retry-After": CLUSTERS_RETRY_AFTER})
 
 
 def _cluster_summary(db: Session, tenant: str, revision: str):
     summary = stored_summary(db, tenant, revision)
     if summary is None:
-        raise HTTPException(404, CLUSTERS_UNAVAILABLE)
+        raise _clusters_missing()
     return summary
 
 
@@ -215,7 +263,7 @@ def graph_clusters(
     """
     current = expected_revision(db, actor.tenant_id, revision)
     if not current:
-        raise HTTPException(404, CLUSTERS_UNAVAILABLE)
+        raise _clusters_missing()
     summary = _cluster_summary(db, actor.tenant_id, current)
     try:
         # Confirms the revision's graph metadata, as explore does, and carries its warnings.
@@ -241,12 +289,47 @@ def graph_cluster(
     """
     current = expected_revision(db, actor.tenant_id, revision)
     if not current:
-        raise HTTPException(404, CLUSTERS_UNAVAILABLE)
+        raise _clusters_missing()
     _cluster_summary(db, actor.tenant_id, current)
     try:
         return cluster_detail(db, graph, actor.tenant_id, current, cluster_id, member_limit, edge_limit)
     except ClusterNotFound:
         raise HTTPException(404, "Cluster not found in this revision") from None
+    except RevisionUnavailable:
+        raise _unavailable() from None
+
+
+@router.get("/graph/clusters/{cluster_id}/members", response_model=ClusterMembersResponse)
+def graph_cluster_members(
+    db: DB,
+    graph: Graph,
+    actor: Viewer,
+    cluster_id: Annotated[str, Path(pattern=CLUSTER_ID)],
+    expanded: Annotated[list[str], Query(max_length=MAX_EXPANDED)] = [],  # noqa: B006
+    member_limit: Annotated[int, Query(ge=1, le=MAX_VISIBLE_MEMBERS)] = MAX_VISIBLE_MEMBERS,
+    edge_limit: Annotated[int, Query(ge=1, le=MAX_VISIBLE_EDGES)] = MAX_VISIBLE_EDGES,
+    revision: str | None = None,
+):
+    """Every member of one cluster, shown in place on the map, with its relationships among
+    them and to the members of the ``expanded`` clusters already on screen.
+
+    At most 5,000 entities may be shown at once (422 above). Clusters group entities by
+    graph structure only; they are not permission boundaries.
+    """
+    if any(not re.fullmatch(CLUSTER_ID, item) for item in expanded):
+        raise HTTPException(422, "Invalid expanded cluster ID")
+    current = expected_revision(db, actor.tenant_id, revision)
+    if not current:
+        raise _clusters_missing()
+    _cluster_summary(db, actor.tenant_id, current)
+    try:
+        return cluster_expansion(
+            db, graph, actor.tenant_id, current, cluster_id, expanded, member_limit, edge_limit
+        )
+    except ClusterNotFound:
+        raise HTTPException(404, "Cluster not found in this revision") from None
+    except ExpansionTooLarge as error:
+        raise HTTPException(422, str(error)) from None
     except RevisionUnavailable:
         raise _unavailable() from None
 
@@ -356,17 +439,38 @@ class SimulationRequest(BaseModel):
     node_id: str = Field(min_length=1, max_length=512)
     max_hops: int = Field(default=5, ge=1, le=5)
     include_uncertain: bool = False
+    # Optional revision the caller is viewing: a different current revision is 409.
+    revision: str | None = Field(default=None, max_length=128)
+
+
+def revision_scale(db: Session, graph: GraphStore, tenant: str, revision: str) -> tuple[int, int]:
+    """(node count, total asset weight) of a revision, from its stored analysis.
+
+    Only a legacy revision without stored analysis (published before it existed,
+    under the former 5k-node cap) is measured from its snapshot.
+    """
+    row = db.get(RevisionAnalysis, (tenant, revision))
+    if isinstance(row, RevisionAnalysis):
+        return row.total_nodes, row.total_asset_weight
+    snapshot = graph.snapshot(tenant, revision)
+    weight = sum(WEIGHTS[node.sensitivity] for node in snapshot.nodes if node.type in DATA_TYPES)
+    return len(snapshot.nodes), weight
 
 
 @router.post("/simulate", response_model=BlastRadius)
-def simulate(request: SimulationRequest, db: DB, graph: Graph, actor: Analyst):
-    snapshot, revision = load_snapshot(db, graph, actor.tenant_id)
-    if request.node_id not in {n.id for n in snapshot.nodes}:
+def simulate(request: SimulationRequest, response: Response, db: DB, graph: Graph, actor: Analyst):
+    """Blast radius from the source's bounded neighborhood; never loads the whole revision."""
+    revision = expected_revision(db, actor.tenant_id, request.revision)
+    try:
+        reach = graph.reach(
+            actor.tenant_id, revision, request.node_id, request.max_hops, request.include_uncertain
+        )
+    except RevisionUnavailable:
+        raise _unavailable() from None
+    if reach is None:
         raise HTTPException(404, "Identity not found")
-    paths = graph.shortest_paths(
-        actor.tenant_id, revision, request.node_id, request.max_hops, request.include_uncertain
-    )
-    result = calculate(snapshot, request.node_id, request.max_hops, request.include_uncertain, paths)
+    total_nodes, total_asset_weight = revision_scale(db, graph, actor.tenant_id, revision)
+    result = simulate_reach(reach, total_nodes, total_asset_weight)
     audit(
         db,
         actor,
@@ -379,6 +483,7 @@ def simulate(request: SimulationRequest, db: DB, graph: Graph, actor: Analyst):
         },
     )
     db.commit()
+    response.headers["X-Graph-Revision"] = revision
     return result
 
 

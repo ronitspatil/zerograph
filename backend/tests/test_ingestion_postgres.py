@@ -434,7 +434,7 @@ def test_api_reader_pin_blocks_only_the_pointer_swap_and_never_its_revision(
         db.get(TenantState, "tenant").revision = "old-0"
         db.commit()
     snapshot_started, paths_started, release_snapshot, release_paths = Event(), Event(), Event(), Event()
-    original_snapshot, original_paths = graph.snapshot, graph.shortest_paths
+    original_snapshot, original_paths = graph.snapshot, graph.reach
     original_finish = graph.finish_revision
     built = Event()
 
@@ -458,13 +458,13 @@ def test_api_reader_pin_blocks_only_the_pointer_swap_and_never_its_revision(
             snapshot, revision = load_snapshot(db, graph, "tenant")
             assert revision == "old-0"
             assert len(snapshot.nodes) == 1
-            graph.shortest_paths("tenant", revision, "asset", 1, False)
+            assert graph.reach("tenant", revision, "asset", 1, False) is not None
         return revision
 
     job_id = enqueue(factory)
     with (
         patch.object(graph, "snapshot", side_effect=paused_snapshot),
-        patch.object(graph, "shortest_paths", side_effect=paused_paths),
+        patch.object(graph, "reach", side_effect=paused_paths),
         patch.object(graph, "finish_revision", side_effect=observed_finish),
     ):
         with ThreadPoolExecutor(max_workers=3) as pool:
@@ -797,3 +797,25 @@ def test_publication_copies_cluster_rows_and_warm_starts_from_the_previous_revis
             for r in revisions
         ]
         assert ids[0] == ids[1]
+
+
+def test_worker_cluster_backfill_skips_a_publishing_tenant_then_fills_it(postgres_environment, monkeypatch):
+    factory, graph = postgres_environment
+    from app.db.locks import acquire_publication_lock
+    from app.graph import clusters
+
+    graph.publish("tenant", "initial", exposed())
+    monkeypatch.setattr(clusters, "session_factory", lambda: factory)
+    monkeypatch.setattr(clusters, "get_graph_store", lambda: graph)
+    monkeypatch.setattr(clusters, "_failed", {})
+    with factory() as publisher:
+        acquire_publication_lock(publisher, "tenant")  # A publication in progress.
+        started = time.perf_counter()
+        assert clusters.backfill_missing() == [{"tenant": "tenant", "backfilled": False, "busy": True}]
+        assert time.perf_counter() - started < 2  # Skipped, not queued behind the publisher.
+        publisher.rollback()
+    with factory() as db:
+        assert stored_summary(db, "tenant", "initial") is None
+    assert [r["backfilled"] for r in clusters.backfill_missing()] == [True]
+    with factory() as db:
+        assert stored_summary(db, "tenant", "initial").total_nodes == len(exposed().nodes)

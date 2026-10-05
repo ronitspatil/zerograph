@@ -16,7 +16,9 @@ All readers keep the existing shared pin on the tenant pointer, five-second lock
 - `GET /api/v1/graph/explore` and `GET /api/v1/graph/roles` take `total_nodes`, `total_edges`, `total_roles` and `total_role_edges` from the stored row instead of whole-revision count scans. The counts have the same definitions as before: all entities, all six relationship types, actual `CloudRole` nodes, and traversal relationships whose two endpoints are roles.
 - Remediation preview and CloudTrail normalization check the identity with a single keyed node lookup (`GraphStore.node`), not a full snapshot load.
 
-`/simulate` and the legacy `GET /graph` still load the full snapshot; they are out of scope for this phase.
+- `POST /api/v1/simulate` takes the revision's node count and `total_asset_weight` from the stored row and reads only the source's bounded neighborhood from the graph (see [graph-scale.md](graph-scale.md#blast-radius-simulation-phase-3)).
+
+The deprecated whole-revision `GET /graph` is the only remaining full-snapshot read; it returns 413 above `ZG_LEGACY_GRAPH_MAX_NODES`/`ZG_LEGACY_GRAPH_MAX_EDGES` (default 5,000/20,000, from the stored totals).
 
 ## Revisions published before this change
 
@@ -34,7 +36,7 @@ Applied retention deletes a revision's `revision_analysis` and `revision_finding
 
 ## Cost and capacity
 
-Analysis runs while the publish job builds the revision, before the short pointer swap; since Phase 2 (see [ingestion-upgrades.md](ingestion-upgrades.md)) readers are not blocked during it. The worker computes it from a compact representation of the staged rows (`app/graph/compact.py`), asserted equal to `compute_analysis` on generated and edge-case graphs. `backend/scripts/qualify_scale.py` measures this alongside endpoint latency:
+Analysis runs while the publish job builds the revision, before the short pointer swap; since Phase 2 (see [ingestion-upgrades.md](ingestion-upgrades.md)) readers are not blocked during it. The worker computes it from a compact representation of the staged rows (`app/graph/compact.py`), asserted equal to `compute_analysis` on generated and edge-case graphs. Every breadth-first search of the analysis reads one traversal adjacency in compressed sparse row form (`CompactGraph.csr()`: two flat integer arrays of distinct targets in node-ID order), built once per publication; publish-time clustering reads the same compact edge arrays. At 100,000 nodes / 417,009 edges on Memgraph 3.2.0, analysis took 5.3 s and clustering 5.5 s of a 26.3 s publish, with a worker peak RSS of 442 MB (`qualify_simulate.py`, below). Splitting the per-identity reach loop across forked processes was measured at 4.9 s serial, 1.9 s with four processes and 1.3 s with eight; it is not used, because it would save about 3 s of a publish already far inside its 60 s budget, and Celery's prefork pool children are daemonic and may not start child processes. `backend/scripts/qualify_scale.py` measures this alongside endpoint latency:
 
 ```sh
 cd backend

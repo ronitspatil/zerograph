@@ -23,6 +23,7 @@ or trust boundaries, and membership implies no access.
 
 import argparse
 import hashlib
+import heapq
 import json
 import random
 import time
@@ -30,19 +31,27 @@ from array import array
 from collections import Counter, deque
 from dataclasses import dataclass, field
 
+from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import delete, insert, select, text
 from sqlalchemy.orm import Session
 
-from app.db.locks import acquire_publication_lock
-from app.db.models import RevisionCluster, RevisionClusterLink, RevisionClusterMember, RevisionClusterSummary
+from app.db.locks import acquire_publication_lock, try_publication_lock
+from app.db.models import (
+    RevisionCluster,
+    RevisionClusterLink,
+    RevisionClusterMember,
+    RevisionClusterSummary,
+    TenantState,
+)
 from app.db.session import session_factory
+from app.graph import repository
 from app.graph.compact import CompactGraph
-from app.graph.repository import get_graph_store
+from app.graph.repository import MAX_VISIBLE_EDGES, MAX_VISIBLE_MEMBERS, get_graph_store
 from app.graph.schema import Node
 
 # Bump when the partition or stored fields change: other versions read as missing.
-CLUSTER_VERSION = 1
+CLUSTER_VERSION = 2  # 2: labels differ from ancestors and siblings.
 ALGORITHM = "louvain"
 SEED = 7
 MAX_TOP = 300
@@ -426,9 +435,52 @@ def summarize(h: Hierarchy, graph: CompactGraph) -> None:
             if rep >= 0 and (representative[cluster] < 0 or best(rep) > best(representative[cluster])):
                 representative[cluster] = rep
 
+    labels = _labels(h, graph, types, best)
+    h.size, h.label, h.representative = size, labels, representative
+    h.internal, h.boundary, h.links = internal, boundary, dict(links)
+    h.types = [dict(sorted(t.items())) for t in types]
+    h.accounts = [_facets(a) for a in accounts]
+    h.degree, h.inner_degree = degree, inner
+
+
+def _labels(h: Hierarchy, graph: CompactGraph, types: list[Counter], best) -> list[str]:
+    """Deterministic labels that differ from every ancestor's and earlier sibling's.
+
+    A named cluster takes its best-connected member's name unless an ancestor or
+    an earlier sibling already uses it (a child holding its parent's hub would
+    otherwise repeat the parent: "MCPServer 0 > MCPServer 0"); then the next
+    best member's name. Siblings that still share a label get "group i of n".
+    """
+    count = len(h.parent)
+    names = graph.names
+    # Enough candidates to skip every ancestor's name (depth < MAX_DEPTH) and still have spares.
+    keep = MAX_DEPTH + 2
+    candidates: list[list[int]] = [[] for _ in range(count)]
+    for cluster in range(count - 1, -1, -1):  # Children before parents.
+        pool = list(h.members[cluster])
+        for child in h.children[cluster]:
+            pool.extend(candidates[child])
+        candidates[cluster] = heapq.nlargest(keep, pool, key=best)
+    base = [""] * count
+    inherited: list[frozenset[str]] = [frozenset()] * count
+    sibling_names: dict[int, set[str]] = {}
+    for cluster in range(count):  # Parents (and earlier siblings) before later clusters.
+        parent = h.parent[cluster]
+        if parent >= 0:
+            inherited[cluster] = inherited[parent] | ({base[parent]} if base[parent] else set())
+        if h.kind[cluster] in ("isolated", "group"):
+            continue
+        taken = sibling_names.setdefault(parent, set())
+        options = [names[m] for m in candidates[cluster]]
+        base[cluster] = next(
+            (name for name in options if name not in inherited[cluster] and name not in taken),
+            options[0] if options else "",
+        )
+        taken.add(base[cluster])
+
     labels = [""] * count
     for cluster in range(count):
-        kind, rep = h.kind[cluster], representative[cluster]
+        kind = h.kind[cluster]
         if kind == "isolated":
             labels[cluster] = f"Unconnected {_dominant(types[cluster])}"
         elif kind == "group":
@@ -436,17 +488,21 @@ def summarize(h: Hierarchy, graph: CompactGraph) -> None:
         elif kind == "part":
             siblings = h.children[h.parent[cluster]] if h.parent[cluster] >= 0 else h.top
             position = siblings.index(cluster) + 1
-            labels[cluster] = f"{graph.names[rep]} (part {position} of {len(siblings)})"
+            labels[cluster] = f"{base[cluster]} (part {position} of {len(siblings)})"
         elif kind == "range":
-            labels[cluster] = f"{graph.names[rep]} and others"
+            labels[cluster] = f"{base[cluster]} and others"
         else:
-            labels[cluster] = graph.names[rep]
-
-    h.size, h.label, h.representative = size, labels, representative
-    h.internal, h.boundary, h.links = internal, boundary, dict(links)
-    h.types = [dict(sorted(t.items())) for t in types]
-    h.accounts = [_facets(a) for a in accounts]
-    h.degree, h.inner_degree = degree, inner
+            labels[cluster] = base[cluster]
+    # Siblings sharing a label (duplicate entity names, several bins of one type) are numbered.
+    for siblings in [h.top, *h.children]:
+        repeated = Counter(labels[c] for c in siblings)
+        seen: Counter = Counter()
+        for cluster in siblings:
+            label = labels[cluster]
+            if repeated[label] > 1:
+                seen[label] += 1
+                labels[cluster] = f"{label} · group {seen[label]} of {repeated[label]}"
+    return labels
 
 
 def _facets(accounts: Counter) -> dict[str, int]:
@@ -476,8 +532,20 @@ class PreviousClusters:
         return tuple(reversed(chain))
 
 
-def load_previous(db: Session, tenant: str, revision: str) -> PreviousClusters | None:
-    if not revision or stored_summary(db, tenant, revision) is None:
+def load_previous(
+    db: Session, tenant: str, revision: str, any_version: bool = False
+) -> PreviousClusters | None:
+    """Stored clusters of ``revision`` for warm start and ID matching.
+
+    ``any_version`` also accepts rows of another ``CLUSTER_VERSION`` (a backfill
+    recomputing the same revision keeps its cluster IDs).
+    """
+    if not revision:
+        return None
+    if any_version:
+        if db.get(RevisionClusterSummary, (tenant, revision)) is None:
+            return None
+    elif stored_summary(db, tenant, revision) is None:
         return None
     scope = (RevisionCluster.tenant_id == tenant, RevisionCluster.revision == revision)
     parent, size = {}, {}
@@ -993,17 +1061,161 @@ def cluster_detail(
 
 
 # ---------------------------------------------------------------------------
+# In-place expansion: a whole cluster's members on the map (WebGL), at most
+# MAX_VISIBLE_MEMBERS on screen across every expanded cluster.
+
+MAX_EXPANDED = 64
+
+
+class ClusterMembersView(BaseModel):
+    total_members: int
+    shown_members: int
+    member_limit: int
+    # Members on screen after this expansion, counting the clusters already expanded.
+    visible_members: int
+    visible_limit: int
+    shown_edges: int
+    edge_limit: int
+    truncated: bool
+    notice: str = STRUCTURAL_NOTICE
+
+
+class ClusterMembersResponse(BaseModel):
+    revision: str
+    cluster: ClusterSummary
+    nodes: list[Node]
+    # Relationships among the new members and to members of the already expanded clusters.
+    edges: list[dict]
+    # Each new member's relationship count in the whole revision.
+    degrees: dict[str, int]
+    warnings: list[str]
+    view: ClusterMembersView
+
+
+class ExpansionTooLarge(ValueError):
+    pass
+
+
+def subtree_leaves(db: Session, tenant: str, revision: str, row: RevisionCluster) -> list[str]:
+    """IDs of the leaf clusters under ``row`` (itself when it is a leaf), level by level."""
+    leaves: list[str] = []
+    frontier = [row]
+    for _ in range(MAX_DEPTH + 1):
+        if not frontier:
+            break
+        leaves += [item.cluster_id for item in frontier if not item.child_count]
+        parents = [item.cluster_id for item in frontier if item.child_count]
+        frontier = []
+        for i in range(0, len(parents), 500):
+            frontier += db.scalars(
+                select(RevisionCluster).where(
+                    RevisionCluster.tenant_id == tenant,
+                    RevisionCluster.revision == revision,
+                    RevisionCluster.parent_id.in_(parents[i : i + 500]),
+                )
+            ).all()
+    return leaves
+
+
+def subtree_members(
+    db: Session, tenant: str, revision: str, leaves: list[str], limit: int | None
+) -> list[tuple[str, int]]:
+    """(entity ID, degree) of every member of ``leaves``, highest degree first."""
+    rows: list[tuple[str, int]] = []
+    for i in range(0, len(leaves), 500):
+        rows += [
+            (entity, degree)
+            for entity, degree in db.execute(
+                select(RevisionClusterMember.entity_id, RevisionClusterMember.degree).where(
+                    RevisionClusterMember.tenant_id == tenant,
+                    RevisionClusterMember.revision == revision,
+                    RevisionClusterMember.cluster_id.in_(leaves[i : i + 500]),
+                )
+            )
+        ]
+    rows.sort(key=lambda item: (-item[1], item[0]))
+    return rows if limit is None else rows[:limit]
+
+
+def cluster_expansion(
+    db: Session,
+    graph,
+    tenant: str,
+    revision: str,
+    cluster_id: str,
+    expanded: list[str],
+    member_limit: int,
+    edge_limit: int,
+) -> ClusterMembersResponse:
+    """Every member of one cluster (all levels below it) for in-place display, with the
+    relationships among them and to the members of clusters already expanded on screen.
+
+    The clusters shown together may hold at most ``MAX_VISIBLE_MEMBERS`` entities.
+    """
+    if not 1 <= member_limit <= repository.MAX_VISIBLE_MEMBERS or not 1 <= edge_limit <= MAX_VISIBLE_EDGES:
+        raise ValueError("Cluster expansion limits outside supported bounds")
+    others = sorted(set(expanded) - {cluster_id})
+    if len(others) > MAX_EXPANDED:
+        raise ValueError("Too many expanded clusters")
+    row = cluster_row(db, tenant, revision, cluster_id)
+    other_rows = [cluster_row(db, tenant, revision, other) for other in others]
+    visible = row.size + sum(other.size for other in other_rows)
+    if visible > MAX_VISIBLE_MEMBERS:
+        raise ExpansionTooLarge(
+            f"Expanding this cluster would show {visible:,} entities; at most "
+            f"{MAX_VISIBLE_MEMBERS:,} can be shown at once. Collapse a cluster or open this one instead."
+        )
+    members = subtree_members(db, tenant, revision, subtree_leaves(db, tenant, revision, row), member_limit)
+    known = sorted(
+        {
+            entity
+            for other in other_rows
+            for entity, _ in subtree_members(
+                db, tenant, revision, subtree_leaves(db, tenant, revision, other), None
+            )
+        }
+        - {entity for entity, _ in members}
+    )
+    sliced = graph.cluster_expansion(tenant, revision, [m[0] for m in members], known, edge_limit)
+    return ClusterMembersResponse(
+        revision=revision,
+        cluster=_summary(row),
+        nodes=sliced.nodes,
+        edges=[{**edge.model_dump(mode="json"), "id": edge.id} for edge in sliced.edges],
+        degrees=dict(members),
+        warnings=sliced.warnings,
+        view=ClusterMembersView(
+            total_members=row.size,
+            shown_members=len(sliced.nodes),
+            member_limit=member_limit,
+            visible_members=len(known) + len(sliced.nodes),
+            visible_limit=MAX_VISIBLE_MEMBERS,
+            shown_edges=len(sliced.edges),
+            edge_limit=edge_limit,
+            truncated=len(sliced.nodes) < row.size or sliced.total_edges > len(sliced.edges),
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Operator backfill
 
 
-def backfill(tenant: str) -> dict:
-    """Compute and store clusters for a tenant's current revision under the publication lock."""
-    from app.db.models import TenantState
+def backfill(tenant: str, wait: bool = True) -> dict:
+    """Compute and store clusters for a tenant's current revision under the publication lock.
 
+    The worker's sweep passes ``wait=False``: it skips a tenant whose publication
+    (or another backfill) holds the lock instead of queueing behind it. Rows of an
+    older ``CLUSTER_VERSION`` for the same revision seed the run, so their cluster
+    IDs are kept.
+    """
     with session_factory()() as db:
         if db.get_bind().dialect.name == "postgresql":
             db.execute(text("SET LOCAL lock_timeout = '5s'"))
-        acquire_publication_lock(db, tenant)
+        if wait:
+            acquire_publication_lock(db, tenant)
+        elif not try_publication_lock(db, tenant):
+            return {"tenant": tenant, "backfilled": False, "busy": True}
         state = db.execute(
             select(TenantState).where(TenantState.tenant_id == tenant).with_for_update(read=True)
         ).scalar_one_or_none()
@@ -1012,9 +1224,11 @@ def backfill(tenant: str) -> dict:
         revision = state.revision
         if stored_summary(db, tenant, revision) is not None:
             return {"tenant": tenant, "revision": revision, "backfilled": False}
+        previous = load_previous(db, tenant, revision, any_version=True)
         delete_clusters(db, tenant, revision)
         graph = CompactGraph.from_snapshot(get_graph_store().snapshot(tenant, revision))
-        computed = compute_clusters(graph, revision)
+        computed = compute_clusters(graph, revision, previous)
+        del previous
         store_clusters(db, tenant, revision, computed)
         db.commit()
         return {
@@ -1023,6 +1237,71 @@ def backfill(tenant: str) -> dict:
             "backfilled": True,
             "clusters": len(computed.hierarchy.parent),
         }
+
+
+# Worker sweep: current revisions without clusters of this version (published
+# before migration 0005, or before a CLUSTER_VERSION bump) get them without
+# waiting for the next publication. Bounded per run; a failing revision is not
+# retried by the same process for FAILED_BACKOFF_SECONDS.
+SWEEP_TENANTS = 3
+FAILED_BACKOFF_SECONDS = 3600
+_failed: dict[tuple[str, str], float] = {}
+
+
+def missing_clusters(db: Session, limit: int) -> list[tuple[str, str]]:
+    """(tenant, revision) pairs whose current revision has no clusters of this version."""
+    present = (
+        select(RevisionClusterSummary.tenant_id)
+        .where(
+            RevisionClusterSummary.tenant_id == TenantState.tenant_id,
+            RevisionClusterSummary.revision == TenantState.revision,
+            RevisionClusterSummary.cluster_version == CLUSTER_VERSION,
+        )
+        .exists()
+    )
+    rows = db.execute(
+        select(TenantState.tenant_id, TenantState.revision)
+        .where(TenantState.revision.is_not(None), TenantState.revision != "", ~present)
+        .order_by(TenantState.tenant_id)
+        .limit(limit)
+    )
+    return [(tenant, revision) for tenant, revision in rows]
+
+
+def backfill_missing(limit: int = SWEEP_TENANTS) -> list[dict]:
+    """Backfill up to ``limit`` tenants' current revisions; never raises for one tenant's failure."""
+    clock = time.monotonic()
+    with session_factory()() as db:
+        pending = missing_clusters(db, limit + len(_failed))
+    results = []
+    for tenant, revision in pending:
+        failed_at = _failed.get((tenant, revision))
+        if failed_at is not None and clock - failed_at < FAILED_BACKOFF_SECONDS:
+            continue
+        if len(results) >= limit:
+            break
+        try:
+            result = backfill(tenant, wait=False)
+        except Exception as exc:  # noqa: BLE001 - one tenant must not stop the sweep
+            _failed[(tenant, revision)] = clock
+            logger.warning(
+                "Cluster backfill failed tenant={} revision={} exception_type={}",
+                tenant,
+                revision,
+                type(exc).__name__,
+            )
+            result = {"tenant": tenant, "revision": revision, "backfilled": False, "failed": True}
+        else:
+            _failed.pop((tenant, revision), None)
+            if result.get("backfilled"):
+                logger.info(
+                    "Cluster backfill stored tenant={} revision={} clusters={}",
+                    tenant,
+                    result["revision"],
+                    result["clusters"],
+                )
+        results.append(result)
+    return results
 
 
 def main() -> None:
