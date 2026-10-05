@@ -1,7 +1,4 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
-<rect width="24" height="24" rx="5.5" fill="#0c1715"/>
-<circle cx="12" cy="12" r="6.5" fill="none" stroke="#3f9a87" stroke-width="1.6"/>
-<path d="M12 12L16.6 7.4" stroke="#3f9a87" stroke-width="1.6" stroke-linecap="round"/>
-<circle cx="12" cy="12" r="2.1" fill="#6cc7b3"/>
-<circle cx="16.6" cy="7.4" r="2.6" fill="#b4f5e1" stroke="#0c1715" stroke-width="1.2"/>
+  <rect width="24" height="24" rx="5.5" fill="#0c1715"/>
+  <path fill-rule="evenodd" fill="#6cc7b3" d="M12 3.8L19 6.4V11.8C19 15.9 16.1 18.9 12 20.2C7.9 18.9 5 15.9 5 11.8V6.4ZM12 8.4A2.7 3.5 0 1 0 12 15.4A2.7 3.5 0 1 0 12 8.4Z"/>
 </svg>

@@ -1,7 +1,7 @@
 import { cn } from "@/lib/utils";
 /**
- * ZeroGraph mark: a ring (the zero) around a hub node, joined by one edge to a
- * brighter node on the ring. Mirrors public/favicon.svg, which adds a dark tile.
+ * ZeroGraph mark: a solid shield with a zero cut out of it. Mirrors
+ * public/favicon.svg, which adds a dark tile for light browser chrome.
  */
 export function LogoMark({
   size = 24,
@@ -15,32 +15,14 @@ export function LogoMark({
       className={cn("logo-mark", className)}
       width={size}
       height={size}
-      viewBox="2 2 20 20"
+      viewBox="3 3 18 18"
       aria-hidden="true"
       focusable="false"
     >
-      <circle
-        cx="12"
-        cy="12"
-        r="6.5"
-        fill="none"
-        stroke="var(--logo-edge, #3f9a87)"
-        strokeWidth="1.6"
-      />
       <path
-        d="M12 12L16.6 7.4"
-        stroke="var(--logo-edge, #3f9a87)"
-        strokeWidth="1.6"
-        strokeLinecap="round"
-      />
-      <circle cx="12" cy="12" r="2.1" fill="var(--logo-node, #6cc7b3)" />
-      <circle
-        cx="16.6"
-        cy="7.4"
-        r="2.6"
-        fill="var(--logo-hub, #b4f5e1)"
-        stroke="var(--logo-gap, var(--surface, #0f1621))"
-        strokeWidth="1.2"
+        fillRule="evenodd"
+        fill="var(--logo-fill, #6cc7b3)"
+        d="M12 3.8L19 6.4V11.8C19 15.9 16.1 18.9 12 20.2C7.9 18.9 5 15.9 5 11.8V6.4ZM12 8.4A2.7 3.5 0 1 0 12 15.4A2.7 3.5 0 1 0 12 8.4Z"
       />
     </svg>
   );

@@ -15,6 +15,9 @@ describe("Login", () => {
       screen.getByRole("button", { name: "Explore the demo workspace" }),
     ).toBeEnabled();
     expect(screen.getByText("ZeroGraph")).toBeInTheDocument();
+    expect(screen.getAllByRole("listitem")).toHaveLength(3);
+    expect(screen.getByText(/identity provider \(OIDC\)/)).toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
     for (const svg of container.querySelectorAll("svg"))
       expect(svg).toHaveAttribute("aria-hidden", "true");
   });
