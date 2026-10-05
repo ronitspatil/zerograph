@@ -30,10 +30,13 @@ from app.graph.clusters import (
     PreviousClusters,
     assign_ids,
     backfill,
+    backfill_missing,
     build_hierarchy,
     compute_clusters,
     delete_clusters,
+    load_previous,
     louvain,
+    missing_clusters,
     store_clusters,
     stored_summary,
     topology,
@@ -159,6 +162,51 @@ def test_more_groups_than_capacity_get_an_intermediate_range_level(monkeypatch):
     h = build_hierarchy(graph)
     check_invariants(h, graph, 3, 3, 4)
     assert "range" in h.kind
+
+
+def test_labels_never_repeat_an_ancestor_or_a_sibling():
+    graph = CompactGraph.from_snapshot(generate(5000))
+    h = build_hierarchy(graph)
+    count = len(h.parent)
+    # The graph really has children holding their parent's hub (the old label repeated the parent).
+    hub_children = [
+        c for c in range(count) if h.parent[c] >= 0 and h.representative[c] == h.representative[h.parent[c]]
+    ]
+    assert hub_children
+    for cluster in range(count):
+        ancestors = h.path(cluster)[:-1]
+        assert h.label[cluster] not in {h.label[a] for a in ancestors}, h.label[cluster]
+    for siblings in [h.top, *h.children]:
+        labels = [h.label[c] for c in siblings]
+        assert len(labels) == len(set(labels))
+    for cluster in hub_children:
+        if h.kind[cluster] == "community":
+            # Named after its best member that the parent's label does not already use.
+            assert h.label[cluster] != graph.names[h.representative[cluster]]
+            assert h.label[cluster] in {graph.names[m] for m in range(graph.node_count)}
+
+
+def test_duplicate_names_and_packed_bins_get_numbered_sibling_labels(monkeypatch):
+    monkeypatch.setattr(clusters, "MAX_TOP", 6)
+    monkeypatch.setattr(clusters, "MAX_MEMBERS", 10)
+    nodes, edges = [], []
+    for index in range(12):  # Twelve pairs, every role named "admin".
+        a, b = f"svc:{index}", f"role:{index}"
+        nodes += [
+            Node(id=a, name=f"svc {index}", type=NodeType.SERVICE),
+            Node(id=b, name="admin", type=NodeType.ROLE),
+        ]
+        edges += [
+            Edge(source=a, target=b, type=EdgeType.ASSUMES),
+            Edge(source=b, target=a, type=EdgeType.ASSUMES),
+        ]
+    graph = CompactGraph.from_snapshot(GraphSnapshot(nodes=nodes, edges=edges))
+    h = build_hierarchy(graph)
+    labels = [h.label[c] for c in h.top]
+    assert len(labels) == len(set(labels)), labels
+    assert any(" · group 1 of " in label for label in labels), labels
+    again = build_hierarchy(CompactGraph.from_snapshot(GraphSnapshot(nodes=nodes, edges=edges)))
+    assert again.label == h.label
 
 
 def test_clustering_is_deterministic():
@@ -433,12 +481,132 @@ def test_older_cluster_version_reads_as_missing(environment):
     factory, _ = environment
     backfill("tenant-a")
     with factory() as db:
+        before = {row.cluster_id: row.label for row in db.scalars(select(RevisionCluster))}
         db.get(RevisionClusterSummary, ("tenant-a", "revision-a")).cluster_version = (
             clusters.CLUSTER_VERSION - 1
         )
         db.commit()
         assert stored_summary(db, "tenant-a", "revision-a") is None
+        assert load_previous(db, "tenant-a", "revision-a") is None
+        assert load_previous(db, "tenant-a", "revision-a", any_version=True) is not None
     assert backfill("tenant-a")["backfilled"] is True
+    with factory() as db:
+        # Recomputing the same revision keeps its cluster IDs (seeded from the older rows).
+        assert {row.cluster_id: row.label for row in db.scalars(select(RevisionCluster))} == before
+        assert db.scalar(select(func.count()).select_from(RevisionClusterSummary)) == 1
+
+
+def test_worker_sweep_backfills_current_revisions_only_per_tenant(environment):
+    factory, graph = environment
+    # tenant-a: current revision-a has no clusters (published before migration 0005).
+    # tenant-b: current revision is clustered; its older revision is not and stays so.
+    # tenant-c: clusters of an older CLUSTER_VERSION. tenant-d: nothing published.
+    for tenant, revision, snapshot in (
+        ("tenant-b", "b-old", demo_snapshot()),
+        ("tenant-b", "b-new", many_components(pairs=3, singles=2, star=3)),
+        ("tenant-c", "c-1", many_components(pairs=2, singles=1, star=2)),
+    ):
+        graph.publish(tenant, revision, snapshot)
+    with factory() as db:
+        db.add_all(
+            [
+                TenantState(tenant_id="tenant-b", revision="b-new"),
+                TenantState(tenant_id="tenant-c", revision="c-1"),
+                TenantState(tenant_id="tenant-d", revision=""),
+            ]
+        )
+        for tenant, revision in (("tenant-b", "b-new"), ("tenant-c", "c-1")):
+            store_clusters(
+                db,
+                tenant,
+                revision,
+                compute_clusters(CompactGraph.from_snapshot(graph.snapshot(tenant, revision)), revision),
+            )
+        db.flush()
+        db.get(RevisionClusterSummary, ("tenant-c", "c-1")).cluster_version = clusters.CLUSTER_VERSION - 1
+        db.commit()
+        assert missing_clusters(db, 10) == [("tenant-a", "revision-a"), ("tenant-c", "c-1")]
+        b_rows = sorted(
+            (r.cluster_id, r.label)
+            for r in db.scalars(select(RevisionCluster).where(RevisionCluster.tenant_id == "tenant-b"))
+        )
+    with (
+        client_for("tenant-a") as reader,
+        patch.object(graph, "snapshot", side_effect=AssertionError("API loaded a snapshot")),
+    ):
+        response = reader.get("/api/v1/graph/clusters")
+        assert response.status_code == 404 and response.headers["retry-after"] == "60"
+    results = backfill_missing(limit=1)
+    assert [(r["tenant"], r["backfilled"]) for r in results] == [("tenant-a", True)]
+    assert backfill_missing() == [
+        {
+            "tenant": "tenant-c",
+            "revision": "c-1",
+            "backfilled": True,
+            "clusters": results_count(factory, "tenant-c", "c-1"),
+        }
+    ]
+    assert backfill_missing() == []
+    with factory() as db:
+        assert missing_clusters(db, 10) == []
+        # Revision pin: only current revisions are computed; tenant-b's older revision stays without rows.
+        assert stored_summary(db, "tenant-b", "b-old") is None
+        assert (
+            sorted(
+                (r.cluster_id, r.label)
+                for r in db.scalars(select(RevisionCluster).where(RevisionCluster.tenant_id == "tenant-b"))
+            )
+            == b_rows
+        )
+        summary = stored_summary(db, "tenant-a", "revision-a")
+        assert summary.total_nodes == len(demo_snapshot().nodes)
+        assert {
+            r.tenant_id
+            for r in db.scalars(
+                select(RevisionClusterMember).where(RevisionClusterMember.revision == "revision-a")
+            )
+        } == {"tenant-a"}
+    with (
+        client_for("tenant-a") as reader,
+        patch.object(graph, "snapshot", side_effect=AssertionError("API loaded a snapshot")),
+    ):
+        assert reader.get("/api/v1/graph/clusters").status_code == 200
+    with client_for("tenant-d") as reader:
+        assert reader.get("/api/v1/graph/clusters").status_code == 404
+
+
+def results_count(factory, tenant: str, revision: str) -> int:
+    with factory() as db:
+        return db.scalar(
+            select(func.count()).where(
+                RevisionCluster.tenant_id == tenant, RevisionCluster.revision == revision
+            )
+        )
+
+
+def test_worker_sweep_skips_busy_tenants_and_backs_off_failures(environment, monkeypatch):
+    factory, graph = environment
+    monkeypatch.setattr(clusters, "_failed", {})
+    monkeypatch.setattr(clusters, "try_publication_lock", lambda db, tenant: False)
+    assert backfill_missing() == [{"tenant": "tenant-a", "backfilled": False, "busy": True}]
+    monkeypatch.undo()
+    monkeypatch.setattr(clusters, "_failed", {})
+    with patch.object(clusters, "compute_clusters", side_effect=RuntimeError("cluster bug")):
+        assert backfill_missing()[0]["failed"] is True
+        # Not retried by this process within the backoff window.
+        assert backfill_missing() == []
+    with factory() as db:
+        assert stored_summary(db, "tenant-a", "revision-a") is None
+    monkeypatch.setattr(
+        clusters,
+        "_failed",
+        {key: value - clusters.FAILED_BACKOFF_SECONDS for key, value in clusters._failed.items()},
+    )
+    from app.collectors.tasks import backfill_clusters
+
+    assert backfill_clusters() == 1
+    with factory() as db:
+        assert stored_summary(db, "tenant-a", "revision-a") is not None
 
 
 def test_store_clusters_round_trips_through_sql(environment):

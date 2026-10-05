@@ -21,6 +21,18 @@ def acquire_publication_lock(db: Session, tenant: str) -> None:
         )
 
 
+def try_publication_lock(db: Session, tenant: str) -> bool:
+    """Take the publication lock only if it is free (background sweeps never queue behind a publisher)."""
+    if db.get_bind().dialect.name != "postgresql":
+        return True
+    return bool(
+        db.scalar(
+            text("SELECT pg_try_advisory_xact_lock(:namespace, hashtext(:tenant))"),
+            {"namespace": PUBLICATION_LOCK_NAMESPACE, "tenant": tenant},
+        )
+    )
+
+
 # Pointer gate: readers hold it shared for their request transaction (with their
 # FOR SHARE pin) and a publisher takes it exclusively just before the swap. Unlike
 # row share locks, which new readers can keep joining while an exclusive locker
