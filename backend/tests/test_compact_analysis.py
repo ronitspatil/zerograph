@@ -97,3 +97,31 @@ def test_dangling_or_duplicate_rows_are_rejected():
         graph.add_node({"id": "a", "type": "S3Bucket"})
     with pytest.raises(ValueError):
         graph.add_edge({"source": "a", "target": "b", "type": "CAN_READ"})
+
+
+def test_csr_is_built_once_sorted_distinct_and_traversal_only():
+    graph = CompactGraph()
+    for node_id in ("c", "a", "b"):
+        graph.add_node({"id": node_id, "type": "CloudRole"})
+    for source, target, kind in [
+        ("c", "b", "ASSUMES_ROLE"),
+        ("c", "a", "CAN_READ"),
+        ("c", "b", "CAN_WRITE"),
+        ("c", "c", "ASSUMES_ROLE"),
+        ("a", "b", "STORES_PII"),
+    ]:
+        graph.add_edge({"source": source, "target": target, "type": kind})
+    csr = graph.csr()
+    assert graph.csr() is csr
+    row = (
+        lambda node: [  # noqa: E731
+            graph.ids[t]
+            for t in csr.targets[csr.offsets[graph.index[node]] : csr.offsets[graph.index[node] + 1]]
+        ]
+    )
+    assert row("c") == ["a", "b", "c"] and row("a") == [] and row("b") == []
+    assert list(csr.expands) == [1, 0, 0]
+    graph.add_edge({"source": "a", "target": "c", "type": "ASSUMES_ROLE"})
+    assert graph.csr() is not csr and row("a") == []  # Stale view object; the new one differs.
+    fresh = graph.csr()
+    assert [graph.ids[t] for t in fresh.targets[fresh.offsets[1] : fresh.offsets[2]]] == ["c"]

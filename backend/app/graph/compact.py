@@ -5,8 +5,9 @@ indices, a few per-node attributes, edge endpoints/certainty/evidence), so the
 worker never materializes a Pydantic ``GraphSnapshot`` of a large revision. Its
 ``analyze`` reproduces ``app.graph.analysis.compute_analysis`` exactly (same
 overview, findings in API order, totals, asset weight and high-blast IDs); parity
-is asserted by tests on generated and edge-case graphs. A full CSR rewrite and
-graph-free ``/simulate`` are Phase 3.
+is asserted by tests on generated and edge-case graphs. Traversal adjacency is one
+CSR (``csr()``), built once and shared by every BFS of the analysis; publish-time
+clustering reads the same edge arrays.
 """
 
 import hashlib
@@ -30,6 +31,49 @@ RECOMMENDATION = (
 )
 
 
+class Csr:
+    """Distinct traversal targets per node, sorted by node ID, as two flat arrays."""
+
+    __slots__ = ("offsets", "targets", "expands")
+
+    def __init__(self, offsets: array, targets: array):
+        self.offsets, self.targets = offsets, targets
+        # 1 where a node has traversal targets: BFS frontiers skip sinks (most data assets).
+        self.expands = bytearray(offsets[node + 1] > offsets[node] for node in range(len(offsets) - 1))
+
+    @classmethod
+    def build(cls, graph: "CompactGraph") -> "Csr":
+        count = len(graph.ids)
+        rank = array("l", bytes(8 * count))
+        for position, node in enumerate(sorted(range(count), key=graph.ids.__getitem__)):
+            rank[node] = position
+        # Counting sort of traversal edges by source, then by target rank within a row.
+        degree = array("l", bytes(8 * (count + 1)))
+        traversal, sources, targets = graph.edge_traversal, graph.edge_source, graph.edge_target
+        for edge in range(len(sources)):
+            if traversal[edge]:
+                degree[sources[edge] + 1] += 1
+        for node in range(count):
+            degree[node + 1] += degree[node]
+        slots = array("l", degree)
+        flat = array("l", bytes(8 * degree[count]))
+        for edge in range(len(sources)):
+            if traversal[edge]:
+                source = sources[edge]
+                flat[slots[source]] = targets[edge]
+                slots[source] += 1
+        offsets = array("l", bytes(8 * (count + 1)))
+        distinct = array("l")
+        for node in range(count):
+            start, end = degree[node], degree[node + 1]
+            if end - start == 1:
+                distinct.append(flat[start])
+            elif end > start:
+                distinct.extend(sorted(set(flat[start:end]), key=rank.__getitem__))
+            offsets[node + 1] = len(distinct)
+        return cls(offsets, distinct)
+
+
 class CompactGraph:
     """Append nodes, then edges (endpoints must already exist), in revision order."""
 
@@ -51,6 +95,8 @@ class CompactGraph:
         self.edge_traversal = bytearray()
         self.edge_confirmed = bytearray()
         self.edge_evidence: list[tuple[str, ...]] = []
+        self._csr: Csr | None = None
+        self._csr_edges = -1
 
     @classmethod
     def from_snapshot(cls, snapshot: GraphSnapshot) -> "CompactGraph":
@@ -99,31 +145,32 @@ class CompactGraph:
     def edge_count(self) -> int:
         return len(self.edge_source)
 
-    def _adjacency(self) -> list[tuple[int, ...]]:
-        # Same order as AnalysisIndex: distinct traversal targets sorted by node ID.
-        rank = array("l", bytes(8 * len(self.ids)))
-        for position, node in enumerate(sorted(range(len(self.ids)), key=self.ids.__getitem__)):
-            rank[node] = position
-        targets: dict[int, set[int]] = {}
-        for edge in range(len(self.edge_source)):
-            if self.edge_traversal[edge]:
-                targets.setdefault(self.edge_source[edge], set()).add(self.edge_target[edge])
-        adjacency: list[tuple[int, ...]] = [()] * len(self.ids)
-        for source, reached in targets.items():
-            adjacency[source] = tuple(sorted(reached, key=rank.__getitem__))
-        return adjacency
+    def csr(self) -> "Csr":
+        """Traversal adjacency in compressed sparse row form, built once per graph.
 
-    def _paths(self, adjacency, source: int) -> dict[int, int]:
+        ``targets[offsets[n]:offsets[n + 1]]`` are the distinct traversal targets of
+        node ``n`` in ascending node-ID order (the visiting order of
+        ``AnalysisIndex.paths``). Two flat integer arrays instead of a tuple per node:
+        a few MB at 100k nodes, and reads never touch per-element reference counts.
+        """
+        if self._csr is None or self._csr_edges != len(self.edge_source):
+            self._csr = Csr.build(self)
+            self._csr_edges = len(self.edge_source)
+        return self._csr
+
+    def _paths(self, csr: "Csr", source: int) -> dict[int, int]:
         """BFS parents within MAX_HOPS, discovery order identical to AnalysisIndex.paths."""
+        offsets, targets, expands = csr.offsets, csr.targets, csr.expands
         parent = {source: -1}
         frontier = [source]
         for _ in range(MAX_HOPS):
             following = []
             for current in frontier:
-                for target in adjacency[current]:
+                for target in targets[offsets[current] : offsets[current + 1]]:
                     if target not in parent:
                         parent[target] = current
-                        following.append(target)
+                        if expands[target]:  # Sinks are discovered but never expanded.
+                            following.append(target)
             if not following:
                 break
             frontier = following
@@ -133,7 +180,8 @@ class CompactGraph:
         from app.graph.analysis import ComputedAnalysis
 
         count = len(self.ids)
-        adjacency = self._adjacency()
+        csr = self.csr()
+        offsets, targets, expands = csr.offsets, csr.targets, csr.expands
         is_data = bytearray(kind in DATA for kind in self.types)
         weight = array("l", (WEIGHT[level] if is_data[i] else 0 for i, level in enumerate(self.sensitivity)))
         total_weight = sum(weight)
@@ -149,10 +197,11 @@ class CompactGraph:
             for _ in range(MAX_HOPS):
                 following = []
                 for current in frontier:
-                    for target in adjacency[current]:
+                    for target in targets[offsets[current] : offsets[current + 1]]:
                         if stamp[target] != node:
                             stamp[target] = node
-                            following.append(target)
+                            if expands[target]:
+                                following.append(target)
                             if is_data[target]:
                                 assets = True
                                 affected += weight[target]
@@ -162,7 +211,7 @@ class CompactGraph:
             if not assets:
                 continue
             exposure = affected / total_weight if total_weight else 0
-            centrality = len(adjacency[node]) / (count - 1) if count > 1 else 1
+            centrality = (offsets[node + 1] - offsets[node]) / (count - 1) if count > 1 else 1
             if min(100, round(100 * (0.85 * exposure + 0.15 * centrality))) >= HIGH_BLAST_THRESHOLD:
                 high_blast.append(self.ids[node])
         high_blast.sort()
@@ -172,7 +221,7 @@ class CompactGraph:
         for source in range(count):
             if not self.entry[source]:
                 continue
-            parent = self._paths(adjacency, source)
+            parent = self._paths(csr, source)
             for target in parent:
                 if target == source or not is_data[target]:
                     continue
