@@ -174,9 +174,9 @@ def clear_graph(uri: str) -> None:
     from neo4j import GraphDatabase
 
     with GraphDatabase.driver(uri) as driver, driver.session() as session:
-        while session.run(
-            "MATCH (n) WITH n LIMIT 5000 DETACH DELETE n RETURN count(*) AS deleted"
-        ).single()["deleted"]:
+        while session.run("MATCH (n) WITH n LIMIT 5000 DETACH DELETE n RETURN count(*) AS deleted").single()[
+            "deleted"
+        ]:
             pass
 
 
@@ -218,7 +218,9 @@ def file_digest(path: Path) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--database-url", required=True, help="Disposable PostgreSQL (a schema is created)")
     parser.add_argument("--graph-uri", required=True, help="Empty disposable Memgraph bolt URI")
     parser.add_argument("--restore-graph-uri", required=True, help="Second empty Memgraph for the restore")
@@ -237,9 +239,8 @@ def main() -> None:
 
     from alembic import command
     from alembic.config import Config
-    from sqlalchemy import create_engine, text
-
     from qualify_scale import FIXTURE, generate
+    from sqlalchemy import create_engine, text
 
     schema = "zg_publication_" + uuid4().hex
     admin = create_engine(args.database_url)
@@ -345,7 +346,8 @@ def main() -> None:
             overview = client.get("/api/v1/overview").json()
             entry["revision"] = overview["revision"]
             entry["overview"] = {
-                key: overview[key] for key in ("total_nhis", "toxic_combinations", "high_blast_radius", "data_assets")
+                key: overview[key]
+                for key in ("total_nhis", "toxic_combinations", "high_blast_radius", "data_assets")
             }
             entry["memgraph"] = memgraph_storage(args.graph_uri)
             report["revisions"].append(entry)
