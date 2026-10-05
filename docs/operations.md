@@ -44,7 +44,7 @@ Memgraph is the default. The graph driver also supports Neo4j. To use the option
 docker compose -f docker-compose.yml -f deploy/docker-compose.neo4j.yml up --build -d
 ```
 
-This override requires Compose 2.24.4 or later for `!override`. Neo4j includes the APOC plugin. Native shortest-path queries are used by the application, so APOC and MAGE algorithms are optional. The `002_optional_capabilities.cypher` files inspect available procedures; they are diagnostics rather than automatic extension installers.
+This override requires Compose 2.24.4 or later for `!override`. Neo4j includes the APOC plugin. The application uses only native Cypher (blast radius expands bounded neighborhoods by key), so APOC and MAGE algorithms are optional. The `002_optional_capabilities.cypher` files inspect available procedures; they are diagnostics rather than automatic extension installers.
 
 The migration service runs versioned Alembic migrations and graph constraints before application startup. Every graph publication has an immutable revision; PostgreSQL advances the tenant pointer only after graph publication succeeds. Failed publication preserves the prior revision. Historical graph revisions are retained; establish a retention and backup policy before sustained production ingestion.
 
