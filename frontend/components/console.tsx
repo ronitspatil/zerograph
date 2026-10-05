@@ -18,15 +18,6 @@ import {
   Unplug,
   X,
 } from "lucide-react";
-import {
-  Bar,
-  BarChart,
-  Cell,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
 import { api, ApiError } from "@/lib/api";
 import type {
   Actor,
@@ -46,6 +37,7 @@ import { Button } from "@/components/ui/button";
 import { Simulator } from "@/components/simulator";
 import { RemediationHub } from "@/components/remediation-hub";
 import { Sources } from "@/components/sources";
+import { SensitivityChart } from "@/components/sensitivity-chart";
 import { Wordmark } from "@/components/ui/logo";
 import { GlobalMap } from "@/components/global-map";
 const GraphCanvas = dynamic(
@@ -1165,48 +1157,7 @@ export function Console({ demo }: { demo: boolean }) {
                       <p className="muted">
                         Classified data assets across the current snapshot
                       </p>
-                      <div style={{ height: 250 }}>
-                        <ResponsiveContainer width="100%" height="100%">
-                          <BarChart
-                            data={Object.entries(
-                              overview?.sensitivity || {},
-                            ).map(([name, value]) => ({ name, value }))}
-                          >
-                            <XAxis
-                              dataKey="name"
-                              tick={{ fill: "#8a96a8", fontSize: 11 }}
-                              axisLine={false}
-                              tickLine={false}
-                            />
-                            <YAxis
-                              allowDecimals={false}
-                              tick={{ fill: "#8a96a8", fontSize: 11 }}
-                              axisLine={false}
-                              tickLine={false}
-                            />
-                            <Tooltip
-                              contentStyle={{
-                                background: "#131b27",
-                                border: "1px solid #263142",
-                                borderRadius: 6,
-                                fontSize: 12,
-                              }}
-                              cursor={{ fill: "#182230" }}
-                            />
-                            <Bar
-                              dataKey="value"
-                              radius={[3, 3, 0, 0]}
-                              maxBarSize={40}
-                            >
-                              {["#5d6b7e", "#7f9bbd", "#d9a85b", "#e0707c"].map(
-                                (c) => (
-                                  <Cell key={c} fill={c} />
-                                ),
-                              )}
-                            </Bar>
-                          </BarChart>
-                        </ResponsiveContainer>
-                      </div>
+                      <SensitivityChart sensitivity={overview?.sensitivity} />
                     </div>
                     <div className="panel summary-panel">
                       <h3>Access evidence</h3>
