@@ -25,7 +25,7 @@ python -m app.graph.retention --tenant TENANT_ID \
   --actor operator:YOUR_CHANGE_ID --apply
 ```
 
-Each deleted revision's stored analysis rows (`revision_analysis`, `revision_findings`) are removed in the same locked SQL transaction that records the deletion; see [revision-analysis.md](revision-analysis.md). The apply invocation computes a fresh plan under the tenant publication lock; a
+Each deleted revision's stored analysis rows (`revision_analysis`, `revision_findings`) and global-map cluster rows (`revision_cluster_*`, see [global-map.md](global-map.md)) are removed in the same locked SQL transaction that records the deletion; see [revision-analysis.md](revision-analysis.md). The apply invocation computes a fresh plan under the tenant publication lock; a
 previous dry-run result is advisory, not an authorization token or frozen plan.
 Deletion requires PostgreSQL. Keep count must be 2–1000, age 1–3650 days and batch
 size 1–50. Both age and keep bounds apply; the current SQL pointer is protected

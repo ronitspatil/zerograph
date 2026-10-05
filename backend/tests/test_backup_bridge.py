@@ -253,3 +253,24 @@ def test_import_preserves_legacy_missing_and_new_retention_timestamp(monkeypatch
         assert session.run.call_args.kwargs["created"] == 123456789
     else:
         assert "REMOVE s.created_at_ms" in query
+
+
+def test_backup_metadata_counts_cluster_and_analysis_rows(environment, monkeypatch):
+    """Cluster rows live in PostgreSQL, so the (unfiltered) pg_dump carries them with
+    their revisions; the bridge metadata counts them so a change during backup is caught."""
+    from app.graph.clusters import backfill
+
+    factory, _ = environment
+    monkeypatch.setattr(bridge, "session_factory", lambda: factory)
+    monkeypatch.setattr(bridge, "runtime", lambda: {"app_version": "0.1.0", "schema_head": "0005"})
+    with factory() as db:
+        db.execute(bridge.text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+        db.execute(bridge.text("INSERT INTO alembic_version VALUES ('0005')"))
+        db.commit()
+    before = bridge.metadata()["row_counts"]
+    assert before["revision_cluster_summary"] == before["revision_cluster_members"] == 0
+    backfill("tenant-a")
+    after = bridge.metadata()["row_counts"]
+    assert after["revision_cluster_summary"] == 1 and after["revision_clusters"] >= 1
+    assert after["revision_cluster_members"] == 12  # Every demo entity has a leaf.
+    assert {"revision_analysis", "revision_findings", "revision_cluster_links"} <= set(after)

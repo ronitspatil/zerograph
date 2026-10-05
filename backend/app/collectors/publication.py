@@ -45,6 +45,7 @@ class PublishedRevision:
     nodes: int
     edges: int
     analysis: object  # app.graph.analysis.ComputedAnalysis
+    graph: CompactGraph  # For publish-time clustering; dropped by the caller after use.
 
 
 def check_conflicts(db: Session, set_ids: list[str]) -> None:
@@ -208,4 +209,4 @@ def publish_sets(
     analysis = compact.analyze()
     nodes, edge_count = compact.node_count, compact.edge_count
     graph.finish_revision(tenant, revision)
-    return PublishedRevision(nodes, edge_count, analysis)
+    return PublishedRevision(nodes, edge_count, analysis, compact)

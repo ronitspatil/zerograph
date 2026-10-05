@@ -20,6 +20,12 @@ from app.db.models import (
     AuditEvent,
     IngestionJob,
     Remediation,
+    RevisionAnalysis,
+    RevisionCluster,
+    RevisionClusterLink,
+    RevisionClusterMember,
+    RevisionClusterSummary,
+    RevisionFinding,
     SourceSnapshot,
     StagedEntity,
     TenantState,
@@ -145,6 +151,14 @@ def metadata():
                     TenantState,
                     UploadSession,
                     StagedEntity,
+                    # Per-revision analysis and global-map clusters travel in the
+                    # PostgreSQL dump with their revisions (and are recomputable).
+                    RevisionAnalysis,
+                    RevisionFinding,
+                    RevisionClusterSummary,
+                    RevisionCluster,
+                    RevisionClusterLink,
+                    RevisionClusterMember,
                 )
             },
         }

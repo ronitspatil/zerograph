@@ -14,8 +14,10 @@ from app.graph.exploration import (
     RevisionTotals,
     RevisionUnavailable,
     RootNotFound,
+    cypher_cluster_members,
     cypher_explore,
     cypher_search,
+    memory_cluster_members,
     memory_explore,
     memory_search,
     search_text,
@@ -102,6 +104,9 @@ class GraphStore(Protocol):
         totals: RevisionTotals | None = None,
     ) -> GraphSlice: ...
     def search(self, tenant: str, revision: str, q: str, limit: int) -> tuple[list[Node], bool]: ...
+    # Global-map leaf: the given member nodes (at most 500) and relationships among them.
+    # Raises RevisionUnavailable when the revision's metadata is missing.
+    def cluster_members(self, tenant: str, revision: str, ids: list[str], edge_limit: int) -> GraphSlice: ...
     def roles(
         self,
         tenant: str,
@@ -209,6 +214,12 @@ class MemoryGraphStore:
             raise RevisionUnavailable("Published graph revision unavailable")
         return memory_search(self.snapshots[(tenant, revision)] if revision else GraphSnapshot(), q, limit)
 
+    def cluster_members(self, tenant: str, revision: str, ids: list[str], edge_limit: int) -> GraphSlice:
+        _validate_member_bounds(ids, edge_limit)
+        if (tenant, revision) not in self.snapshots:
+            raise RevisionUnavailable("Published graph revision unavailable")
+        return memory_cluster_members(self.snapshots[(tenant, revision)], ids, edge_limit)
+
     def roles(
         self,
         tenant: str,
@@ -277,6 +288,11 @@ class MemoryGraphStore:
 
     def close(self) -> None:
         pass
+
+
+def _validate_member_bounds(ids: list[str], edge_limit: int) -> None:
+    if len(ids) > 500 or not 1 <= edge_limit <= 2000 or any(not 1 <= len(i) <= 512 for i in ids):
+        raise ValueError("Cluster member bounds outside supported limits")
 
 
 def _validate_retention_bounds(keep: int, limit: int) -> None:
@@ -547,6 +563,17 @@ class CypherGraphStore:
         with self.driver.session(fetch_size=51) as session:
             return session.execute_read(
                 unit_of_work(timeout=self.timeout)(lambda tx: cypher_search(tx, tenant, revision, q, limit))
+            )
+
+    def cluster_members(self, tenant: str, revision: str, ids: list[str], edge_limit: int) -> GraphSlice:
+        _validate_member_bounds(ids, edge_limit)
+        if not revision:
+            raise RevisionUnavailable("Published graph revision unavailable")
+        with self.driver.session(fetch_size=500) as session:
+            return session.execute_read(
+                unit_of_work(timeout=self.timeout)(
+                    lambda tx: cypher_cluster_members(tx, tenant, revision, ids, edge_limit)
+                )
             )
 
     def roles(

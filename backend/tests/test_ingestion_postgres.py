@@ -21,12 +21,18 @@ from app.db.models import (
     Base,
     IngestionJob,
     RevisionAnalysis,
+    RevisionCluster,
+    RevisionClusterLink,
+    RevisionClusterMember,
+    RevisionClusterSummary,
     RevisionFinding,
     SourceSnapshot,
     TenantState,
     now,
 )
 from app.graph.analysis import compute_analysis, store_analysis
+from app.graph.clusters import compute_clusters, store_clusters, stored_summary
+from app.graph.compact import CompactGraph
 from app.graph.repository import MemoryGraphStore
 from app.graph.schema import GraphSnapshot, Node, NodeType
 
@@ -262,7 +268,10 @@ def test_retention_protects_publication_pointer_with_real_tenant_lock(postgres_e
     with factory() as db:
         for index in range(8):
             store_analysis(db, "tenant", f"old-{index}", compute_analysis(exposed()))
+            clustered = compute_clusters(CompactGraph.from_snapshot(exposed()), f"old-{index}")
+            store_clusters(db, "tenant", f"old-{index}", clustered)
         store_analysis(db, "other", "old-5", compute_analysis(exposed()))
+        store_clusters(db, "other", "old-5", compute_clusters(CompactGraph.from_snapshot(exposed()), "old-5"))
         db.get(TenantState, "tenant").revision = "old-0"
         db.commit()
     monkeypatch.setattr(retention, "session_factory", lambda: factory)
@@ -315,6 +324,12 @@ def test_retention_protects_publication_pointer_with_real_tenant_lock(postgres_e
         assert {("other", "old-5"), ("tenant", "old-0"), ("tenant", state.revision)} <= analyzed
         finding_scopes = {(row.tenant_id, row.revision) for row in db.scalars(select(RevisionFinding))}
         assert ("tenant", "old-5") not in finding_scopes and ("other", "old-5") in finding_scopes
+        # Cluster rows follow the same lifecycle, in the same locked transaction.
+        for model in (RevisionClusterSummary, RevisionCluster, RevisionClusterLink, RevisionClusterMember):
+            scopes = {(row.tenant_id, row.revision) for row in db.scalars(select(model))}
+            assert ("tenant", "old-5") not in scopes
+            if model is not RevisionClusterLink:  # One-cluster revisions have no links.
+                assert {("other", "old-5"), ("tenant", "old-0"), ("tenant", state.revision)} <= scopes
 
 
 def test_retention_missing_or_recent_revisions_are_not_deleted(postgres_environment, monkeypatch):
@@ -744,3 +759,41 @@ def test_new_readers_queue_behind_a_waiting_pointer_swap(postgres_environment, m
             new = second.result(timeout=10)
     with factory() as db:
         assert new == db.get(TenantState, "tenant").revision != "initial"
+
+
+def test_publication_copies_cluster_rows_and_warm_starts_from_the_previous_revision(postgres_environment):
+    factory, graph = postgres_environment
+    nodes = [Node(id=f"svc:{i}", name=f"svc {i}", type=NodeType.SERVICE) for i in range(30)]
+    nodes += [Node(id=f"role:{i}", name=f"role {i}", type=NodeType.ROLE) for i in range(3)]
+    edges = [{"source": f"svc:{i}", "target": f"role:{i % 3}", "type": "ASSUMES_ROLE"} for i in range(30)]
+    payload = {"nodes": [n.model_dump(mode="json") for n in nodes], "edges": edges}
+    revisions = []
+    for _ in range(2):
+        job_id = str(uuid4())
+        with factory() as db:
+            db.add(IngestionJob(id=job_id, tenant_id="tenant", actor="a", source="snapshot", payload=payload))
+            db.commit()
+        tasks.process_job(job_id)
+        with factory() as db:
+            revisions.append(db.get(TenantState, "tenant").revision)
+    with factory() as db:
+        first, second = (stored_summary(db, "tenant", revision) for revision in revisions)
+        assert first.previous_revision == "initial" or first.previous_revision is None
+        assert second.previous_revision == revisions[0] and second.reused_ids == second.total_clusters
+        members = db.scalars(
+            select(RevisionClusterMember).where(RevisionClusterMember.revision == revisions[1])
+        ).all()
+        assert len(members) == 33
+        hubs = sorted(m.entity_id for m in members if m.ordinal == 0)
+        assert hubs == ["role:0", "role:1", "role:2"]
+        clusters = db.scalars(select(RevisionCluster).where(RevisionCluster.revision == revisions[1])).all()
+        assert all(isinstance(row.types, dict) for row in clusters)
+        assert {row.label for row in clusters} == {"role 0", "role 1", "role 2"}
+        ids = [
+            {
+                row.cluster_id
+                for row in db.scalars(select(RevisionCluster).where(RevisionCluster.revision == r))
+            }
+            for r in revisions
+        ]
+        assert ids[0] == ids[1]

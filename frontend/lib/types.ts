@@ -148,3 +148,71 @@ export interface Actor {
   tenant_id: string;
   roles: string[];
 }
+/** A structural cluster of the global map. Structure only, never a permission boundary. */
+export interface ClusterSummary {
+  id: string;
+  parent_id: string | null;
+  depth: number;
+  kind: "community" | "isolated" | "group" | "part" | "range";
+  label: string;
+  representative_id: string;
+  size: number;
+  child_count: number;
+  member_count: number;
+  internal_edges: number;
+  boundary_edges: number;
+  dominant_type: NodeType | string;
+  types: Record<string, number>;
+  accounts: Record<string, number>;
+}
+export interface ClusterLink {
+  source: string;
+  target: string;
+  weight: number;
+}
+export interface ClusterMap {
+  revision: string;
+  clusters: ClusterSummary[];
+  edges: ClusterLink[];
+  warnings: string[];
+  view: {
+    level: number;
+    total_nodes: number;
+    total_edges: number;
+    total_clusters: number;
+    clusters: number;
+    shown_clusters: number;
+    links: number;
+    shown_links: number;
+    edge_limit: number;
+    isolated_nodes: number;
+    truncated: boolean;
+    notice: string;
+  };
+}
+export interface ClusterDetail {
+  revision: string;
+  cluster: ClusterSummary;
+  path: { id: string; label: string; size: number }[];
+  children: ClusterSummary[];
+  edges: ClusterLink[];
+  nodes: GraphNode[];
+  node_edges: GraphEdge[];
+  boundary_edges: Record<string, number>;
+  warnings: string[];
+  view: {
+    mode: "clusters" | "members";
+    total_children: number;
+    shown_children: number;
+    total_links: number;
+    shown_links: number;
+    total_members: number;
+    shown_members: number;
+    member_limit: number;
+    total_member_edges: number;
+    shown_member_edges: number;
+    edge_limit: number;
+    truncated: boolean;
+    notice: string;
+  };
+}

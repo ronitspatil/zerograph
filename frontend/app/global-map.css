@@ -1,0 +1,88 @@
+/*
+ * Global map (structural clusters). Kept in its own file so console layout and
+ * spacing work in globals.css rebases cleanly; it reuses the design tokens there.
+ */
+.graph-panel[hidden] {
+  display: none;
+}
+.global-map-crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--muted);
+  min-width: 0;
+}
+.global-map-crumbs > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.global-map-crumbs button,
+.global-map-crumbs strong {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.global-map-crumbs button {
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--accent);
+}
+.global-map-crumbs button:hover:not(:disabled) {
+  background: var(--hover);
+}
+.global-map-crumbs button:disabled {
+  color: var(--text-secondary);
+  cursor: default;
+}
+.global-map-crumbs strong {
+  color: var(--text);
+  font-weight: 500;
+}
+.global-map-status {
+  justify-content: space-between;
+}
+.global-map-status > span:first-child {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.global-map-notice {
+  color: var(--subtle);
+}
+.global-map-sidebar .section-label + h3 {
+  margin-top: 4px;
+}
+.global-map-sidebar dl {
+  margin: 12px 0;
+}
+.global-map-sidebar .facet-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.global-map-sidebar dd::first-letter {
+  text-transform: none;
+}
+.global-map-sidebar > p,
+.global-map-sidebar > small {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+  margin: 4px 0 12px;
+}
+.global-map-sidebar > small {
+  color: var(--subtle);
+  display: block;
+}
+.global-map .identity-list button:disabled {
+  opacity: 0.5;
+}

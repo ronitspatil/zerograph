@@ -47,6 +47,7 @@ import { Simulator } from "@/components/simulator";
 import { RemediationHub } from "@/components/remediation-hub";
 import { Sources } from "@/components/sources";
 import { Wordmark } from "@/components/ui/logo";
+import { GlobalMap } from "@/components/global-map";
 const GraphCanvas = dynamic(
   () => import("@/components/graph-canvas").then((m) => m.GraphCanvas),
   {
@@ -120,10 +121,12 @@ const emptyGraph: GraphView = {
 export function Console({ demo }: { demo: boolean }) {
   const [view, setView] = useState<View>("graph");
   const [graph, setGraph] = useState<GraphView | RoleMap>(emptyGraph);
-  const [graphMode, setGraphMode] = useState<"identities" | "roles">(
+  const [graphMode, setGraphMode] = useState<"identities" | "roles" | "map">(
     "identities",
   );
-  const graphModeRef = useRef<"identities" | "roles">("identities");
+  const graphModeRef = useRef<"identities" | "roles" | "map">("identities");
+  // Bumped by refresh so the global map reloads its top level with the workspace.
+  const [mapReload, setMapReload] = useState(0);
   const [graphBusy, setGraphBusy] = useState(false);
   const roles = graph.view.mode === "roles" ? (graph as RoleMap) : null;
   const [overview, setOverview] = useState<Overview | null>(null);
@@ -177,6 +180,7 @@ export function Console({ demo }: { demo: boolean }) {
     setSearchResults(null);
     setSearch("");
     setError("");
+    setMapReload((key) => key + 1);
     const workspaceError = (e: unknown) => {
       if (workspace.signal.aborted) return;
       if (e instanceof ApiError && e.status === 401) {
@@ -359,8 +363,17 @@ export function Console({ demo }: { demo: boolean }) {
     setGraphBusy(false);
     void refresh();
   };
+  const showMap = () => {
+    graphModeRef.current = "map";
+    setGraphMode("map");
+    setSelected(null);
+    setSimulation(null);
+    setSimulating(false);
+    setGraphBusy(false);
+    setError("");
+  };
   const explore = useCallback(
-    async (root: string) => {
+    async (root: string, pinned?: string) => {
       graphModeRef.current = "identities";
       setGraphMode("identities");
       setGraphBusy(true);
@@ -376,7 +389,7 @@ export function Console({ demo }: { demo: boolean }) {
         root_id: root,
         node_limit: "250",
         edge_limit: "1000",
-        revision: graph.revision,
+        revision: pinned ?? graph.revision,
       });
       try {
         const result = await api<GraphView>(`graph/explore?${params}`, {
@@ -716,8 +729,49 @@ export function Console({ demo }: { demo: boolean }) {
                     >
                       Role map
                     </button>
+                    <button
+                      type="button"
+                      aria-pressed={graphMode === "map"}
+                      onClick={showMap}
+                    >
+                      Global map
+                    </button>
                   </div>
-                  <section className="panel graph-panel">
+                  {graphMode === "map" && (
+                    <section className="panel graph-panel">
+                      <div className="panel-heading">
+                        <div>
+                          <h2>Global map</h2>
+                          <span className="muted">
+                            The whole revision, grouped by graph structure. Open
+                            a cluster to drill down; open a member to explore
+                            its neighborhood.
+                          </span>
+                        </div>
+                        {revisionStale && (
+                          <span className="live-label warning">
+                            <i
+                              className="status-dot warning"
+                              aria-hidden="true"
+                            />
+                            Revision changed — refresh required
+                          </span>
+                        )}
+                      </div>
+                      <GlobalMap
+                        reloadKey={mapReload}
+                        stale={revisionStale}
+                        onError={explorationError}
+                        onOpenNeighborhood={(id, revision) =>
+                          void explore(id, revision)
+                        }
+                      />
+                    </section>
+                  )}
+                  <section
+                    className="panel graph-panel"
+                    hidden={graphMode === "map"}
+                  >
                     <div className="panel-heading">
                       <div>
                         <h2>

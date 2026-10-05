@@ -191,7 +191,11 @@ class ArchiveTests(unittest.TestCase):
 
         compose.bridge.side_effect = bridge
 
-        def dump(_args, *, output):
+        def dump(args, *, output):
+            # The whole database is dumped: per-revision analysis and global-map
+            # cluster tables travel with their revisions (no table filters).
+            dump_args = args[args.index("pg_dump") + 1 :]
+            self.assertFalse([a for a in dump_args if a.startswith(("-t", "-T", "--table", "--exclude"))])
             self.assertEqual(stat.S_IMODE(os.fstat(output.fileno()).st_mode), 0o600)
             folder = next(self.root.glob(".zerograph-backup-*"))
             self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o700)
