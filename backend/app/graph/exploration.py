@@ -262,6 +262,66 @@ def cypher_cluster_members(tx, tenant: str, revision: str, ids: list[str], edge_
     return GraphSlice(nodes=nodes, edges=edges, warnings=warnings)
 
 
+def cypher_cluster_expansion(
+    tx, tenant: str, revision: str, ids: list[str], known: list[str], edge_limit: int
+) -> GraphSlice:
+    """Members newly shown in place, with their relationships among themselves and to
+    members already on screen (``known``); ``total_edges`` exceeds the shown edges when
+    ``edge_limit`` truncated them. Anchored on the new members' unique keys."""
+    warnings = revision_warnings(tx, {"tenant": tenant, "revision": revision})
+    nodes = cypher_nodes(tx, tenant, revision, ids)
+    present = [node.id for node in nodes]
+    edges: list[Edge] = []
+    if present:
+        keys = [entity_key(tenant, revision, node_id) for node_id in present]
+        scope = keys + [entity_key(tenant, revision, node_id) for node_id in known]
+        rows = tx.run(
+            f"UNWIND $keys AS key MATCH (a:Entity {{key:key}})-[r:{EDGE_TYPES}]-(b:Entity) "
+            "WITH r, b WHERE b.key IN $scope AND r.tenant_id=$tenant AND r.revision=$revision "
+            # A relationship between two new members is matched from both ends.
+            "WITH DISTINCT r RETURN r.payload AS payload ORDER BY r.id LIMIT $limit",
+            keys=keys,
+            scope=scope,
+            tenant=tenant,
+            revision=revision,
+            limit=edge_limit + 1,
+        )
+        edges = [Edge.model_validate_json(row["payload"]) for row in rows]
+    return GraphSlice(
+        nodes=nodes,
+        edges=edges[:edge_limit],
+        warnings=warnings,
+        total_nodes=len(nodes),
+        total_edges=len(edges),
+    )
+
+
+def memory_cluster_expansion(
+    snapshot: GraphSnapshot, ids: list[str], known: list[str], edge_limit: int
+) -> GraphSlice:
+    wanted = set(ids)
+    nodes = sorted((node for node in snapshot.nodes if node.id in wanted), key=lambda node: node.id)
+    present = {node.id for node in nodes}
+    scope = present | set(known)
+    edges = sorted(
+        (
+            edge
+            for edge in snapshot.edges
+            if (edge.source in present or edge.target in present)
+            and edge.source in scope
+            and edge.target in scope
+        ),
+        key=lambda edge: edge.id,
+    )
+    return GraphSlice(
+        nodes=[node.model_copy(deep=True) for node in nodes],
+        edges=[edge.model_copy(deep=True) for edge in edges[:edge_limit]],
+        warnings=list(snapshot.warnings),
+        total_nodes=len(nodes),
+        total_edges=len(edges),
+    )
+
+
 def memory_cluster_members(snapshot: GraphSnapshot, ids: list[str], edge_limit: int) -> GraphSlice:
     wanted = set(ids)
     nodes = sorted((node for node in snapshot.nodes if node.id in wanted), key=lambda node: node.id)
