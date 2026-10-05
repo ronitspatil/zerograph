@@ -1,6 +1,6 @@
 "use client";
 import { useState } from "react";
-import { Cloud, Code2, FileJson, Plus, RefreshCw } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 import type { Job } from "@/lib/types";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -40,37 +40,31 @@ export function Sources({
     <section>
       <div className="source-cards">
         <div className="panel">
-          <Cloud size={23} />
           <h3>AWS account</h3>
           <p>
             Read-only IAM role and S3 metadata collection through an
             administrator-configured role.
           </p>
-          <span className="pill amber">Scoped coverage</span>
         </div>
         <div className="panel">
-          <Code2 size={23} />
           <h3>AI agents & MCP</h3>
           <p>
             Import server inventories, agent configurations, and explicit
             tool-to-data bindings.
           </p>
-          <span className="pill purple">Declared access</span>
         </div>
         <div className="panel">
-          <FileJson size={23} />
           <h3>Graph snapshot</h3>
           <p>
             Import normalized identity and data relationships from your internal
             collectors.
           </p>
-          <span className="pill green">Validated schema</span>
         </div>
       </div>
       <div className="panel form-panel">
         <div className="panel-heading">
           <h3>Start ingestion</h3>
-          <span className="muted">Asynchronous · tenant scoped</span>
+          <span className="muted">Runs asynchronously in your tenant</span>
         </div>
         <label>
           Source
@@ -105,7 +99,6 @@ export function Sources({
           disabled={busy || !canAdmin || (source !== "aws" && !payload)}
           onClick={submit}
         >
-          <Plus size={16} />
           {busy ? "Queuing…" : "Queue ingestion"}
         </Button>
       </div>
@@ -113,7 +106,7 @@ export function Sources({
         <div className="panel-heading">
           <h3>Collection history</h3>
           <Button variant="ghost" size="small" onClick={onRefresh}>
-            <RefreshCw size={14} />
+            <RefreshCw size={13} aria-hidden="true" />
             Refresh
           </Button>
         </div>
@@ -136,8 +129,9 @@ export function Sources({
                   </td>
                   <td>
                     <span
-                      className={`pill ${j.status === "completed" ? "green" : j.status === "failed" ? "red" : "amber"}`}
+                      className={`status ${j.status === "completed" ? "ok" : j.status === "failed" ? "failed" : "pending"}`}
                     >
+                      <i aria-hidden="true" />
                       {j.status}
                     </span>
                   </td>
