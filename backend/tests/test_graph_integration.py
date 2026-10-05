@@ -7,6 +7,8 @@ from uuid import uuid4
 import pytest
 
 from app.core.config import get_settings
+from app.engine.analysis_index import AnalysisIndex
+from app.engine.blast_radius import calculate, simulate
 from app.graph.demo import demo_snapshot
 from app.graph.repository import CypherGraphStore
 
@@ -33,8 +35,10 @@ def test_real_graph_roundtrip_and_tenant_isolation(monkeypatch):
         snapshot = store.snapshot(tenant, revision)
         assert len(snapshot.nodes) == 12
         assert len(store.snapshot("other-tenant", revision).nodes) == 0
-        paths = store.shortest_paths(tenant, revision, "agent:support", 5, False)
+        reach = store.reach(tenant, revision, "agent:support", 5, False)
+        paths = simulate(reach, 12, AnalysisIndex.build(snapshot).total_asset_weight).paths
         assert paths["db:customers"] == ["agent:support", "mcp:crm", "role:admin", "db:customers"]
+        assert store.reach("other-tenant", revision, "agent:support", 5, False) is None
     finally:
         with store.driver.session() as session:
             session.run("MATCH (n {tenant_id:$tenant}) DETACH DELETE n", tenant=tenant).consume()
@@ -472,6 +476,63 @@ def test_real_batched_publication_building_state_and_batched_delete(monkeypatch)
                 "MATCH (n {tenant_id:$tenant}) RETURN count(n) AS count", tenant=tenant
             ).single()["count"]
         assert remaining == 0
+    finally:
+        with store.driver.session() as session:
+            session.run("MATCH (n {tenant_id:$tenant}) DETACH DELETE n", tenant=tenant).consume()
+        store.close()
+        get_settings.cache_clear()
+
+
+@pytest.mark.skipif(not os.getenv("ZG_INTEGRATION_GRAPH"), reason="No real graph database configured")
+def test_real_simulation_matches_reference_engine(monkeypatch):
+    """Golden parity: the vendor neighborhood + reference BFS equals in-process calculate."""
+    import sys
+    from pathlib import Path
+
+    from app.collectors.data_classifier import classification_edges
+    from app.graph.schema import GraphSnapshot
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from qualify_scale import generate
+    from test_simulation import sources
+
+    monkeypatch.setenv("ZG_GRAPH_VENDOR", os.environ["ZG_INTEGRATION_GRAPH"])
+    get_settings.cache_clear()
+    store = CypherGraphStore()
+    for attempt in range(45):
+        try:
+            store.driver.verify_connectivity()
+            break
+        except Exception:
+            if attempt == 44:
+                raise
+            time.sleep(1)
+    store.migrate()
+    tenant = "simulate-" + str(uuid4())
+    fixtures = {"demo": demo_snapshot()}
+    for size in (1000, 5000):
+        generated = generate(size, exposed_rate=0.01)
+        fixtures[f"g{size}"] = classification_edges(
+            GraphSnapshot.model_construct(
+                nodes=generated.nodes, edges=generated.edges, warnings=[], source="s"
+            )
+        )
+    try:
+        for revision, snapshot in fixtures.items():
+            store.publish(tenant, revision, snapshot)
+            indexes = {flag: AnalysisIndex.build(snapshot, flag) for flag in (False, True)}
+            total = (len(snapshot.nodes), indexes[False].total_asset_weight)
+            chosen = [n.id for n in snapshot.nodes] if revision == "demo" else sources(snapshot, 25)
+            for source in chosen:
+                for hops, uncertain in ((1, False), (3, True), (5, False), (5, True)):
+                    expected = calculate(snapshot, source, hops, uncertain, index=indexes[uncertain])
+                    actual = simulate(store.reach(tenant, revision, source, hops, uncertain), *total)
+                    assert actual.model_dump() == expected.model_dump(), (revision, source, hops, uncertain)
+                    assert list(actual.paths) == list(expected.paths)
+            # Another revision or tenant never contributes to a neighborhood.
+            assert store.reach(tenant, "missing", chosen[0], 5, True) is None
+            assert store.reach("other-" + tenant, revision, chosen[0], 5, True) is None
     finally:
         with store.driver.session() as session:
             session.run("MATCH (n {tenant_id:$tenant}) DETACH DELETE n", tenant=tenant).consume()

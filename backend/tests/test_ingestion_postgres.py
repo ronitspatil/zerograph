@@ -434,7 +434,7 @@ def test_api_reader_pin_blocks_only_the_pointer_swap_and_never_its_revision(
         db.get(TenantState, "tenant").revision = "old-0"
         db.commit()
     snapshot_started, paths_started, release_snapshot, release_paths = Event(), Event(), Event(), Event()
-    original_snapshot, original_paths = graph.snapshot, graph.shortest_paths
+    original_snapshot, original_paths = graph.snapshot, graph.reach
     original_finish = graph.finish_revision
     built = Event()
 
@@ -458,13 +458,13 @@ def test_api_reader_pin_blocks_only_the_pointer_swap_and_never_its_revision(
             snapshot, revision = load_snapshot(db, graph, "tenant")
             assert revision == "old-0"
             assert len(snapshot.nodes) == 1
-            graph.shortest_paths("tenant", revision, "asset", 1, False)
+            assert graph.reach("tenant", revision, "asset", 1, False) is not None
         return revision
 
     job_id = enqueue(factory)
     with (
         patch.object(graph, "snapshot", side_effect=paused_snapshot),
-        patch.object(graph, "shortest_paths", side_effect=paused_paths),
+        patch.object(graph, "reach", side_effect=paused_paths),
         patch.object(graph, "finish_revision", side_effect=observed_finish),
     ):
         with ThreadPoolExecutor(max_workers=3) as pool:
