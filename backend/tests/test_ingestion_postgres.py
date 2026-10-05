@@ -797,3 +797,25 @@ def test_publication_copies_cluster_rows_and_warm_starts_from_the_previous_revis
             for r in revisions
         ]
         assert ids[0] == ids[1]
+
+
+def test_worker_cluster_backfill_skips_a_publishing_tenant_then_fills_it(postgres_environment, monkeypatch):
+    factory, graph = postgres_environment
+    from app.db.locks import acquire_publication_lock
+    from app.graph import clusters
+
+    graph.publish("tenant", "initial", exposed())
+    monkeypatch.setattr(clusters, "session_factory", lambda: factory)
+    monkeypatch.setattr(clusters, "get_graph_store", lambda: graph)
+    monkeypatch.setattr(clusters, "_failed", {})
+    with factory() as publisher:
+        acquire_publication_lock(publisher, "tenant")  # A publication in progress.
+        started = time.perf_counter()
+        assert clusters.backfill_missing() == [{"tenant": "tenant", "backfilled": False, "busy": True}]
+        assert time.perf_counter() - started < 2  # Skipped, not queued behind the publisher.
+        publisher.rollback()
+    with factory() as db:
+        assert stored_summary(db, "tenant", "initial") is None
+    assert [r["backfilled"] for r in clusters.backfill_missing()] == [True]
+    with factory() as db:
+        assert stored_summary(db, "tenant", "initial").total_nodes == len(exposed().nodes)
