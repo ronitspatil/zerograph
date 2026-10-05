@@ -50,3 +50,13 @@ The concurrency tests use `ZG_INGESTION_POSTGRES_URL` pointing to a dedicated te
 database. Each test creates and removes only its own randomly named schema. They
 verify real SQL locks and conditional updates with an in-memory graph adapter;
 they do not claim real graph/SQL fault-injection or live-cloud validation.
+
+## Revision analysis (migration `0003`)
+
+Migration `0003` adds `revision_analysis` and `revision_findings`, written by the
+publish job in the pointer-swap transaction. It creates tables only and needs no
+graph access. Drain old workers as above before starting new ones: an old worker
+would publish revisions without stored analysis, which stay correct (computed on
+read) but slow. Revisions published before the upgrade are computed on read until
+republished or backfilled with `python -m app.graph.analysis --tenant TENANT_ID`;
+see [revision-analysis.md](revision-analysis.md).

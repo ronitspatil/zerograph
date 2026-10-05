@@ -230,8 +230,9 @@ def test_role_query_holds_shared_revision_lock_without_commit():
     )
     graph = MagicMock()
 
-    def roles(*args):
+    def roles(*args, **kwargs):
         assert args == ("tenant", "current", 3, 4, "role:01")
+        assert kwargs == {"totals": None}  # No stored analysis for this mocked revision.
         statement = db.execute.call_args.args[0]
         assert "FOR SHARE" in str(statement.compile(dialect=postgresql.dialect()))
         assert statement.get_execution_options()["populate_existing"]

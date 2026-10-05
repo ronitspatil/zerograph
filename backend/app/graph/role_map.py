@@ -6,7 +6,12 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from app.graph.exploration import EDGE_SCOPE, NODE_SCOPE, GraphSlice, revision_warnings
+from app.graph.exploration import (
+    GraphSlice,
+    RevisionTotals,
+    revision_warnings,
+    scoped_totals,
+)
 from app.graph.schema import (
     DATA_TYPES,
     IDENTITY_TYPES,
@@ -71,7 +76,11 @@ def validate_role_bounds(role_limit: int, edge_limit: int, cursor: str | None):
 
 
 def memory_roles(
-    snapshot: GraphSnapshot, role_limit: int, edge_limit: int, cursor: str | None
+    snapshot: GraphSnapshot,
+    role_limit: int,
+    edge_limit: int,
+    cursor: str | None,
+    totals: RevisionTotals | None = None,
 ) -> RoleMapSlice:
     validate_role_bounds(role_limit, edge_limit, cursor)
     roles = sorted((node for node in snapshot.nodes if node.type == NodeType.ROLE), key=lambda node: node.id)
@@ -114,11 +123,11 @@ def memory_roles(
         nodes=[node.model_copy(deep=True) for node in selected],
         edges=[edge.model_copy(deep=True) for edge in visible_edges],
         warnings=list(snapshot.warnings),
-        total_nodes=len(snapshot.nodes),
-        total_edges=len(snapshot.edges),
+        total_nodes=totals.nodes if totals else len(snapshot.nodes),
+        total_edges=totals.edges if totals else len(snapshot.edges),
         role_summaries=summaries,
-        total_roles=len(roles),
-        total_role_edges=len(role_edges),
+        total_roles=totals.roles if totals else len(roles),
+        total_role_edges=totals.role_edges if totals else len(role_edges),
         has_more=has_more,
         next_cursor=selected[-1].id if has_more else None,
     )
@@ -134,17 +143,29 @@ ROLE_EDGE_SCOPE = (
 
 
 def cypher_roles(
-    tx, tenant: str, revision: str, role_limit: int, edge_limit: int, cursor: str | None
+    tx,
+    tenant: str,
+    revision: str,
+    role_limit: int,
+    edge_limit: int,
+    cursor: str | None,
+    totals: RevisionTotals | None = None,
 ) -> RoleMapSlice:
     validate_role_bounds(role_limit, edge_limit, cursor)
     params = {"tenant": tenant, "revision": revision}
     warnings = revision_warnings(tx, params)
-    total_nodes = tx.run("MATCH " + NODE_SCOPE + " RETURN count(n) AS count", **params).single()["count"]
-    total_edges = tx.run("MATCH " + EDGE_SCOPE + " RETURN count(r) AS count", **params).single()["count"]
-    total_roles = tx.run("MATCH " + ROLE_NODE_SCOPE + " RETURN count(n) AS count", **params).single()["count"]
-    total_role_edges = tx.run("MATCH " + ROLE_EDGE_SCOPE + " RETURN count(r) AS count", **params).single()[
-        "count"
-    ]
+    if totals:
+        # Stored at publication; avoids four whole-revision count scans per page.
+        total_nodes, total_edges = totals.nodes, totals.edges
+        total_roles, total_role_edges = totals.roles, totals.role_edges
+    else:
+        total_nodes, total_edges = scoped_totals(tx, params)
+        total_roles = tx.run("MATCH " + ROLE_NODE_SCOPE + " RETURN count(n) AS count", **params).single()[
+            "count"
+        ]
+        total_role_edges = tx.run(
+            "MATCH " + ROLE_EDGE_SCOPE + " RETURN count(r) AS count", **params
+        ).single()["count"]
     rows = tx.run(
         "MATCH " + ROLE_NODE_SCOPE + " WHERE $cursor IS NULL OR n.id > $cursor "
         "RETURN n.payload AS payload ORDER BY n.id LIMIT $limit",

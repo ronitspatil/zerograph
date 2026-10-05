@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { accessToken, validOrigin } from "@/lib/session";
 export const dynamic = "force-dynamic";
+const pagingHeaders = ["X-Graph-Revision", "X-Total-Count", "X-Next-Cursor"];
 async function proxy(
   request: Request,
   { params }: { params: Promise<{ path: string[] }> },
@@ -85,13 +86,19 @@ async function proxy(
         redirect: "error",
       },
     );
+    const headers = new Headers({
+      "Content-Type":
+        upstream.headers.get("Content-Type") || "application/json",
+      "Cache-Control": "no-store",
+    });
+    // Only the documented findings paging headers pass through.
+    for (const name of pagingHeaders) {
+      const value = upstream.headers.get(name);
+      if (value !== null) headers.set(name, value);
+    }
     return new NextResponse(await upstream.text(), {
       status: upstream.status,
-      headers: {
-        "Content-Type":
-          upstream.headers.get("Content-Type") || "application/json",
-        "Cache-Control": "no-store",
-      },
+      headers,
     });
   } catch {
     return NextResponse.json(

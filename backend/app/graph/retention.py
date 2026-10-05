@@ -15,6 +15,7 @@ from sqlalchemy import select, text
 from app.core.auth import Actor
 from app.db.models import TenantState
 from app.db.session import audit, session_factory
+from app.graph.analysis import delete_analysis
 from app.graph.repository import RevisionMetadata, _validate_retention_bounds, get_graph_store
 
 
@@ -97,6 +98,9 @@ def prune_revisions(
                 intent_db.commit()
             if graph.delete_revision(tenant, revision.revision, revision.created_at_ms, cutoff):
                 result.deleted.append(revision.revision)
+                # Stored analysis goes in the same transaction that still holds
+                # the tenant publication lock and records the deletion.
+                delete_analysis(db, tenant, revision.revision)
                 audit(db, Actor(actor, tenant, frozenset()), "graph.revision_deleted", detail)
             else:
                 audit(db, Actor(actor, tenant, frozenset()), "graph.revision_delete_skipped", detail)

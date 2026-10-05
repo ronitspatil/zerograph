@@ -350,6 +350,25 @@ def test_real_role_map_label_counts_keyset_pages_and_scoped_structural_summaries
             assert store.roles(other, revision, 2, 10, None) == memory.roles(tenant, revision, 2, 10, None)
             with pytest.raises(RevisionUnavailable):
                 store.roles(tenant, "missing", 2, 10, None)
+            # Totals stored at publication equal the scoped aggregates they replace,
+            # despite the deliberately malformed cross-scope relationships above.
+            from app.graph.analysis import compute_analysis
+
+            totals = compute_analysis(snapshot).totals
+            for role_limit, edge_limit, cursor in ((2, 10, None), (100, 100, "role:03a")):
+                assert store.roles(tenant, revision, role_limit, edge_limit, cursor, totals=totals) == (
+                    store.roles(tenant, revision, role_limit, edge_limit, cursor)
+                )
+            for root in (None, "role:00"):
+                assert store.explore(tenant, revision, root, 5, 10, totals=totals) == store.explore(
+                    tenant, revision, root, 5, 10
+                )
+            # Single keyed node lookup is tenant- and revision-scoped.
+            assert store.node(tenant, revision, "role:03") == memory.node(tenant, revision, "role:03")
+            assert store.node(tenant, revision, "neighbor:AIAgent").type == NodeType.AGENT
+            assert store.node(tenant, revision, "missing") is None
+            assert store.node(tenant, "missing", "role:03") is None
+            assert store.node("roles-absent-" + str(uuid4()), revision, "role:03") is None
     finally:
         with store.driver.session() as session:
             session.run(

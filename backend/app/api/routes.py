@@ -5,6 +5,7 @@ from typing import Annotated, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -17,9 +18,16 @@ from app.core.auth import Actor, require_role
 from app.core.config import get_settings
 from app.db.models import AuditEvent, IngestionJob, Remediation, TenantState
 from app.db.session import audit, get_db
-from app.engine.analysis_index import AnalysisIndex
 from app.engine.blast_radius import BlastRadius, calculate
-from app.engine.toxic_combos import Finding, detect
+from app.engine.toxic_combos import Finding
+from app.graph.analysis import (
+    UnknownCursor,
+    compute_analysis,
+    computed_findings_page,
+    stored_analysis,
+    stored_findings_page,
+    stored_totals,
+)
 from app.graph.exploration import (
     ExplorationResponse,
     ExplorationView,
@@ -133,8 +141,9 @@ def explore_graph(
     revision: str | None = None,
 ):
     current = expected_revision(db, actor.tenant_id, revision)
+    totals = stored_totals(db, actor.tenant_id, current)
     try:
-        result = graph.explore(actor.tenant_id, current, root_id, node_limit, edge_limit)
+        result = graph.explore(actor.tenant_id, current, root_id, node_limit, edge_limit, totals=totals)
     except RootNotFound:
         raise HTTPException(404, "Graph root not found") from None
     except RevisionUnavailable:
@@ -191,8 +200,9 @@ def role_map(
     revision: str | None = None,
 ):
     current = expected_revision(db, actor.tenant_id, revision)
+    totals = stored_totals(db, actor.tenant_id, current)
     try:
-        result = graph.roles(actor.tenant_id, current, role_limit, edge_limit, cursor)
+        result = graph.roles(actor.tenant_id, current, role_limit, edge_limit, cursor, totals=totals)
     except RevisionUnavailable:
         raise HTTPException(
             503, "Published graph revision unavailable; retry shortly", headers={"Retry-After": "5"}
@@ -220,39 +230,41 @@ def role_map(
 
 @router.get("/overview")
 def overview(db: DB, graph: Graph, actor: Viewer):
-    snapshot, revision = load_snapshot(db, graph, actor.tenant_id)
-    prepared = AnalysisIndex.build(snapshot, include_uncertain=True)
-    findings = detect(snapshot, index=prepared)
-    identities = [n for n in snapshot.nodes if n.type in IDENTITY_TYPES]
-    # Count identities with sensitive reachable assets. Full scores are computed on demand.
-    high_blast = sum(prepared.score(n.id, prepared.paths(n.id))[0] >= 70 for n in identities)
-    return {
-        "revision": revision,
-        "total_nhis": len(identities),
-        "ai_agents": sum(n.type == NodeType.AGENT for n in snapshot.nodes),
-        "toxic_combinations": len(findings),
-        "high_blast_radius": high_blast,
-        "data_assets": sum(
-            n.type in {NodeType.BUCKET, NodeType.DATABASE, NodeType.VECTOR} for n in snapshot.nodes
-        ),
-        "confirmed_edges": sum(e.certainty == "confirmed" for e in snapshot.edges),
-        "uncertain_edges": sum(e.certainty != "confirmed" for e in snapshot.edges),
-        "accounts": sorted({n.account_id for n in snapshot.nodes if n.account_id}),
-        "sensitivity": {
-            level: sum(
-                n.sensitivity.value == level
-                for n in snapshot.nodes
-                if n.type in {NodeType.BUCKET, NodeType.DATABASE, NodeType.VECTOR}
-            )
-            for level in ["public", "internal", "confidential", "restricted"]
-        },
-    }
+    revision = pin_revision(db, actor.tenant_id)
+    stored = stored_analysis(db, actor.tenant_id, revision)
+    if stored is not None:
+        return {"revision": revision, **stored.overview}
+    # Legacy revision (published before stored analysis) or empty tenant.
+    snapshot = graph.snapshot(actor.tenant_id, revision) if revision else GraphSnapshot()
+    return {"revision": revision, **compute_analysis(snapshot).overview}
 
 
 @router.get("/findings", response_model=list[Finding])
-def findings(db: DB, graph: Graph, actor: Viewer):
-    snapshot, _ = load_snapshot(db, graph, actor.tenant_id)
-    return detect(snapshot)
+def findings(
+    db: DB,
+    graph: Graph,
+    actor: Viewer,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 200,
+    cursor: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
+    revision: str | None = None,
+):
+    current = expected_revision(db, actor.tenant_id, revision)
+    stored = stored_analysis(db, actor.tenant_id, current)
+    try:
+        if stored is not None:
+            page, has_more = stored_findings_page(db, actor.tenant_id, current, cursor, limit)
+            total = stored.total_findings
+        else:
+            snapshot = graph.snapshot(actor.tenant_id, current) if current else GraphSnapshot()
+            computed = compute_analysis(snapshot).findings
+            page, has_more = computed_findings_page(computed, cursor, limit)
+            total = len(computed)
+    except UnknownCursor:
+        raise HTTPException(422, "Unknown findings cursor for this revision") from None
+    headers = {"X-Graph-Revision": current, "X-Total-Count": str(total)}
+    if has_more and page:
+        headers["X-Next-Cursor"] = page[-1]["id"]
+    return JSONResponse(page, headers=headers)
 
 
 class SimulationRequest(BaseModel):
@@ -384,8 +396,9 @@ class PreviewResponse(BaseModel):
 
 @router.post("/remediations/preview", response_model=PreviewResponse)
 def preview(request: PreviewRequest, db: DB, graph: Graph, actor: Analyst):
-    snapshot, revision = load_snapshot(db, graph, actor.tenant_id)
-    if not any(n.id == request.identity_id and n.type in IDENTITY_TYPES for n in snapshot.nodes):
+    revision = pin_revision(db, actor.tenant_id)
+    identity = graph.node(actor.tenant_id, revision, request.identity_id)
+    if identity is None or identity.type not in IDENTITY_TYPES:
         raise HTTPException(404, "Identity not found")
     try:
         result = optimize(request.policy, request.usage)
@@ -552,8 +565,9 @@ class CloudTrailRequest(BaseModel):
 
 @router.post("/audit/normalize", response_model=AuditNormalization)
 def normalize_audit(request: CloudTrailRequest, db: DB, graph: Graph, actor: Analyst):
-    snapshot, _ = load_snapshot(db, graph, actor.tenant_id)
-    if request.identity_id not in {n.id for n in snapshot.nodes if n.type in IDENTITY_TYPES}:
+    revision = pin_revision(db, actor.tenant_id)
+    identity = graph.node(actor.tenant_id, revision, request.identity_id)
+    if identity is None or identity.type not in IDENTITY_TYPES:
         raise HTTPException(404, "Identity not found")
     try:
         result = normalize_cloudtrail(

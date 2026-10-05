@@ -71,3 +71,35 @@ class SourceSnapshot(Base):
     job_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class RevisionAnalysis(Base):
+    """Whole-revision analysis computed once, before the publication pointer swap."""
+
+    __tablename__ = "revision_analysis"
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    revision: Mapped[str] = mapped_column(String(64), primary_key=True)
+    analysis_version: Mapped[int] = mapped_column(Integer)
+    overview: Mapped[dict[str, Any]] = mapped_column(JSON)
+    total_nodes: Mapped[int] = mapped_column(Integer)
+    total_edges: Mapped[int] = mapped_column(Integer)
+    total_roles: Mapped[int] = mapped_column(Integer)
+    total_role_edges: Mapped[int] = mapped_column(Integer)
+    total_findings: Mapped[int] = mapped_column(Integer)
+    total_asset_weight: Mapped[int] = mapped_column(Integer)
+    high_blast_ids: Mapped[list[str]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class RevisionFinding(Base):
+    """One toxic-combination finding of a revision, in the API's stable order (ordinal)."""
+
+    __tablename__ = "revision_findings"
+    __table_args__ = (
+        Index("ux_revision_findings_finding", "tenant_id", "revision", "finding_id", unique=True),
+    )
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    revision: Mapped[str] = mapped_column(String(64), primary_key=True)
+    ordinal: Mapped[int] = mapped_column(Integer, primary_key=True)
+    finding_id: Mapped[str] = mapped_column(String(64))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
