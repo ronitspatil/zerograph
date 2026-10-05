@@ -100,6 +100,8 @@ const typeLabels: Record<string, string> = {
   ServiceAccount: "Service account",
   HumanUser: "Human user",
 };
+// Findings arrive page by page for the displayed revision; the graph never waits on them.
+const FINDINGS_PAGE = 200;
 const emptyGraph: GraphView = {
   revision: "",
   nodes: [],
@@ -126,6 +128,11 @@ export function Console({ demo }: { demo: boolean }) {
   const roles = graph.view.mode === "roles" ? (graph as RoleMap) : null;
   const [overview, setOverview] = useState<Overview | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
+  const [findingsRevision, setFindingsRevision] = useState<string | null>(null);
+  const [findingsMore, setFindingsMore] = useState(false);
+  const [findingsBusy, setFindingsBusy] = useState(false);
+  const findingsRequest = useRef<AbortController | null>(null);
+  const workspaceRequest = useRef<AbortController | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [records, setRecords] = useState<Remediation[]>([]);
   const [events, setEvents] = useState<AuditEvent[]>([]);
@@ -160,27 +167,54 @@ export function Console({ demo }: { demo: boolean }) {
   const refresh = useCallback(async () => {
     graphRequest.current?.abort();
     searchRequest.current?.abort();
+    workspaceRequest.current?.abort();
     const controller = new AbortController();
     graphRequest.current = controller;
+    // Overview and workspace records load independently of the bounded graph:
+    // whole-revision analysis must never hold the graph view back.
+    const workspace = new AbortController();
+    workspaceRequest.current = workspace;
     setSearchResults(null);
     setSearch("");
     setError("");
+    const workspaceError = (e: unknown) => {
+      if (workspace.signal.aborted) return;
+      if (e instanceof ApiError && e.status === 401) {
+        window.location.assign("/login");
+        return;
+      }
+      setError(e instanceof Error ? e.message : "Could not load workspace");
+    };
+    api<Overview>("overview", { signal: workspace.signal }).then((o) => {
+      if (!workspace.signal.aborted) setOverview(o);
+    }, workspaceError);
+    Promise.all([
+      api<Job[]>("ingestions", { signal: workspace.signal }),
+      api<Remediation[]>("remediations", { signal: workspace.signal }),
+      api<Actor>("me", { signal: workspace.signal }),
+    ])
+      .then(async ([j, r, a]) => {
+        if (workspace.signal.aborted) return;
+        setJobs(j);
+        setRecords(r);
+        setActor(a);
+        if (a.roles.includes("admin")) {
+          const audit = await api<AuditEvent[]>("audit", {
+            signal: workspace.signal,
+          });
+          if (!workspace.signal.aborted) setEvents(audit);
+        }
+      })
+      .catch(workspaceError);
     try {
-      const [g, o, f, j, r, a] = await Promise.all([
-        api<GraphView | RoleMap>(
-          graphModeRef.current === "roles"
-            ? "graph/roles?role_limit=50&edge_limit=1000"
-            : "graph/explore?node_limit=250&edge_limit=1000",
-          {
-            signal: controller.signal,
-          },
-        ),
-        api<Overview>("overview"),
-        api<Finding[]>("findings"),
-        api<Job[]>("ingestions"),
-        api<Remediation[]>("remediations"),
-        api<Actor>("me"),
-      ]);
+      const g = await api<GraphView | RoleMap>(
+        graphModeRef.current === "roles"
+          ? "graph/roles?role_limit=50&edge_limit=1000"
+          : "graph/explore?node_limit=250&edge_limit=1000",
+        {
+          signal: controller.signal,
+        },
+      );
       if (controller.signal.aborted) return;
       setGraph(g);
       setSelected(
@@ -190,17 +224,6 @@ export function Console({ demo }: { demo: boolean }) {
       setSimulating(false);
       setRevisionStale(false);
       setGraphBusy(false);
-      setOverview(o);
-      setFindings(f);
-      setJobs(j);
-      setRecords(r);
-      setActor(a);
-      if (a.roles.includes("admin")) {
-        const audit = await api<AuditEvent[]>("audit", {
-          signal: controller.signal,
-        });
-        if (!controller.signal.aborted) setEvents(audit);
-      }
     } catch (e) {
       if (controller.signal.aborted) return;
       if (e instanceof ApiError && e.status === 401) {
@@ -217,6 +240,8 @@ export function Console({ demo }: { demo: boolean }) {
     return () => {
       graphRequest.current?.abort();
       searchRequest.current?.abort();
+      workspaceRequest.current?.abort();
+      findingsRequest.current?.abort();
     };
   }, [refresh]);
   const explorationError = useCallback((e: unknown) => {
@@ -235,6 +260,55 @@ export function Console({ demo }: { demo: boolean }) {
       );
     } else setError(e instanceof Error ? e.message : "Could not explore graph");
   }, []);
+  const loadFindings = useCallback(
+    async (revision: string, after?: string) => {
+      findingsRequest.current?.abort();
+      const controller = new AbortController();
+      findingsRequest.current = controller;
+      setFindingsBusy(true);
+      // Pinned to the displayed revision: a publish in between returns 409.
+      const params = new URLSearchParams({
+        limit: String(FINDINGS_PAGE),
+        revision,
+      });
+      if (after) params.set("cursor", after);
+      try {
+        const page = await api<Finding[]>(`findings?${params}`, {
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) return;
+        setFindings((previous) => (after ? [...previous, ...page] : page));
+        setFindingsRevision(revision);
+        setFindingsMore(page.length === FINDINGS_PAGE);
+      } catch (e) {
+        if (!controller.signal.aborted) explorationError(e);
+      } finally {
+        if (!controller.signal.aborted) setFindingsBusy(false);
+      }
+    },
+    [explorationError],
+  );
+  useEffect(() => {
+    // Findings of a published revision are immutable: load once per revision.
+    if (graph.revision === findingsRevision) return;
+    if (!graph.revision) {
+      findingsRequest.current?.abort();
+      setFindings([]);
+      setFindingsMore(false);
+      setFindingsBusy(false);
+      setFindingsRevision("");
+      return;
+    }
+    void loadFindings(graph.revision);
+  }, [graph.revision, findingsRevision, loadFindings]);
+  const loadMoreFindings = () => {
+    const last = findings[findings.length - 1];
+    if (findingsRevision && last) void loadFindings(findingsRevision, last.id);
+  };
+  const findingsTotal =
+    overview && overview.revision === findingsRevision
+      ? overview.toxic_combinations
+      : undefined;
   const loadRoles = useCallback(
     async (cursor?: string) => {
       graphModeRef.current = "roles";
@@ -615,7 +689,7 @@ export function Console({ demo }: { demo: boolean }) {
                       key={m.label}
                     >
                       <span>{m.label}</span>
-                      <strong>{m.value ?? 0}</strong>
+                      <strong>{overview ? (m.value ?? 0) : "—"}</strong>
                       <small>{m.caption}</small>
                     </div>
                   ))}
@@ -1017,6 +1091,10 @@ export function Console({ demo }: { demo: boolean }) {
                     findings={findings}
                     graph={graph}
                     onSelect={selectFinding}
+                    total={findingsTotal}
+                    hasMore={findingsMore}
+                    busy={findingsBusy}
+                    onLoadMore={loadMoreFindings}
                   />
                 </>
               )}
@@ -1104,6 +1182,10 @@ export function Console({ demo }: { demo: boolean }) {
                     findings={findings}
                     graph={graph}
                     onSelect={selectFinding}
+                    total={findingsTotal}
+                    hasMore={findingsMore}
+                    busy={findingsBusy}
+                    onLoadMore={loadMoreFindings}
                   />
                 </>
               )}
@@ -1236,11 +1318,23 @@ function Findings({
   findings,
   graph,
   onSelect,
+  total,
+  hasMore,
+  busy,
+  onLoadMore,
 }: {
   findings: Finding[];
   graph: GraphData;
   onSelect: (f: Finding) => void;
+  total?: number;
+  hasMore: boolean;
+  busy: boolean;
+  onLoadMore: () => void;
 }) {
+  const count =
+    hasMore && total !== undefined
+      ? `${findings.length} of ${total}`
+      : `${findings.length}${hasMore ? "+" : ""}`;
   const name = (id: string) => graph.nodes.find((n) => n.id === id)?.name || id;
   return (
     <section className="panel findings-panel">
@@ -1252,7 +1346,7 @@ function Findings({
           </span>
         </div>
         <span className="muted count">
-          {findings.length} {findings.length === 1 ? "finding" : "findings"}
+          {count} {findings.length === 1 && !hasMore ? "finding" : "findings"}
         </span>
       </div>
       {findings.length ? (
@@ -1308,10 +1402,24 @@ function Findings({
           </tbody>
         </table>
       ) : (
+        <div className="empty-line" role={busy ? "status" : undefined}>
+          {busy
+            ? "Loading findings…"
+            : graph.nodes.length
+              ? "No exposed sensitive-data paths detected in the current snapshot."
+              : "Collect an environment to evaluate toxic access paths."}
+        </div>
+      )}
+      {hasMore && findings.length > 0 && (
         <div className="empty-line">
-          {graph.nodes.length
-            ? "No exposed sensitive-data paths detected in the current snapshot."
-            : "Collect an environment to evaluate toxic access paths."}
+          <Button
+            variant="outline"
+            size="small"
+            disabled={busy}
+            onClick={onLoadMore}
+          >
+            {busy ? "Loading…" : "Load more findings"}
+          </Button>
         </div>
       )}
     </section>

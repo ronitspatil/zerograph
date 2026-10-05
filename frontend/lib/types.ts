@@ -72,6 +72,7 @@ export interface GraphSearch {
   has_more: boolean;
 }
 export interface Overview {
+  revision: string;
   total_nhis: number;
   ai_agents: number;
   toxic_combinations: number;
