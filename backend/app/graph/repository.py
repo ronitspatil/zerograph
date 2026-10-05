@@ -11,6 +11,7 @@ from neo4j.exceptions import Neo4jError
 from app.core.config import get_settings
 from app.graph.exploration import (
     GraphSlice,
+    RevisionTotals,
     RevisionUnavailable,
     RootNotFound,
     cypher_explore,
@@ -34,12 +35,25 @@ class GraphStore(Protocol):
     def migrate(self) -> None: ...
     def publish(self, tenant: str, revision: str, snapshot: GraphSnapshot) -> None: ...
     def snapshot(self, tenant: str, revision: str) -> GraphSnapshot: ...
+    def node(self, tenant: str, revision: str, node_id: str) -> Node | None: ...
     def explore(
-        self, tenant: str, revision: str, root: str | None, node_limit: int, edge_limit: int
+        self,
+        tenant: str,
+        revision: str,
+        root: str | None,
+        node_limit: int,
+        edge_limit: int,
+        totals: RevisionTotals | None = None,
     ) -> GraphSlice: ...
     def search(self, tenant: str, revision: str, q: str, limit: int) -> tuple[list[Node], bool]: ...
     def roles(
-        self, tenant: str, revision: str, role_limit: int, edge_limit: int, cursor: str | None
+        self,
+        tenant: str,
+        revision: str,
+        role_limit: int,
+        edge_limit: int,
+        cursor: str | None,
+        totals: RevisionTotals | None = None,
     ) -> RoleMapSlice: ...
     def retention_candidates(
         self, tenant: str, protected: str, cutoff_ms: int, keep: int, limit: int
@@ -68,13 +82,28 @@ class MemoryGraphStore:
     def snapshot(self, tenant: str, revision: str) -> GraphSnapshot:
         return self.snapshots.get((tenant, revision), GraphSnapshot()).model_copy(deep=True)
 
+    def node(self, tenant: str, revision: str, node_id: str) -> Node | None:
+        snapshot = self.snapshots.get((tenant, revision)) if revision else None
+        found = next((node for node in snapshot.nodes if node.id == node_id), None) if snapshot else None
+        return found.model_copy(deep=True) if found else None
+
     def explore(
-        self, tenant: str, revision: str, root: str | None, node_limit: int, edge_limit: int
+        self,
+        tenant: str,
+        revision: str,
+        root: str | None,
+        node_limit: int,
+        edge_limit: int,
+        totals: RevisionTotals | None = None,
     ) -> GraphSlice:
         if revision and (tenant, revision) not in self.snapshots:
             raise RevisionUnavailable("Published graph revision unavailable")
         return memory_explore(
-            self.snapshots[(tenant, revision)] if revision else GraphSnapshot(), root, node_limit, edge_limit
+            self.snapshots[(tenant, revision)] if revision else GraphSnapshot(),
+            root,
+            node_limit,
+            edge_limit,
+            totals,
         )
 
     def search(self, tenant: str, revision: str, q: str, limit: int) -> tuple[list[Node], bool]:
@@ -83,7 +112,13 @@ class MemoryGraphStore:
         return memory_search(self.snapshots[(tenant, revision)] if revision else GraphSnapshot(), q, limit)
 
     def roles(
-        self, tenant: str, revision: str, role_limit: int, edge_limit: int, cursor: str | None
+        self,
+        tenant: str,
+        revision: str,
+        role_limit: int,
+        edge_limit: int,
+        cursor: str | None,
+        totals: RevisionTotals | None = None,
     ) -> RoleMapSlice:
         validate_role_bounds(role_limit, edge_limit, cursor)
         if revision and (tenant, revision) not in self.snapshots:
@@ -93,6 +128,7 @@ class MemoryGraphStore:
             role_limit,
             edge_limit,
             cursor,
+            totals,
         )
 
     def retention_candidates(
@@ -267,8 +303,33 @@ class CypherGraphStore:
             warnings=meta["warnings"] if meta else [],
         )
 
+    def node(self, tenant: str, revision: str, node_id: str) -> Node | None:
+        # One indexed lookup on the unique entity key instead of a full snapshot load.
+        if not revision or not 1 <= len(node_id) <= 512:
+            return None
+        with self.driver.session() as session:
+            row = session.execute_read(
+                unit_of_work(timeout=self.timeout)(
+                    lambda tx: tx.run(
+                        "MATCH (n:Entity {key:$key, tenant_id:$tenant, revision:$revision, id:$id}) "
+                        "RETURN n.payload AS payload LIMIT 1",
+                        key=json.dumps([tenant, revision, node_id]),
+                        tenant=tenant,
+                        revision=revision,
+                        id=node_id,
+                    ).single()
+                )
+            )
+        return Node.model_validate_json(row["payload"]) if row else None
+
     def explore(
-        self, tenant: str, revision: str, root: str | None, node_limit: int, edge_limit: int
+        self,
+        tenant: str,
+        revision: str,
+        root: str | None,
+        node_limit: int,
+        edge_limit: int,
+        totals: RevisionTotals | None = None,
     ) -> GraphSlice:
         validate_bounds(node_limit, edge_limit, root)
         if not revision:
@@ -278,7 +339,7 @@ class CypherGraphStore:
         with self.driver.session(fetch_size=500) as session:
             return session.execute_read(
                 unit_of_work(timeout=self.timeout)(
-                    lambda tx: cypher_explore(tx, tenant, revision, root, node_limit, edge_limit)
+                    lambda tx: cypher_explore(tx, tenant, revision, root, node_limit, edge_limit, totals)
                 )
             )
 
@@ -292,7 +353,13 @@ class CypherGraphStore:
             )
 
     def roles(
-        self, tenant: str, revision: str, role_limit: int, edge_limit: int, cursor: str | None
+        self,
+        tenant: str,
+        revision: str,
+        role_limit: int,
+        edge_limit: int,
+        cursor: str | None,
+        totals: RevisionTotals | None = None,
     ) -> RoleMapSlice:
         validate_role_bounds(role_limit, edge_limit, cursor)
         if not revision:
@@ -300,7 +367,7 @@ class CypherGraphStore:
         with self.driver.session(fetch_size=101) as session:
             return session.execute_read(
                 unit_of_work(timeout=self.timeout)(
-                    lambda tx: cypher_roles(tx, tenant, revision, role_limit, edge_limit, cursor)
+                    lambda tx: cypher_roles(tx, tenant, revision, role_limit, edge_limit, cursor, totals)
                 )
             )
 

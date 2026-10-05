@@ -13,6 +13,7 @@ from app.core.auth import Actor
 from app.core.config import get_settings
 from app.db.models import IngestionJob, SourceSnapshot, TenantState, now
 from app.db.session import audit, session_factory
+from app.graph.analysis import compute_analysis, store_analysis
 from app.graph.demo import demo_snapshot
 from app.graph.repository import get_graph_store
 from app.graph.schema import GraphSnapshot
@@ -209,10 +210,15 @@ def _publish_job(job_id: str, token: str, tenant: str, snapshot: GraphSnapshot) 
             source="combined",
         )
         combined = GraphSnapshot.model_validate(classification_edges(combined).model_dump())
+        # Whole-revision analysis runs once here, not on every dashboard read. A
+        # failure fails the attempt before any graph write.
+        analysis = compute_analysis(combined)
         revision = str(uuid4())
         # If SQL commit fails after graph commit, the immutable revision is an
         # orphan, never visible via TenantState. A retry publishes a new revision.
         get_graph_store().publish(tenant, revision, combined)
+        # Analysis rows commit atomically with the pointer swap below.
+        store_analysis(db, tenant, revision, analysis)
         state.revision = revision
         state.updated_at = now()
         job.status = "completed"
