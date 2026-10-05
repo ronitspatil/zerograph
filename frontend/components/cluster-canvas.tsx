@@ -207,6 +207,11 @@ export function ClusterCanvas({
         },
       },
       {
+        // The disc behind expanded members never lights up (WebGL picking ignores `events`).
+        selector: "node.expanded.hovered, node.expanded.selected",
+        css: { "background-opacity": 0.07, "border-width": 1.2 },
+      },
+      {
         selector: "node.member.selected, node.member.hovered",
         css: { "border-width": 0.8 },
       },
@@ -436,6 +441,7 @@ export function ClusterCanvas({
     labels();
     instance.on("pan zoom", schedule);
     instance.on("mouseover", "node", (event) => {
+      if (shown.has(event.target.id())) return;
       hovered = event.target.id();
       event.target.addClass("hovered");
       event.target.connectedEdges().addClass("hovered");
@@ -444,6 +450,7 @@ export function ClusterCanvas({
       labels();
     });
     instance.on("mouseout", "node", (event) => {
+      if (shown.has(event.target.id())) return;
       const member = memberNodes.has(event.target.id());
       hovered = null;
       event.target.removeClass("hovered");
@@ -499,6 +506,10 @@ export function ClusterCanvas({
         clusterDiameter(expansion.cluster.size, largest) / 2,
       );
       entry.radius = radius;
+      if (hovered === id) {
+        hovered = null;
+        hover.current?.(null);
+      }
       const fresh = expansion.nodes.filter((n) => !memberNodes.has(n.id));
       const where = new Map(spots.map((p) => [p.id, p]));
       // Neighbours that the disc now overlaps move aside; nothing else moves.
@@ -517,6 +528,7 @@ export function ClusterCanvas({
       instance.batch(() => {
         node.data("diameter", radius * 2).addClass("expanded");
         node.removeClass("label-on label-above hovered");
+        node.connectedEdges().removeClass("hovered");
         for (const target of moved) {
           const other = instance.getElementById(target.id);
           const now = other.position();

@@ -61,7 +61,9 @@ describe("WebGL renderer selection", () => {
     expect(container.childElementCount).toBe(0);
     const calls = vi
       .mocked(cytoscape)
-      .mock.calls.map(([options]) => options as Record<string, unknown>);
+      .mock.calls.map(
+        ([options]) => options as unknown as Record<string, unknown>,
+      );
     expect(calls[0].renderer).toEqual({ name: "canvas", webgl: true });
     expect(calls[1].renderer).toBeUndefined();
     // The large-view canvas fallback pans a cached texture.
@@ -77,8 +79,12 @@ describe("WebGL renderer selection", () => {
     const small = createGraph({}, false);
     expect(small.renderer).toBe("canvas");
     expect(
-      (vi.mocked(cytoscape).mock.calls.at(-1)![0] as Record<string, unknown>)
-        .textureOnViewport,
+      (
+        vi.mocked(cytoscape).mock.calls.at(-1)![0] as unknown as Record<
+          string,
+          unknown
+        >
+      ).textureOnViewport,
     ).toBeUndefined();
   });
 });
