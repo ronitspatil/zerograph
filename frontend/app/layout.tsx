@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import "./global-map.css";
 export const metadata: Metadata = {
   title: "ZeroGraph · Identity & Data Security",
   description: "Identity and data access security console.",

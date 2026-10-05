@@ -25,10 +25,7 @@ export function clusterLayoutInput(
   clusters: ClusterSummary[],
   links: ClusterLink[],
 ): { clusters: ClusterSummary[]; links: ClusterLink[] } | null {
-  if (
-    clusters.length > MAX_CLUSTER_NODES ||
-    links.length > MAX_CLUSTER_LINKS
-  )
+  if (clusters.length > MAX_CLUSTER_NODES || links.length > MAX_CLUSTER_LINKS)
     return null;
   const ids = new Set(clusters.map((c) => c.id));
   if (ids.size !== clusters.length) return null;
