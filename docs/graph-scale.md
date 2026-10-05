@@ -23,3 +23,25 @@ For each returned role, `role_summaries` reports distinct one-hop neighbor IDs i
 The endpoint reuses the SQL shared revision pin, timeout, viewer authorization and published-metadata failure policy above. Role selection and summaries query graph class labels rather than nonexistent scalar `type`/account fields. Parameterized aggregate queries scope both endpoints and relationships to tenant/revision, whitelist traversal types, and return bounded role/edge/summary payload rows without calling the full-snapshot adapter. Whole-revision counts come from the stored analysis row when present (scoped aggregates otherwise); distinct-neighbor aggregates may scan a role's adjacency; no constant-work or higher-capacity guarantee is implied.
 
 Memory/API and query-contract tests cover keyset paging, global discovery outside the initial sample, both directions, distinct neighbors, HumanUser/data class counts, annotation exclusion, visible edge bounds, missing metadata, revision conflicts, empty roles and workspace scope. An additional opt-in real-vendor parity test exercises label predicates, pagination and deliberately malformed cross-scope relationships. Memgraph/Neo4j execution requires disposable configured services; service-gated tests skipped locally are not runtime qualification.
+
+## Publication at scale (Phase 2)
+
+Large snapshots are uploaded through chunked NDJSON sessions and staged in PostgreSQL; publication streams the staged rows into an invisible `building` revision in bounded graph transactions and locks the tenant pointer only for the swap (details: [ingestion-upgrades.md](ingestion-upgrades.md), [graph-retention.md](graph-retention.md), [backup-restore.md](backup-restore.md)). `backend/scripts/qualify_publication.py` measures the whole path with each component in its own process: an API server receiving the chunked upload, one worker process per publication, two concurrent pollers reading `/graph/explore` (sample and hub neighborhood), `/overview` and `/findings` throughout, retention of a full-size revision, and a streamed backup of all revisions restored into a second, empty Memgraph and re-exported for a digest comparison.
+
+Measured 2026-10-04 on an M5 MacBook (10 cores, 16 GB), Memgraph 3.2.0 in Docker (colima VM: 4 CPU, 6 GB), PostgreSQL 16 (Homebrew), Python 3.12, synthetic enterprise fixture (`qualify_scale.generate`), three 100,000-node revisions:
+
+| | Revision 1 | Revision 2 | Revision 3 |
+|---|---|---|---|
+| Nodes / edges | 100,000 / 417,009 | 100,000 / 417,976 | 100,000 / 421,291 |
+| Upload (chunks, MB, s) | 29, 112 MB, 20.1 s | 29, 112 MB, 21.3 s | 30, 113 MB, 19.5 s |
+| Publish (worker) | 22.8 s | 28.2 s | 29.0 s |
+| of which edge / node writes, analysis | 9.3 / 2.2 / 7.4 s | 10.6 / 2.6 / 9.6 s | 11.5 / 3.1 / 8.7 s |
+| Pointer swap wait | 0.0 s | 0.35 s | 0.27 s |
+| Worker peak RSS | 318 MB | 319 MB | 313 MB |
+| Reads during publish (503s) | 21,801 (0) | 270 (0) | 258 (0) |
+| `/graph/explore` p50 / p95 | (empty tenant) | 419 / 469 ms | 446 / 569 ms |
+| `/overview` p95 | 2.4 ms | 4.1 ms | 4.0 ms |
+
+API peak RSS was 218 MB, so worker plus API peaked at 537 MB (3.75 GB for an in-process 100k publish before). Every read while replacing a revision returned 200. Retention deleted a full 100k revision in 1.9 s with no 503s. The streamed backup of all three revisions was 318 MB: export 27.9 s, validation 10.7 s, import 50.5 s, re-export 25.7 s, each under 140 MB peak RSS; the re-export is byte-identical to the archive. Memgraph resident memory grew to 1.86 GiB with three revisions (about 0.6 GiB per 100k revision of this shape); 20 tenants × 5 retained revisions at full size would need on the order of 60 GiB (inferred, not measured).
+
+Limits of this evidence: one machine, synthetic data, no network/TLS or Next.js proxy, no Redis broker (the worker is run directly; the 6 s `commit` time is the failed broker publish), no multi-worker or multi-tenant contention. Bounded exploration at 100k costs about 0.4–0.6 s per request on Memgraph (scoped scans; Phase 4 work). Neo4j passes the same functional integration tests but is not scale-qualified.
