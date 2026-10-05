@@ -4,6 +4,7 @@ Every test owns a random schema. No existing tables are modified or removed.
 """
 
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from threading import Barrier, Event
@@ -695,3 +696,51 @@ def test_abandoned_build_is_invisible_and_cleaned_once_stale(postgres_environmen
         "tenant", retention.RetentionPolicy(1, 2, 5), apply=True, timestamp=later
     )
     assert stale.deleted == [abandoned[1]] and not graph.building
+
+
+def test_new_readers_queue_behind_a_waiting_pointer_swap(postgres_environment, monkeypatch):
+    """Overlapping shared pins cannot starve publication: once the swap waits, a new
+    reader waits behind it and then reads the new revision."""
+    from app.api import routes
+    from app.api.routes import pin_revision
+
+    factory, graph = postgres_environment
+    monkeypatch.setattr(routes, "SNAPSHOT_LOCK_TIMEOUT_MS", 10_000)
+    built = Event()
+    original_finish = graph.finish_revision
+
+    def observed_finish(*args):
+        original_finish(*args)
+        built.set()
+
+    job_id = enqueue(factory)
+    with factory() as first, patch.object(graph, "finish_revision", side_effect=observed_finish):
+        assert pin_revision(first, "tenant") == "initial"
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            publish = pool.submit(tasks.process_job, job_id)
+            try:
+                assert built.wait(timeout=10)
+                # Wait until the swap is actually queued on the gate.
+                with factory() as probe:
+                    for _ in range(200):
+                        waiting = probe.scalar(
+                            text("SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND NOT granted")
+                        )
+                        if waiting:
+                            break
+                        time.sleep(0.01)
+                assert waiting
+
+                def second_reader():
+                    with factory() as db:
+                        return pin_revision(db, "tenant")
+
+                second = pool.submit(second_reader)
+                with pytest.raises(TimeoutError):
+                    second.result(timeout=0.3)  # Queued behind the swap, not joining the old pin.
+            finally:
+                first.commit()  # Never leave the publisher blocked if an assertion failed.
+            publish.result(timeout=10)
+            new = second.result(timeout=10)
+    with factory() as db:
+        assert new == db.get(TenantState, "tenant").revision != "initial"

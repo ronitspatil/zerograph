@@ -13,7 +13,7 @@ from app.collectors.mcp_agent_collector import MCPInventory, collect_mcp
 from app.collectors.publication import publish_sets
 from app.core.auth import Actor
 from app.core.config import get_settings
-from app.db.locks import acquire_publication_lock
+from app.db.locks import acquire_pointer_gate, acquire_publication_lock
 from app.db.models import IngestionJob, SourceSnapshot, TenantState, UploadSession, now
 from app.db.session import audit, session_factory
 from app.graph.analysis import store_analysis
@@ -253,6 +253,8 @@ def _publish_job(job_id: str, token: str, tenant: str, collected: GraphSnapshot 
         if previous and previous != set_id:
             staging.delete_set(db, previous)
         # Short pointer lock: waits only for readers' shared pins, then commits.
+        # The gate makes new readers queue behind this swap instead of starving it.
+        acquire_pointer_gate(db, tenant)
         state = db.execute(
             select(TenantState).where(TenantState.tenant_id == tenant).with_for_update()
         ).scalar_one()

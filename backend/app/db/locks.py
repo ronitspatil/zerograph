@@ -19,3 +19,28 @@ def acquire_publication_lock(db: Session, tenant: str) -> None:
             text("SELECT pg_advisory_xact_lock(:namespace, hashtext(:tenant))"),
             {"namespace": PUBLICATION_LOCK_NAMESPACE, "tenant": tenant},
         )
+
+
+# Pointer gate: readers hold it shared for their request transaction (with their
+# FOR SHARE pin) and a publisher takes it exclusively just before the swap. Unlike
+# row share locks, which new readers can keep joining while an exclusive locker
+# waits, heavyweight lock requests queue fairly: once a swap is waiting, new
+# readers wait behind it (bounded by their lock timeout), so continuous
+# overlapping reads cannot starve publication.
+POINTER_GATE_NAMESPACE = 0x5A48
+
+
+def pin_pointer_gate(db: Session, tenant: str) -> None:
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(
+            text("SELECT pg_advisory_xact_lock_shared(:namespace, hashtext(:tenant))"),
+            {"namespace": POINTER_GATE_NAMESPACE, "tenant": tenant},
+        )
+
+
+def acquire_pointer_gate(db: Session, tenant: str) -> None:
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(
+            text("SELECT pg_advisory_xact_lock(:namespace, hashtext(:tenant))"),
+            {"namespace": POINTER_GATE_NAMESPACE, "tenant": tenant},
+        )

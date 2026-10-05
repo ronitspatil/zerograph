@@ -17,6 +17,7 @@ from app.collectors.mcp_agent_collector import MCPInventory
 from app.collectors.tasks import ingest
 from app.core.auth import Actor, require_role
 from app.core.config import get_settings
+from app.db.locks import pin_pointer_gate
 from app.db.models import AuditEvent, IngestionJob, Remediation, StagedEntity, TenantState, UploadSession, now
 from app.db.session import audit, get_db
 from app.engine.blast_radius import BlastRadius, calculate
@@ -69,6 +70,7 @@ def pin_revision(db: Session, tenant: str) -> str:
             {"timeout": f"{SNAPSHOT_LOCK_TIMEOUT_MS}ms"},
         )
     try:
+        pin_pointer_gate(db, tenant)
         state = db.execute(
             select(TenantState)
             .where(TenantState.tenant_id == tenant)

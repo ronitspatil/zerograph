@@ -43,13 +43,31 @@ WORKER = """
 import json, resource, sys, time
 from loguru import logger
 logger.remove()
-from app.collectors.tasks import process_job
+from app.collectors import publication, tasks
+from app.graph.compact import CompactGraph
+from app.graph.repository import CypherGraphStore
+phases = {}
+def timed(owner, name):
+    original = getattr(owner, name)
+    def wrapper(*args, **kwargs):
+        started = time.perf_counter()
+        try:
+            return original(*args, **kwargs)
+        finally:
+            phases[name] = phases.get(name, 0.0) + time.perf_counter() - started
+    setattr(owner, name, wrapper)
+for name in ("begin_revision", "write_nodes", "write_edges", "finish_revision"):
+    timed(CypherGraphStore, name)
+timed(CompactGraph, "analyze")
+timed(publication, "check_conflicts")
+timed(publication, "check_caps")
+timed(tasks, "store_analysis")
 started = time.perf_counter()
-process_job(sys.argv[1])
+tasks.process_job(sys.argv[1])
 print(json.dumps({"seconds": time.perf_counter() - started,
+                  "phases": {k: round(v, 2) for k, v in phases.items()},
                   "maxrss": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}))
 """
-
 
 def rss_bytes(value: int) -> int:
     # macOS reports ru_maxrss in bytes, Linux in KiB.
@@ -339,6 +357,7 @@ def main() -> None:
                 "seconds": round(measured["seconds"], 2),
                 "process_seconds": worker["seconds"],
                 "worker_peak_rss_mb": round(rss_bytes(measured["maxrss"]) / 2**20, 1),
+                "phases_s": measured["phases"],
             }
             entry["readers_during_publish"] = poller.summary()
             job = client.get(f"/api/v1/ingestions/{job_id}").json()

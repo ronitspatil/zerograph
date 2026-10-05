@@ -4,6 +4,7 @@ import { RefreshCw } from "lucide-react";
 import type { Job } from "@/lib/types";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
+import { byteLength, INLINE_LIMIT_BYTES, uploadSnapshot } from "@/lib/upload";
 export function Sources({
   jobs,
   onRefresh,
@@ -17,24 +18,40 @@ export function Sources({
   const [payload, setPayload] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState("");
+  const [fileText, setFileText] = useState<string | null>(null);
   async function submit() {
     setBusy(true);
     setError("");
     try {
-      await api("ingestions", {
-        method: "POST",
-        body: JSON.stringify({
-          source,
-          payload: source === "aws" ? {} : JSON.parse(payload),
-        }),
-      });
+      // Large graph snapshots go through a chunked upload session; the
+      // single-body endpoint is limited to 4 MB by the proxy and API.
+      const text = source === "snapshot" && fileText !== null ? fileText : payload;
+      if (source === "snapshot" && byteLength(text) > INLINE_LIMIT_BYTES) {
+        await uploadSnapshot(JSON.parse(text), (sent, total) =>
+          setProgress(`Uploading chunk ${Math.min(sent + 1, total)} of ${total}`),
+        );
+      } else {
+        await api("ingestions", {
+          method: "POST",
+          body: JSON.stringify({
+            source,
+            payload: source === "aws" ? {} : JSON.parse(text),
+          }),
+        });
+      }
       setPayload("");
+      setFileText(null);
       onRefresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Ingestion failed");
     } finally {
       setBusy(false);
+      setProgress("");
     }
+  }
+  async function loadFile(file: File | undefined) {
+    setFileText(file ? await file.text() : null);
   }
   return (
     <section>
@@ -90,13 +107,34 @@ export function Sources({
             />
           </label>
         )}
+        {source === "snapshot" && (
+          <label>
+            Snapshot file
+            <input
+              type="file"
+              accept=".json,application/json"
+              onChange={(e) => void loadFile(e.target.files?.[0])}
+            />
+            <small className="muted">
+              Files over 3 MB upload in chunks (up to the configured node and
+              edge limits).
+            </small>
+          </label>
+        )}
+        {progress && <p className="muted">{progress}</p>}
         {error && (
           <p role="alert" className="error-banner">
             {error}
           </p>
         )}
         <Button
-          disabled={busy || !canAdmin || (source !== "aws" && !payload)}
+          disabled={
+            busy ||
+            !canAdmin ||
+            (source !== "aws" &&
+              !payload &&
+              !(source === "snapshot" && fileText))
+          }
           onClick={submit}
         >
           {busy ? "Queuing…" : "Queue ingestion"}
