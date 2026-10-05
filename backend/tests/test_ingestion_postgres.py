@@ -395,7 +395,9 @@ def test_retention_refuses_deletion_when_durable_intent_commit_fails(postgres_en
         assert db.scalar(select(AuditEvent)) is None
 
 
-def test_api_reader_pin_blocks_only_the_pointer_swap_and_never_its_revision(postgres_environment, monkeypatch):
+def test_api_reader_pin_blocks_only_the_pointer_swap_and_never_its_revision(
+    postgres_environment, monkeypatch
+):
     """Short-lock contract: a reader's shared pin delays only a publisher's pointer
     swap. The new revision is built while the reader runs, and retention proceeds
     without waiting, but never deletes the pinned (current) revision."""
@@ -561,3 +563,135 @@ def test_stored_analysis_read_under_pointer_pin_blocks_publication(postgres_envi
         assert current != "pinned"
         assert stored_analysis(db, "tenant", current).overview["data_assets"] == 1
         assert stored_analysis(db, "tenant", "pinned").total_findings == 1
+
+
+def api_client(factory, graph, tenant="tenant", roles=frozenset({"viewer", "analyst", "admin"})):
+    from fastapi.testclient import TestClient
+
+    from app.core.auth import Actor, current_actor
+    from app.db.session import get_db
+    from app.graph.repository import get_graph_store
+    from app.main import create_app
+
+    def reader_db():
+        with factory() as db:
+            yield db
+
+    app = create_app()
+    app.dependency_overrides[get_db] = reader_db
+    app.dependency_overrides[get_graph_store] = lambda: graph
+    app.dependency_overrides[current_actor] = lambda: Actor("actor", tenant, roles)
+    return TestClient(app)
+
+
+def test_readers_and_retention_during_a_long_build(postgres_environment, monkeypatch):
+    """Zero read outage while a revision builds; retention fails fast on the lock."""
+    from app.api import routes
+    from app.graph import retention
+
+    factory, graph = postgres_environment
+    graph.publish("tenant", "pinned", exposed())
+    with factory() as db:
+        store_analysis(db, "tenant", "pinned", compute_analysis(exposed()))
+        db.get(TenantState, "tenant").revision = "pinned"
+        db.commit()
+    monkeypatch.setattr(routes, "SNAPSHOT_LOCK_TIMEOUT_MS", 50)
+    monkeypatch.setattr(retention, "session_factory", lambda: factory)
+    monkeypatch.setattr(retention, "get_graph_store", lambda: graph)
+    monkeypatch.setattr(retention, "LOCK_TIMEOUT", "100ms")
+    building, release = Event(), Event()
+    original = graph.write_nodes
+
+    def paused(*args, **kwargs):
+        building.set()
+        assert release.wait(timeout=10)
+        return original(*args, **kwargs)
+
+    job_id = enqueue(factory)
+    with patch.object(graph, "write_nodes", side_effect=paused), ThreadPoolExecutor(max_workers=1) as pool:
+        publish = pool.submit(tasks.process_job, job_id)
+        assert building.wait(timeout=10)
+        with api_client(factory, graph) as client:
+            for path in ("graph/explore", "overview", "findings", "graph/roles", "graph/search?q=a"):
+                response = client.get(f"/api/v1/{path}")
+                assert response.status_code == 200, (path, response.text)
+            assert client.get("/api/v1/graph/explore").json()["revision"] == "pinned"
+        with pytest.raises(ValueError, match="in progress"):
+            retention.prune_revisions("tenant", retention.RetentionPolicy(1, 2, 1), apply=True)
+        release.set()
+        publish.result(timeout=10)
+    with factory() as db:
+        assert db.get(TenantState, "tenant").revision != "pinned"
+
+
+def test_chunked_upload_and_sql_conflict_detection_on_postgres(postgres_environment):
+    import json
+
+    factory, graph = postgres_environment
+    snapshot = exposed()
+    lines = [json.dumps({"node": n.model_dump(mode="json")}) for n in snapshot.nodes]
+    lines += [json.dumps({"edge": e.model_dump(mode="json")}) for e in snapshot.edges]
+    with api_client(factory, graph) as client, patch("app.api.routes.ingest.delay"):
+        upload_id = client.post("/api/v1/ingestions/uploads", json={}).json()["id"]
+        assert (
+            client.put(f"/api/v1/ingestions/uploads/{upload_id}/chunks/0", content=lines[0]).status_code
+            == 200
+        )
+        duplicate = client.put(f"/api/v1/ingestions/uploads/{upload_id}/chunks/1", content=lines[0])
+        assert duplicate.status_code == 422
+        body = "\n".join(lines[1:]).encode()
+        assert client.put(f"/api/v1/ingestions/uploads/{upload_id}/chunks/1", content=body).status_code == 200
+        job = client.post(f"/api/v1/ingestions/uploads/{upload_id}/commit").json()
+    tasks.process_job(job["id"])
+    with factory() as db:
+        revision = db.get(TenantState, "tenant").revision
+        assert db.get(RevisionAnalysis, ("tenant", revision)).total_findings == 1
+    assert {n.id for n in graph.snapshot("tenant", revision).nodes} == {"agent", "data"}
+    conflicting = GraphSnapshot(nodes=[Node(id="data", name="other", type=NodeType.DATABASE)])
+    job_id = str(uuid4())
+    with factory() as db:
+        db.add(
+            IngestionJob(
+                id=job_id,
+                tenant_id="tenant",
+                actor="a",
+                source="other",
+                payload=conflicting.model_dump(mode="json"),
+            )
+        )
+        db.commit()
+    with (
+        patch.object(tasks, "collect", return_value=conflicting),
+        pytest.raises(ValueError, match="Conflicting"),
+    ):
+        tasks.process_job(job_id)
+    with factory() as db:
+        assert db.get(TenantState, "tenant").revision == revision
+
+
+def test_abandoned_build_is_invisible_and_cleaned_once_stale(postgres_environment, monkeypatch):
+    from datetime import UTC, datetime
+
+    from app.graph import retention
+
+    factory, graph = postgres_environment
+    monkeypatch.setattr(retention, "session_factory", lambda: factory)
+    monkeypatch.setattr(retention, "get_graph_store", lambda: graph)
+    job_id = enqueue(factory)
+    with patch.object(graph, "write_edges", side_effect=RuntimeError("worker died")):
+        with patch.object(graph, "finish_revision", side_effect=RuntimeError("worker died")):
+            with pytest.raises(RuntimeError):
+                tasks.process_job(job_id)
+    (abandoned,) = list(graph.building)
+    with factory() as db:
+        assert db.get(TenantState, "tenant").revision == "initial"
+    timestamp = datetime.now(UTC)
+    young = retention.prune_revisions(
+        "tenant", retention.RetentionPolicy(1, 2, 5), apply=True, timestamp=timestamp
+    )
+    assert young.deleted == [] and abandoned in graph.building
+    later = timestamp + retention.STALE_BUILDING_AGE + timedelta(minutes=1)
+    stale = retention.prune_revisions(
+        "tenant", retention.RetentionPolicy(1, 2, 5), apply=True, timestamp=later
+    )
+    assert stale.deleted == [abandoned[1]] and not graph.building

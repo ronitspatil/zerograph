@@ -428,16 +428,16 @@ def test_real_batched_publication_building_state_and_batched_delete(monkeypatch)
             store.write_edges(
                 tenant,
                 "partial",
-                [edge_row(e) for e in snapshot.edges if e.source not in {n.id for n in snapshot.nodes[:150]}][:5],
+                [edge_row(e) for e in snapshot.edges if e.source not in {n.id for n in snapshot.nodes[:150]}][
+                    :5
+                ],
             )
         future = 2**62
         found = {c.revision: c.state for c in store.retention_candidates(tenant, "", future, 2, 50, None)}
         assert "partial" not in found
         stale = {c.revision: c.state for c in store.retention_candidates(tenant, "", future, 2, 50, future)}
         assert stale == {"partial": "building"}
-        created = next(
-            c.created_at_ms for c in store.retention_candidates(tenant, "", future, 2, 50, future)
-        )
+        created = next(c.created_at_ms for c in store.retention_candidates(tenant, "", future, 2, 50, future))
         # A ready-state delete request cannot remove a building revision, and vice versa.
         assert not store.delete_revision(tenant, "partial", created, future, "ready")
         assert store.delete_revision(tenant, "partial", created, future, "building")

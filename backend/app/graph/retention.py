@@ -27,6 +27,8 @@ from app.graph.repository import RevisionMetadata, _validate_retention_bounds, g
 # Longer than the ingestion lease (21 minutes) and hard task limit: an older
 # "building" revision has no live publisher (and the publication lock proves it).
 STALE_BUILDING_AGE = timedelta(hours=1)
+# Waiting longer than this for a running publication fails the run (retry later).
+LOCK_TIMEOUT = "5s"
 
 
 @dataclass(frozen=True)
@@ -72,7 +74,7 @@ def prune_revisions(
         if apply and db.get_bind().dialect.name != "postgresql":
             raise ValueError("Applied retention requires PostgreSQL publication locks")
         if db.get_bind().dialect.name == "postgresql":
-            db.execute(text("SET LOCAL lock_timeout = '5s'"))
+            db.execute(text("SELECT set_config('lock_timeout', :timeout, true)"), {"timeout": LOCK_TIMEOUT})
         # Publishers hold this lock for a whole build, so no revision is under
         # construction and the pointer cannot advance until this transaction ends.
         # The shared row lock also excludes any writer that predates the advisory
