@@ -55,7 +55,7 @@ Knowledge graph → **Global map** (next to Identity & data and Role map) draws 
 | Entities keeping their top-level / leaf cluster ID | 98.5% / 86.4% |
 | Clustering added to publication | 5.66 s cold, 3.2 s warm (Louvain + hierarchy 4.553 / 1.878 s, rows 1.101 / 1.015 s) |
 | Worker peak RSS | 409.1 / 391.1 MB |
-| Readers during the second publication | {'200': 5643} (cluster map and explore pollers) |
+| Readers during the second publication | 5,643 requests, all 200 (cluster map and explore pollers) |
 | Retention | deleted revision 1 and all its cluster rows |
 
 ## Bounded exploration on Memgraph
