@@ -151,13 +151,18 @@ def entity_key(tenant: str, revision: str, node_id: str) -> str:
     return json.dumps([tenant, revision, node_id])
 
 
+# Scope filters on key-anchored queries sit behind WITH: given a WHERE on tenant_id or
+# revision, Memgraph's planner prefers that (non-unique) index over the unique key and
+# scans the whole tenant or revision (measured 3.1 s instead of 2.6 ms at 100k).
+
+
 def cypher_nodes(tx, tenant: str, revision: str, ids: list[str]) -> list[Node]:
     """Nodes by unique entity key (one index seek each), ascending by ID."""
     if not ids:
         return []
     rows = tx.run(
         "UNWIND $keys AS key MATCH (n:Entity {key:key}) "
-        "WHERE n.tenant_id=$tenant AND n.revision=$revision "
+        "WITH n WHERE n.tenant_id=$tenant AND n.revision=$revision "
         "RETURN n.payload AS payload ORDER BY n.id",
         keys=[entity_key(tenant, revision, node_id) for node_id in ids],
         tenant=tenant,
@@ -216,8 +221,8 @@ def cypher_explore(
     else:
         key = entity_key(tenant, revision, root)
         row = tx.run(
-            "MATCH (n:Entity {key:$key}) WHERE n.tenant_id=$tenant AND n.revision=$revision AND n.id=$root "
-            "RETURN n.payload AS payload LIMIT 1",
+            "MATCH (n:Entity {key:$key}) WITH n WHERE n.tenant_id=$tenant AND n.revision=$revision "
+            "AND n.id=$root RETURN n.payload AS payload LIMIT 1",
             **params,
             root=root,
             key=key,
@@ -228,8 +233,8 @@ def cypher_explore(
         if node_limit > 1:
             # Anchored on the root's unique key: cost is the root's degree.
             rows = tx.run(
-                f"MATCH (s:Entity {{key:$key}})-[r:{EDGE_TYPES}]-(n:Entity) "
-                "WHERE n.id <> $root AND n.tenant_id=$tenant AND n.revision=$revision "
+                f"MATCH (s:Entity {{key:$key}}) WITH s MATCH (s)-[r:{EDGE_TYPES}]-(n:Entity) "
+                "WITH n, r WHERE n.id <> $root AND n.tenant_id=$tenant AND n.revision=$revision "
                 "AND r.tenant_id=$tenant AND r.revision=$revision WITH DISTINCT n "
                 "RETURN n.payload AS payload ORDER BY n.id LIMIT $limit",
                 **params,
