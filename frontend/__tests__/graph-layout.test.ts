@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   circlePositions,
+  DETAIL_ZOOM,
+  fitViewport,
+  labelCandidates,
+  labelFontSize,
+  MAX_FIT_ZOOM,
+  OVERVIEW_ALL_LABELS_MAX_NODES,
   overviewAnchors,
   spacedLabels,
   layoutInput,
@@ -179,4 +185,136 @@ it("thins dense role labels using rendered boxes, priority, viewport and breathi
   expect([...spacedLabels([boxes[1], boxes[0], boxes[2]], 300, 100)]).toEqual([
     "overlap",
   ]);
+});
+
+describe("graph label legibility", () => {
+  const node = (id: string, type: "CloudRole" | "AIAgent" = "AIAgent") => ({
+    id,
+    name: id,
+    type,
+    provider: "fixture",
+    account_id: "a",
+    sensitivity: "internal" as const,
+    tags: [],
+    internet_exposed: false,
+    authenticated: true,
+    encrypted: true,
+    privileged: false,
+    metadata: {},
+  });
+  const edge = (source: string, target: string) => ({
+    id: `${source}-${target}`,
+    source,
+    target,
+    type: "CAN_READ" as const,
+    actions: [],
+    certainty: "confirmed" as const,
+    evidence: [],
+  });
+
+  it("keeps labels one screen size at every zoom, shrinking only far out", () => {
+    for (const zoom of [0.5, 1, 1.8, 2.5])
+      expect(labelFontSize(11, zoom) * zoom).toBeCloseTo(11);
+    expect(labelFontSize(11, 0.05) * 0.05).toBeLessThan(11);
+    expect(labelFontSize(11, 0)).toBe(11);
+  });
+
+  it("orders candidates by role anchors, then visible degree, with focus always shown", () => {
+    const graph = {
+      revision: "r",
+      nodes: [node("leaf"), node("hub"), node("role", "CloudRole")],
+      edges: [edge("hub", "leaf"), edge("hub", "role")],
+      warnings: [],
+    };
+    const anchors = overviewAnchors(graph);
+    expect(labelCandidates(graph, anchors, { zoom: 1, focus: null })).toEqual({
+      order: ["role", "hub", "leaf"],
+      required: new Set(),
+    });
+    const focused = labelCandidates(graph, anchors, {
+      zoom: 1,
+      focus: "leaf",
+      neighbors: ["hub"],
+    });
+    expect(focused.order).toEqual(["leaf", "hub"]);
+    expect(focused.required).toEqual(new Set(["leaf", "hub"]));
+  });
+
+  it("labels only anchors at overview for role maps and large slices, everything when zoomed in", () => {
+    const big = {
+      revision: "r",
+      nodes: [
+        node("role", "CloudRole"),
+        ...Array.from({ length: OVERVIEW_ALL_LABELS_MAX_NODES }, (_, i) =>
+          node(`n${i}`),
+        ),
+      ],
+      edges: [],
+      warnings: [],
+    };
+    const anchors = overviewAnchors(big);
+    expect(
+      labelCandidates(big, anchors, { zoom: 1, focus: null }).order,
+    ).toEqual(["role"]);
+    expect(
+      labelCandidates(big, anchors, { zoom: DETAIL_ZOOM + 0.1, focus: null })
+        .order,
+    ).toHaveLength(big.nodes.length);
+    const roles = {
+      ...big,
+      nodes: big.nodes.slice(0, 3),
+      view: { mode: "roles" as const },
+    };
+    expect(
+      labelCandidates(roles, overviewAnchors(roles), { zoom: 1, focus: null })
+        .order,
+    ).toEqual(["role"]);
+  });
+
+  it("always keeps required labels and keeps optional labels off them and off other nodes", () => {
+    const boxes = [
+      { id: "root", x1: 0, y1: 10, x2: 80, y2: 20 },
+      { id: "neighbor", x1: 40, y1: 12, x2: 120, y2: 22 },
+      { id: "collides", x1: 70, y1: 10, x2: 150, y2: 20 },
+      { id: "covers-dot", x1: 200, y1: 40, x2: 260, y2: 50 },
+      { id: "free", x1: 200, y1: 80, x2: 260, y2: 90 },
+      { id: "own-dot", x1: 300, y1: 40, x2: 360, y2: 50 },
+    ];
+    const obstacles = [
+      { id: "other", x1: 228, y1: 43, x2: 232, y2: 47 },
+      { id: "own-dot", x1: 328, y1: 38, x2: 332, y2: 42 },
+    ];
+    expect([
+      ...spacedLabels(boxes, 400, 100, {
+        required: new Set(["root", "neighbor"]),
+        obstacles,
+      }),
+    ]).toEqual(["root", "neighbor", "free", "own-dot"]);
+    // Required labels survive even when clipped by the viewport edge.
+    expect([
+      ...spacedLabels(
+        [{ id: "edge", x1: -10, y1: 0, x2: 50, y2: 10 }],
+        40,
+        40,
+        {
+          required: new Set(["edge"]),
+        },
+      ),
+    ]).toEqual(["edge"]);
+  });
+
+  it("fits with label and legend room and caps zoom for small slices", () => {
+    const small = fitViewport({ x1: 0, y1: 0, x2: 10, y2: 10 }, 1000, 500);
+    expect(small.zoom).toBe(MAX_FIT_ZOOM);
+    expect(small.pan.x + 5 * small.zoom).toBeCloseTo(500);
+    const wide = fitViewport({ x1: -500, y1: -50, x2: 500, y2: 50 }, 1000, 500);
+    // Leftmost and rightmost nodes keep room for half a label on each side.
+    expect(wide.pan.x + -500 * wide.zoom).toBeGreaterThanOrEqual(80);
+    expect(wide.pan.x + 500 * wide.zoom).toBeLessThanOrEqual(920);
+    const tall = fitViewport({ x1: 0, y1: -500, x2: 10, y2: 500 }, 1000, 500);
+    expect(tall.pan.y + 500 * tall.zoom).toBeLessThanOrEqual(500 - 64);
+    expect(
+      fitViewport({ x1: 0, y1: 0, x2: 1e9, y2: 1 }, 1000, 500, 0.05).zoom,
+    ).toBe(0.05);
+  });
 });
