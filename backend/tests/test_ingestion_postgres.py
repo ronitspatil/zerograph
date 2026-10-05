@@ -15,7 +15,17 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import sessionmaker
 
 from app.collectors import tasks
-from app.db.models import AuditEvent, Base, IngestionJob, SourceSnapshot, TenantState, now
+from app.db.models import (
+    AuditEvent,
+    Base,
+    IngestionJob,
+    RevisionAnalysis,
+    RevisionFinding,
+    SourceSnapshot,
+    TenantState,
+    now,
+)
+from app.graph.analysis import compute_analysis, store_analysis
 from app.graph.repository import MemoryGraphStore
 from app.graph.schema import GraphSnapshot, Node, NodeType
 
@@ -47,6 +57,25 @@ def postgres_environment(monkeypatch):
         with admin.begin() as connection:
             connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
         admin.dispose()
+
+
+def exposed():
+    """One exposed agent reaching restricted data, so analysis stores findings rows."""
+    return GraphSnapshot.model_validate(
+        {
+            "nodes": [
+                {
+                    "id": "agent",
+                    "name": "agent",
+                    "type": "AIAgent",
+                    "internet_exposed": True,
+                    "authenticated": False,
+                },
+                {"id": "data", "name": "data", "type": "Database", "sensitivity": "restricted"},
+            ],
+            "edges": [{"source": "agent", "target": "data", "type": "CAN_READ"}],
+        }
+    )
 
 
 def enqueue(factory, source="snapshot"):
@@ -104,6 +133,11 @@ def test_concurrent_publishers_preserve_both_sources(postgres_environment):
     with factory() as db:
         revision = db.get(TenantState, "tenant").revision
         assert {row.source for row in db.scalars(select(SourceSnapshot))} == {"one", "two"}
+        # Each serialized publication committed its own analysis with its pointer swap.
+        rows = {row.revision: row for row in db.scalars(select(RevisionAnalysis))}
+        assert set(rows) == {r for (_, r) in graph.snapshots} and len(rows) == 2
+        assert rows[revision].overview["data_assets"] == 2
+        assert rows[revision].total_nodes == 2
     assert {n.id for n in graph.snapshot("tenant", revision).nodes} == {"one", "two"}
 
 
@@ -204,6 +238,10 @@ def test_postgres_upgrade_preserves_legacy_outbox(postgres_environment, monkeypa
         assert "ix_ingestion_jobs_dispatch" in {
             i["name"] for i in inspect(engine).get_indexes("ingestion_jobs")
         }
+        assert {"revision_analysis", "revision_findings"} <= set(inspect(engine).get_table_names())
+        assert "ux_revision_findings_finding" in {
+            i["name"] for i in inspect(engine).get_indexes("revision_findings")
+        }
         tasks._recover_expired(now())
         assert tasks._claim_job("legacy")
     finally:
@@ -218,9 +256,12 @@ def test_retention_protects_publication_pointer_with_real_tenant_lock(postgres_e
     factory, graph = postgres_environment
     # Old revisions and pointer are synthetic and scoped to this disposable schema.
     for index in range(8):
-        graph.publish("tenant", f"old-{index}", GraphSnapshot())
+        graph.publish("tenant", f"old-{index}", exposed())
         graph.created_at["tenant", f"old-{index}"] = index + 1
     with factory() as db:
+        for index in range(8):
+            store_analysis(db, "tenant", f"old-{index}", compute_analysis(exposed()))
+        store_analysis(db, "other", "old-5", compute_analysis(exposed()))
         db.get(TenantState, "tenant").revision = "old-0"
         db.commit()
     monkeypatch.setattr(retention, "session_factory", lambda: factory)
@@ -266,6 +307,13 @@ def test_retention_protects_publication_pointer_with_real_tenant_lock(postgres_e
         assert state.revision not in {"old-5", "old-0"}
         assert graph.snapshot("tenant", state.revision).nodes
         assert db.scalar(select(AuditEvent).where(AuditEvent.action == "graph.revision_deleted"))
+        # Analysis rows left with the deleted revision only; the other tenant's
+        # same-named revision, retained revisions and the new publication remain.
+        analyzed = {(row.tenant_id, row.revision) for row in db.scalars(select(RevisionAnalysis))}
+        assert ("tenant", "old-5") not in analyzed
+        assert {("other", "old-5"), ("tenant", "old-0"), ("tenant", state.revision)} <= analyzed
+        finding_scopes = {(row.tenant_id, row.revision) for row in db.scalars(select(RevisionFinding))}
+        assert ("tenant", "old-5") not in finding_scopes and ("other", "old-5") in finding_scopes
 
 
 def test_retention_missing_or_recent_revisions_are_not_deleted(postgres_environment, monkeypatch):
@@ -296,6 +344,9 @@ def test_retention_intent_survives_graph_commit_and_completion_commit_failure(
     for index in range(5):
         graph.publish("tenant", f"old-{index}", GraphSnapshot())
         graph.created_at["tenant", f"old-{index}"] = index + 1
+    with factory() as db:
+        store_analysis(db, "tenant", "old-2", compute_analysis(exposed()))
+        db.commit()
     original_commit = Session.commit
 
     def fail_completion(db):
@@ -315,6 +366,10 @@ def test_retention_intent_survives_graph_commit_and_completion_commit_failure(
         assert intent.detail["operation_id"]
         assert db.scalar(select(AuditEvent).where(AuditEvent.action == "graph.revision_deleted")) is None
         assert db.get(TenantState, "tenant").revision == "initial"
+        # The analysis delete rolled back with the completion record. The rows
+        # are unreachable (no pointer can name a deleted revision) and a retry
+        # of the same revision is skipped, so they are inert, not visible data.
+        assert db.get(RevisionAnalysis, ("tenant", "old-2")) is not None
 
 
 def test_retention_refuses_deletion_when_durable_intent_commit_fails(postgres_environment, monkeypatch):
@@ -462,6 +517,9 @@ def test_api_pointer_pin_timeout_returns_sanitized_retry_response(postgres_envir
             select(TenantState).where(TenantState.tenant_id == "tenant").with_for_update()
         ).scalar_one()
         with TestClient(app) as client:
+            for path in ("overview", "findings"):
+                busy = client.get(f"/api/v1/{path}")
+                assert busy.status_code == 503 and busy.headers["retry-after"] == "5"
             response = client.get("/api/v1/graph")
         assert response.status_code == 503
         assert response.headers["retry-after"] == "5"
@@ -470,3 +528,34 @@ def test_api_pointer_pin_timeout_returns_sanitized_retry_response(postgres_envir
         assert "55P03" not in response.text
     with TestClient(app) as client:
         assert client.get("/api/v1/graph").status_code == 200
+
+
+def test_stored_analysis_read_under_pointer_pin_blocks_publication(postgres_environment):
+    from app.api.routes import pin_revision
+    from app.graph.analysis import stored_analysis, stored_findings_page
+
+    factory, graph = postgres_environment
+    graph.publish("tenant", "pinned", exposed())
+    with factory() as db:
+        store_analysis(db, "tenant", "pinned", compute_analysis(exposed()))
+        db.get(TenantState, "tenant").revision = "pinned"
+        db.commit()
+    job_id = enqueue(factory)
+    with factory() as reader:
+        revision = pin_revision(reader, "tenant")
+        row = stored_analysis(reader, "tenant", revision)
+        assert revision == "pinned" and row.total_findings == 1
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            publish = pool.submit(tasks.process_job, job_id)
+            # The publisher's pointer swap and analysis insert wait for the reader's share lock.
+            with pytest.raises(TimeoutError):
+                publish.result(timeout=0.3)
+            page, more = stored_findings_page(reader, "tenant", revision, None, 10)
+            assert [finding["target"] for finding in page] == ["data"] and not more
+            reader.commit()
+            publish.result(timeout=10)
+    with factory() as db:
+        current = db.get(TenantState, "tenant").revision
+        assert current != "pinned"
+        assert stored_analysis(db, "tenant", current).overview["data_assets"] == 1
+        assert stored_analysis(db, "tenant", "pinned").total_findings == 1
