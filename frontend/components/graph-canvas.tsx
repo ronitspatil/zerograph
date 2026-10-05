@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef } from "react";
-import cytoscape, { type Core, type StylesheetCSS } from "cytoscape";
+import type { Core, StylesheetCSS } from "cytoscape";
 import { Maximize2, Minus, Plus } from "lucide-react";
 import {
   circlePositions,
@@ -12,6 +12,7 @@ import {
   overviewAnchors,
   spacedLabels,
 } from "@/lib/graph-layout";
+import { createGraph, WEBGL_MIN_NODES } from "@/lib/renderer";
 import type { GraphData, GraphNode, Simulation } from "@/lib/types";
 
 export const nodeColors: Record<string, string> = {
@@ -179,28 +180,32 @@ export function GraphCanvas({
       },
       { selector: ".dimmed", css: { opacity: 0.16 } },
     ];
-    cy.current = cytoscape({
-      container: container.current,
-      elements: [
-        ...graph.nodes.map((n, i) => ({
-          data: {
-            id: n.id,
-            label: n.name,
-            color: nodeColors[n.type],
-            type: n.type,
-          },
-          position: { x: positions[i].x, y: positions[i].y },
-        })),
-        ...graph.edges.map((e) => ({
-          data: { ...e, label: e.type.replaceAll("_", " ").toLowerCase() },
-        })),
-      ],
-      style,
-      layout: { name: "preset", fit: false },
-      minZoom: 0.05,
-      maxZoom: 2.5,
-      wheelSensitivity: 0.2,
-    });
+    // Detail views (at most 500 nodes) keep the canvas renderer for the sharpest labels.
+    cy.current = createGraph(
+      {
+        container: container.current,
+        elements: [
+          ...graph.nodes.map((n, i) => ({
+            data: {
+              id: n.id,
+              label: n.name,
+              color: nodeColors[n.type],
+              type: n.type,
+            },
+            position: { x: positions[i].x, y: positions[i].y },
+          })),
+          ...graph.edges.map((e) => ({
+            data: { ...e, label: e.type.replaceAll("_", " ").toLowerCase() },
+          })),
+        ],
+        style,
+        layout: { name: "preset", fit: false },
+        minZoom: 0.05,
+        maxZoom: 2.5,
+        wheelSensitivity: 0.2,
+      },
+      graph.nodes.length > WEBGL_MIN_NODES,
+    ).cy;
     const instance = cy.current;
     let programmatic = false;
     function fitGraph() {
