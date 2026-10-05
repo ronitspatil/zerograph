@@ -1,4 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">
-  <rect width="20" height="20" rx="4.5" fill="#e6ecf3"/>
-  <path d="M6.25 6.25h7.5l-7.5 7.5h7.5" fill="none" stroke="#0b111b" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <defs>
+    <linearGradient id="zg-shield" x1="0" y1="3.8" x2="0" y2="20.2" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8fdcc6"/>
+      <stop offset="1" stop-color="#3fae8c"/>
+    </linearGradient>
+  </defs>
+  <rect width="24" height="24" rx="5.5" fill="#0c1715"/>
+  <path fill-rule="evenodd" fill="url(#zg-shield)" d="M12 3.8L19 6.4V11.8C19 15.9 16.1 18.9 12 20.2C7.9 18.9 5 15.9 5 11.8V6.4ZM12 8.4A2.7 3.5 0 1 0 12 15.4A2.7 3.5 0 1 0 12 8.4Z"/>
 </svg>

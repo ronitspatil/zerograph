@@ -88,6 +88,8 @@ class RevisionAnalysis(Base):
     total_findings: Mapped[int] = mapped_column(Integer)
     total_asset_weight: Mapped[int] = mapped_column(Integer)
     high_blast_ids: Mapped[list[str]] = mapped_column(JSON)
+    # The first explore-sample node IDs (ascending); None for rows stored before 0005.
+    sample_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
@@ -149,3 +151,77 @@ class StagedEntity(Base):
     target_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
     digest: Mapped[str] = mapped_column(String(64))
     payload: Mapped[str] = mapped_column(Text)
+
+
+class RevisionClusterSummary(Base):
+    """Global-map clustering of a revision (structural grouping, not a permission boundary)."""
+
+    __tablename__ = "revision_cluster_summary"
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    revision: Mapped[str] = mapped_column(String(64), primary_key=True)
+    cluster_version: Mapped[int] = mapped_column(Integer)
+    algorithm: Mapped[str] = mapped_column(String(32))
+    seed: Mapped[int] = mapped_column(Integer)
+    total_nodes: Mapped[int] = mapped_column(Integer)
+    total_edges: Mapped[int] = mapped_column(Integer)
+    total_clusters: Mapped[int] = mapped_column(Integer)
+    top_level: Mapped[int] = mapped_column(Integer)
+    max_depth: Mapped[int] = mapped_column(Integer)
+    isolated_nodes: Mapped[int] = mapped_column(Integer)
+    top_links: Mapped[int] = mapped_column(Integer)
+    previous_revision: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reused_ids: Mapped[int] = mapped_column(Integer)
+    compute_ms: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class RevisionCluster(Base):
+    """One cluster of a revision's hierarchy; ``parent_id`` is "" at the top level."""
+
+    __tablename__ = "revision_clusters"
+    __table_args__ = (Index("ix_revision_clusters_parent", "tenant_id", "revision", "parent_id", "ordinal"),)
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    revision: Mapped[str] = mapped_column(String(64), primary_key=True)
+    cluster_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    parent_id: Mapped[str] = mapped_column(String(32))
+    depth: Mapped[int] = mapped_column(Integer)
+    ordinal: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(String(16))
+    label: Mapped[str] = mapped_column(String(256))
+    representative_id: Mapped[str] = mapped_column(String(512))
+    size: Mapped[int] = mapped_column(Integer)
+    child_count: Mapped[int] = mapped_column(Integer)
+    member_count: Mapped[int] = mapped_column(Integer)
+    internal_edges: Mapped[int] = mapped_column(Integer)
+    boundary_edges: Mapped[int] = mapped_column(Integer)
+    types: Mapped[dict[str, Any]] = mapped_column(JSON)
+    accounts: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class RevisionClusterLink(Base):
+    """Relationship count between two sibling clusters (undirected, ``source_id < target_id``)."""
+
+    __tablename__ = "revision_cluster_links"
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    revision: Mapped[str] = mapped_column(String(64), primary_key=True)
+    parent_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    source_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    target_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    weight: Mapped[int] = mapped_column(Integer)
+
+
+class RevisionClusterMember(Base):
+    """An entity's leaf cluster, ranked within it by degree (``ordinal``)."""
+
+    __tablename__ = "revision_cluster_members"
+    __table_args__ = (
+        Index("ix_revision_cluster_members_leaf", "tenant_id", "revision", "cluster_id", "ordinal"),
+    )
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    revision: Mapped[str] = mapped_column(String(64), primary_key=True)
+    entity_id: Mapped[str] = mapped_column(String(512), primary_key=True)
+    cluster_id: Mapped[str] = mapped_column(String(32))
+    top_id: Mapped[str] = mapped_column(String(32))
+    ordinal: Mapped[int] = mapped_column(Integer)
+    degree: Mapped[int] = mapped_column(Integer)
+    internal_degree: Mapped[int] = mapped_column(Integer)

@@ -156,7 +156,7 @@ def test_real_graph_retention_age_scope_bounds_and_atomic_rollback(environment, 
 def test_real_bounded_exploration_search_scopes_and_dense_neighbors(monkeypatch):
     from unittest.mock import patch
 
-    from app.graph.exploration import RevisionUnavailable, RootNotFound
+    from app.graph.exploration import RevisionTotals, RevisionUnavailable, RootNotFound
     from app.graph.repository import MemoryGraphStore
     from app.graph.schema import Edge, EdgeType, GraphSnapshot, Node, NodeType
 
@@ -242,6 +242,20 @@ def test_real_bounded_exploration_search_scopes_and_dense_neighbors(monkeypatch)
                 store.explore(tenant, "missing", None, 20, 20)
             with pytest.raises(RevisionUnavailable):
                 store.search(tenant, "missing", "customer", 20)
+            # Stored ID sample (key lookups, no scan) and global-map leaf slices match memory.
+            totals = RevisionTotals(len(nodes), len(edges), 0, 0, tuple(sorted(n.id for n in nodes)))
+            for limit in (1, 3, 62):
+                assert store.explore(tenant, revision, None, limit, 50, totals) == memory.explore(
+                    tenant, revision, None, limit, 50, totals
+                )
+            members = ["root", "neighbor:001", "neighbor:059", "category", "missing"]
+            for edge_limit in (1, 3, 10):
+                assert store.cluster_members(tenant, revision, members, edge_limit) == memory.cluster_members(
+                    tenant, revision, members, edge_limit
+                )
+            assert store.cluster_members(tenant, revision, [], 1).nodes == []
+            with pytest.raises(RevisionUnavailable):
+                store.cluster_members(tenant, "missing", members, 5)
     finally:
         with store.driver.session() as session:
             session.run(

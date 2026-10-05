@@ -52,6 +52,20 @@
     --radius-lg: 8px;
     --control-h: 32px;
     --control-h-sm: 28px;
+    /* Spacing scale: every margin, padding and gap sits on 4px steps. */
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --space-4: 16px;
+    --space-5: 20px;
+    --space-6: 24px;
+    --space-8: 32px;
+    --space-10: 40px;
+    --space-12: 48px;
+    --active: #1d2836;
+    /* One canvas height for graph, map and their loading states. */
+    --canvas-h: 540px;
+    --primary-active: #cdd6e1;
     --font-sans:
       -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
       Arial, sans-serif;
@@ -65,6 +79,8 @@
   }
   html {
     scrollbar-color: var(--border-strong) transparent;
+    /* Keep the content width fixed when a view gains or loses a scrollbar. */
+    scrollbar-gutter: stable;
   }
   body {
     margin: 0;
@@ -130,7 +146,7 @@
     margin: 0;
   }
   h1 {
-    font-size: 20px;
+    font-size: clamp(18px, 1.2vw + 13px, 20px);
     font-weight: 600;
     letter-spacing: -0.2px;
     line-height: 1.3;
@@ -161,7 +177,7 @@
     color: var(--text);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius);
-    padding: 0 10px;
+    padding: 0 12px;
     min-width: 0;
     font-size: 13px;
     transition: border-color 0.12s;
@@ -195,7 +211,7 @@
     appearance: none;
     -webkit-appearance: none;
     cursor: pointer;
-    padding-right: 30px;
+    padding-right: 32px;
     background-image: var(--chevron);
     background-repeat: no-repeat;
     background-position: right 10px center;
@@ -213,14 +229,14 @@
     color: var(--text);
   }
   input[type="date"] {
-    padding-right: 6px;
+    padding-right: 8px;
   }
   input[type="date"]::-webkit-calendar-picker-indicator {
     opacity: 0.6;
     cursor: pointer;
   }
   textarea {
-    padding: 8px 10px;
+    padding: 8px 12px;
     resize: vertical;
     font-family: var(--font-mono);
     font-size: 12px;
@@ -258,7 +274,7 @@
     color: var(--text-secondary);
   }
   details p {
-    padding-top: 6px;
+    padding-top: 8px;
     font-size: 12px;
   }
   pre {
@@ -274,7 +290,7 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 6px;
+    gap: 8px;
     border: 1px solid transparent;
     height: var(--control-h);
     padding: 0 12px;
@@ -316,7 +332,7 @@
   }
   .button-small {
     height: var(--control-h-sm);
-    padding: 0 10px;
+    padding: 0 12px;
     font-size: 12px;
   }
   .icon-button {
@@ -335,6 +351,48 @@
   .icon-button:hover {
     background: var(--hover);
     color: var(--text);
+  }
+
+  /*
+   * Interaction states. Hover, active and selected only change colour,
+   * background or box-shadow so no control ever changes size.
+   */
+  .button-primary:active:not(:disabled) {
+    background: var(--primary-active);
+  }
+  .button-outline:active:not(:disabled),
+  .button-ghost:active:not(:disabled),
+  .icon-button:active:not(:disabled),
+  .nav-item:active,
+  .graph-controls button:active,
+  .graph-view-switch button:active,
+  .graph-search-results button:active,
+  .identity-list button:active {
+    background: var(--active);
+  }
+  .text-link:active {
+    opacity: 0.8;
+  }
+  .icon-button,
+  .nav-item,
+  .graph-controls button,
+  .graph-view-switch button,
+  .graph-search-results button,
+  .identity-list button {
+    transition:
+      background-color 0.12s,
+      color 0.12s,
+      border-color 0.12s,
+      box-shadow 0.12s;
+  }
+  /* Focus rings drawn inside elements that sit in clipping or scrolling containers. */
+  .nav-item:focus-visible,
+  .graph-controls button:focus-visible,
+  .graph-view-switch button:focus-visible,
+  .graph-search-results button:focus-visible,
+  .identity-list button:focus-visible,
+  .simulator-drawer .icon-button:focus-visible {
+    outline-offset: -2px;
   }
   .text-link {
     display: inline-flex;
@@ -381,7 +439,7 @@
   .status {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
     font-size: 12px;
     font-weight: 500;
     white-space: nowrap;
@@ -426,16 +484,15 @@
     align-items: center;
     gap: 8px;
     color: var(--text);
-    --logo-ink: var(--bg);
   }
-  .wordmark .logo-mark {
-    color: var(--primary);
+  .logo-mark {
+    display: block;
     flex-shrink: 0;
   }
   .wordmark-text {
     font-size: 15px;
     font-weight: 600;
-    letter-spacing: -0.1px;
+    letter-spacing: -0.2px;
   }
 
   /* Shell */
@@ -467,11 +524,11 @@
   .workspace-switch {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 4px;
     border: 1px solid var(--border);
     background: var(--control);
     border-radius: var(--radius);
-    padding: 8px 10px;
+    padding: 8px 12px;
     margin: 4px 0 16px;
     min-width: 0;
   }
@@ -490,7 +547,7 @@
     width: 100%;
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 12px;
     height: 32px;
     background: none;
     border: 0;
@@ -498,7 +555,7 @@
     font-size: 13px;
     text-align: left;
     padding: 0 8px;
-    margin-bottom: 2px;
+    margin-bottom: 4px;
     border-radius: var(--radius);
   }
   .nav-item svg {
@@ -530,7 +587,7 @@
   }
   .user {
     display: flex;
-    gap: 10px;
+    gap: 12px;
     align-items: center;
     border-top: 1px solid var(--border);
     margin-top: 8px;
@@ -586,7 +643,7 @@
   .breadcrumb {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
     color: var(--muted);
     font-size: 13px;
     min-width: 0;
@@ -605,7 +662,7 @@
   .connection-status {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
     color: var(--muted);
     font-size: 12px;
     white-space: nowrap;
@@ -634,6 +691,11 @@
     display: flex;
     gap: 8px;
     flex-shrink: 0;
+  }
+  /* Sized for the longest label ("Export visible role page") so switching
+     graph modes never resizes or re-wraps the heading. */
+  .heading-actions .button-outline {
+    min-width: 200px;
   }
 
   /* Metrics */
@@ -708,7 +770,7 @@
   .live-label {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
     color: var(--muted);
     font-size: 12px;
     white-space: nowrap;
@@ -756,6 +818,16 @@
     border-bottom: 1px solid var(--border);
     background: var(--bg);
   }
+  /* Desktop: room for the longer role-map status so switching graph modes
+     does not move the toolbar and canvas. */
+  @media (min-width: 1201px) {
+    .graph-panel > .exploration-status {
+      min-height: 72px;
+    }
+  }
+  .simulation-note:not([data-active]) {
+    visibility: hidden;
+  }
   .exploration-status .button {
     margin-left: 4px;
   }
@@ -763,7 +835,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 10px 16px;
+    padding: 12px 16px;
     border-bottom: 1px solid var(--border);
     gap: 12px;
   }
@@ -812,7 +884,7 @@
     gap: 8px;
     width: 100%;
     text-align: left;
-    padding: 6px 8px;
+    padding: 8px 8px;
     border: 0;
     border-radius: var(--radius);
     background: none;
@@ -846,7 +918,7 @@
   }
   .canvas-wrap {
     position: relative;
-    height: 540px;
+    height: var(--canvas-h);
     background: var(--bg);
   }
   .graph-canvas {
@@ -891,13 +963,13 @@
     right: 64px;
     display: flex;
     flex-wrap: wrap;
-    gap: 6px 14px;
+    gap: 8px 16px;
     pointer-events: none;
   }
   .graph-legend span {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
     font-size: 12px;
     color: var(--muted);
   }
@@ -925,13 +997,16 @@
     background: transparent;
     box-shadow: inset 0 0 0 1.5px #f28b91;
   }
+  /* Fixed-height chip tray (scrolls inside) so graph modes with fewer
+     identities do not resize the panel. */
   .identity-list {
+    height: 96px;
     max-height: 96px;
     overflow-y: auto;
     align-content: flex-start;
     display: flex;
-    gap: 6px;
-    padding: 10px 16px;
+    gap: 8px;
+    padding: 12px 16px;
     flex-wrap: wrap;
     border-top: 1px solid var(--border);
   }
@@ -971,7 +1046,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin: -4px -6px 8px 0;
+    margin: -4px -8px 8px 0;
   }
   .node-sidebar h3 {
     font-size: 14px;
@@ -981,7 +1056,7 @@
   .node-type {
     font-size: 12px;
     color: var(--muted);
-    margin-top: 2px;
+    margin-top: 4px;
   }
   .node-sidebar dl {
     margin: 16px 0;
@@ -1012,7 +1087,7 @@
   .tag-row p {
     font-size: 12px;
     color: var(--text-secondary);
-    margin-top: 2px;
+    margin-top: 4px;
     overflow-wrap: anywhere;
   }
   .node-id {
@@ -1041,7 +1116,7 @@
     justify-content: space-between;
     gap: 12px;
     border-bottom: 1px solid var(--border);
-    padding: 10px 0;
+    padding: 12px 0;
     font-size: 12px;
     color: var(--muted);
   }
@@ -1072,17 +1147,17 @@
   }
   .role-direct-summary p {
     font-size: 12px;
-    margin-top: 2px;
+    margin-top: 4px;
   }
   .role-direct-summary dl {
-    margin: 10px 0 0;
+    margin: 12px 0 0;
   }
   .coverage-notice {
     margin: 16px 0 0;
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     background: var(--surface);
-    padding: 10px 16px;
+    padding: 12px 16px;
   }
   .coverage-notice summary {
     font-size: 13px;
@@ -1128,7 +1203,7 @@
   }
   .path-preview {
     display: flex;
-    gap: 2px 4px;
+    gap: 4px 4px;
     flex-wrap: wrap;
   }
   .path-preview > span {
@@ -1186,7 +1261,7 @@
     border: 1px solid #ef7f8a40;
     color: #f4b3ba;
     border-radius: var(--radius);
-    padding: 10px 12px;
+    padding: 12px 12px;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -1208,7 +1283,7 @@
     border: 1px solid #e1b26833;
     border-radius: var(--radius);
     color: #dcc59a;
-    padding: 10px 12px;
+    padding: 12px 12px;
     font-size: 13px;
     margin-bottom: 16px;
   }
@@ -1222,8 +1297,9 @@
     color: var(--muted);
     font-size: 13px;
   }
+  /* Same height as the canvas it stands in for, so loading never resizes the panel. */
   .canvas-loading {
-    height: 450px;
+    height: var(--canvas-h);
   }
 
   /* Overview */
@@ -1268,7 +1344,8 @@
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 16px;
-    align-items: start;
+    /* Columns share the row height; the diff scrolls inside its panel. */
+    align-items: stretch;
   }
   .form-panel {
     padding: 0 16px 16px;
@@ -1279,7 +1356,7 @@
   .form-panel > label {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
     margin: 12px 0;
   }
   .form-panel > .button {
@@ -1298,7 +1375,7 @@
   .two-columns label {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
   }
   .checkbox-row {
     display: flex !important;
@@ -1311,7 +1388,12 @@
     cursor: pointer;
   }
   .diff-panel {
+    display: flex;
+    flex-direction: column;
     min-height: 400px;
+  }
+  .diff-panel > .empty-state {
+    flex: 1 1 auto;
   }
   .diff-panel details {
     margin: 12px 16px;
@@ -1333,8 +1415,9 @@
     background: var(--bg);
     border-top: 1px solid var(--border);
     border-bottom: 1px solid var(--border);
+    /* Zero basis: the diff never sets the row height, it fills what the form leaves. */
+    flex: 1 1 0;
     min-height: 200px;
-    max-height: 480px;
     overflow: auto;
   }
   .policy-diff span {
@@ -1421,7 +1504,7 @@
   }
   .simulator-drawer h2 {
     font-size: 16px;
-    margin: 2px 0 4px;
+    margin: 4px 0 4px;
     overflow-wrap: anywhere;
   }
   .simulator-drawer > p {
@@ -1432,7 +1515,7 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin: 16px 0 6px;
+    margin: 16px 0 8px;
   }
   .slider-label b {
     font-size: 13px;
@@ -1445,7 +1528,7 @@
     justify-content: space-between;
     color: var(--subtle);
     font-size: 12px;
-    margin-top: 2px;
+    margin-top: 4px;
   }
   .simulator-drawer > .checkbox-row {
     margin: 16px 0;
@@ -1491,7 +1574,7 @@
   .simulation-metrics > div {
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 10px 12px;
+    padding: 12px 12px;
   }
   .simulation-metrics b {
     display: block;
@@ -1551,7 +1634,7 @@
   }
   .guide-modal p {
     font-size: 13px;
-    margin: 10px 0;
+    margin: 12px 0;
   }
   .guide-modal > .button {
     margin-top: 8px;
@@ -1567,39 +1650,85 @@
     overflow: hidden;
     background:
       radial-gradient(ellipse at 75% 30%, #193b3f55, transparent 50%), #0a101b;
-    padding: 30px;
+    padding: 32px;
   }
   .login-card {
-    width: 360px;
+    width: 420px;
     max-width: 100%;
     position: relative;
     z-index: 2;
+    display: flex;
+    flex-direction: column;
     border: 1px solid var(--border-strong);
-    border-radius: 10px;
-    padding: 32px;
+    border-radius: 12px;
+    padding: 40px 40px 32px;
     background: #0f1621f2;
   }
   .login-wordmark {
-    margin-bottom: 32px;
+    gap: 12px;
+  }
+  .login-wordmark .wordmark-text {
+    font-size: 18px;
+    letter-spacing: -0.3px;
+  }
+  .login-lead {
+    margin: 24px 0 16px;
+    font-size: 15px;
+    line-height: 1.45;
+    color: var(--text);
+  }
+  .login-points {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .login-points li {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    font-size: 13px;
+    line-height: 1.4;
+    color: var(--text-secondary);
+  }
+  .login-points svg {
+    flex-shrink: 0;
+    margin-top: 1px;
+    color: var(--accent);
+  }
+  .login-body {
+    margin-top: 32px;
+    padding-top: 28px;
+    border-top: 1px solid var(--border);
   }
   .login-card h1 {
     font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -0.3px;
   }
-  .login-card > p {
+  .login-body > p {
     font-size: 13px;
-    margin: 4px 0 24px;
+    margin: 4px 0 20px;
   }
-  .login-card > .error-banner {
-    margin: -8px 0 16px;
+  .login-body > .error-banner {
+    margin: 0 0 16px;
   }
   .login-actions {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 12px;
   }
   .login-actions .button {
     width: 100%;
-    height: 36px;
+    height: 40px;
+  }
+  .login-body > .login-help {
+    margin: 20px 0 0;
+    font-size: 12px;
+    color: var(--subtle);
+    text-align: center;
   }
   .login-orbit {
     position: absolute;
@@ -1614,10 +1743,21 @@
       0 0 0 240px #18353a09;
   }
 
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    ::before,
+    ::after {
+      transition-duration: 0.01ms !important;
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
   /* Responsive */
   @media (min-width: 1500px) {
-    .canvas-wrap {
-      height: 580px;
+    :root {
+      --canvas-h: 580px;
     }
     .node-sidebar {
       width: 280px;
@@ -1648,6 +1788,10 @@
     }
     .remediation-grid {
       grid-template-columns: minmax(0, 1fr);
+    }
+    .policy-diff {
+      flex-basis: auto;
+      max-height: 480px;
     }
   }
   @media (max-width: 900px) {
@@ -1694,11 +1838,10 @@
     }
     .node-sidebar {
       width: auto;
+      height: 360px;
+      overflow-y: auto;
       border-left: 0;
       border-top: 1px solid var(--border);
-    }
-    .node-sidebar.empty-sidebar {
-      display: none;
     }
     .overview-grid,
     .source-cards {
@@ -1725,12 +1868,15 @@
     .topbar-right .connection-status {
       display: none;
     }
+    /* Full-width stacked actions: no label can overflow or re-wrap the row. */
     .heading-actions {
       width: 100%;
+      flex-direction: column;
     }
-    .heading-actions .button {
-      flex: 1;
-      padding: 0 8px;
+    .heading-actions .button,
+    .heading-actions .button-outline {
+      width: 100%;
+      min-width: 0;
     }
     .metric-card {
       padding: 12px;
@@ -1739,7 +1885,7 @@
       font-size: 20px;
     }
     .graph-toolbar {
-      padding: 10px 12px;
+      padding: 12px 12px;
     }
     .search-field {
       min-width: 0;
@@ -1755,7 +1901,7 @@
       padding: 8px 12px;
     }
     .graph-legend {
-      gap: 4px 10px;
+      gap: 4px 12px;
     }
     .graph-footer {
       padding: 8px 12px;
@@ -1763,18 +1909,18 @@
     .graph-footer > span:first-child {
       display: none;
     }
-    .canvas-wrap {
-      height: 460px;
+    :root {
+      --canvas-h: 460px;
     }
     .panel-heading {
       padding: 12px;
       flex-wrap: wrap;
     }
     .identity-list {
-      padding: 10px 12px;
+      padding: 12px 12px;
     }
     .login-card {
-      padding: 24px;
+      padding: 32px 24px 28px;
     }
     .two-columns {
       grid-template-columns: minmax(0, 1fr);

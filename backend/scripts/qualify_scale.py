@@ -232,19 +232,33 @@ def qualify(
         # Alternate a baseline publish of the same graph with publish-time analysis
         # disabled (a legacy-style revision readers compute on read) and a normal
         # publish; each run uses a fresh tenant, and the fastest run of each counts.
-        runs = {"without": [], "with": [], "analysis": []}
+        # Publish-time clustering (Phase 4) runs in both arms; its measured time is
+        # subtracted so the comparison isolates the analysis cost, and reported.
+        runs = {"without": [], "with": [], "analysis": [], "clustering": []}
+
+        def clustered(tenant: str) -> float:
+            spent: dict[str, float] = {}
+            with (
+                patch.object(tasks, "compute_clusters", measured(spent, "compute", tasks.compute_clusters)),
+                patch.object(tasks, "store_clusters", measured(spent, "store", tasks.store_clusters)),
+                patch.object(tasks, "load_previous", measured(spent, "load", tasks.load_previous)),
+            ):
+                elapsed = publish(tenant)
+            runs["clustering"].append(sum(spent.values()))
+            return elapsed - sum(spent.values())
+
         for run in range(publish_runs):
             with (
                 patch.object(CompactGraph, "analyze", lambda self: None),
                 patch.object(tasks, "store_analysis", lambda *args: None),
             ):
-                runs["without"].append(publish(f"legacy-{run}"))
+                runs["without"].append(clustered(f"legacy-{run}"))
             spent: dict[str, float] = {}
             with (
                 patch.object(CompactGraph, "analyze", measured(spent, "compute", CompactGraph.analyze)),
                 patch.object(tasks, "store_analysis", measured(spent, "store", tasks.store_analysis)),
             ):
-                runs["with"].append(publish(f"stored-{run}"))
+                runs["with"].append(clustered(f"stored-{run}"))
             runs["analysis"].append(spent)
         baseline, with_analysis = min(runs["without"]), min(runs["with"])
         analysis_seconds = min(sum(spent.values()) for spent in runs["analysis"])
@@ -255,6 +269,8 @@ def qualify(
             "analysis_s": round(analysis_seconds, 4),
             "analysis_compute_s": round(min(spent["compute"] for spent in runs["analysis"]), 4),
             "analysis_store_s": round(min(spent["store"] for spent in runs["analysis"]), 4),
+            # Excluded from the publish times above (it runs in both arms).
+            "clustering_s": round(min(runs["clustering"]), 4),
             "runs": {
                 "with_analysis_s": [round(value, 4) for value in runs["with"]],
                 "without_analysis_s": [round(value, 4) for value in runs["without"]],

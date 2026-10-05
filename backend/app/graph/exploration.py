@@ -25,6 +25,8 @@ class RevisionTotals:
     edges: int
     roles: int
     role_edges: int
+    # Ascending first node IDs of the revision (explore sample); None when not stored.
+    sample_ids: tuple[str, ...] | None = None
 
 
 @dataclass
@@ -145,6 +147,52 @@ def scoped_totals(tx, params) -> tuple[int, int]:
     return total_nodes, total_edges
 
 
+def entity_key(tenant: str, revision: str, node_id: str) -> str:
+    return json.dumps([tenant, revision, node_id])
+
+
+# Scope filters on key-anchored queries sit behind WITH: given a WHERE on tenant_id or
+# revision, Memgraph's planner prefers that (non-unique) index over the unique key and
+# scans the whole tenant or revision (measured 3.1 s instead of 2.6 ms at 100k).
+
+
+def cypher_nodes(tx, tenant: str, revision: str, ids: list[str]) -> list[Node]:
+    """Nodes by unique entity key (one index seek each), ascending by ID."""
+    if not ids:
+        return []
+    rows = tx.run(
+        "UNWIND $keys AS key MATCH (n:Entity {key:key}) "
+        "WITH n WHERE n.tenant_id=$tenant AND n.revision=$revision "
+        "RETURN n.payload AS payload ORDER BY n.id",
+        keys=[entity_key(tenant, revision, node_id) for node_id in ids],
+        tenant=tenant,
+        revision=revision,
+    )
+    return [Node.model_validate_json(row["payload"]) for row in rows]
+
+
+def cypher_internal_edges(tx, tenant: str, revision: str, ids: list[str], limit: int) -> list[Edge]:
+    """Relationships with both endpoints in ``ids``, ascending by ID, at most ``limit``.
+
+    Anchored on the endpoints' unique keys and expanded from there: the cost is the
+    selected nodes' degree, never a scan of the revision.
+    """
+    if not ids or limit < 1:
+        return []
+    keys = [entity_key(tenant, revision, node_id) for node_id in ids]
+    rows = tx.run(
+        f"UNWIND $keys AS key MATCH (a:Entity {{key:key}})-[r:{EDGE_TYPES}]->(b:Entity) "
+        "WITH r, a, b WHERE b.key IN $keys AND a.tenant_id=$tenant AND a.revision=$revision "
+        "AND r.tenant_id=$tenant AND r.revision=$revision "
+        "RETURN r.payload AS payload ORDER BY r.id LIMIT $limit",
+        keys=keys,
+        tenant=tenant,
+        revision=revision,
+        limit=limit,
+    )
+    return [Edge.model_validate_json(row["payload"]) for row in rows]
+
+
 def cypher_explore(
     tx,
     tenant: str,
@@ -160,7 +208,10 @@ def cypher_explore(
     # Stored publication totals avoid two whole-revision count scans per request.
     # Legacy revisions without stored analysis keep the scoped aggregates.
     total_nodes, total_edges = (totals.nodes, totals.edges) if totals else scoped_totals(tx, params)
-    if root is None:
+    if root is None and totals is not None and totals.sample_ids is not None:
+        # The stored ascending ID sample replaces a sorted scan of the whole revision.
+        nodes = cypher_nodes(tx, tenant, revision, list(totals.sample_ids[:node_limit]))
+    elif root is None:
         rows = tx.run(
             "MATCH " + NODE_SCOPE + " RETURN n.payload AS payload ORDER BY n.id LIMIT $limit",
             **params,
@@ -168,44 +219,60 @@ def cypher_explore(
         )
         nodes = [Node.model_validate_json(row["payload"]) for row in rows]
     else:
+        key = entity_key(tenant, revision, root)
         row = tx.run(
-            "MATCH (n:Entity {key:$key, tenant_id:$tenant, revision:$revision, id:$root}) "
-            "RETURN n.payload AS payload LIMIT 1",
+            "MATCH (n:Entity {key:$key}) WITH n WHERE n.tenant_id=$tenant AND n.revision=$revision "
+            "AND n.id=$root RETURN n.payload AS payload LIMIT 1",
             **params,
             root=root,
-            key=json.dumps([tenant, revision, root]),
+            key=key,
         ).single()
         if row is None:
             raise RootNotFound("Graph root not found")
         nodes = [Node.model_validate_json(row["payload"])]
         if node_limit > 1:
+            # Anchored on the root's unique key: cost is the root's degree.
             rows = tx.run(
-                "MATCH (s:Entity {key:$key, tenant_id:$tenant, revision:$revision, id:$root})"
-                f"-[r:{EDGE_TYPES} {{tenant_id:$tenant, revision:$revision}}]-(n:Entity {{tenant_id:$tenant, revision:$revision}}) "
-                "WHERE n.id <> $root WITH DISTINCT n "
+                f"MATCH (s:Entity {{key:$key}}) WITH s MATCH (s)-[r:{EDGE_TYPES}]-(n:Entity) "
+                "WITH n, r WHERE n.id <> $root AND n.tenant_id=$tenant AND n.revision=$revision "
+                "AND r.tenant_id=$tenant AND r.revision=$revision WITH DISTINCT n "
                 "RETURN n.payload AS payload ORDER BY n.id LIMIT $limit",
                 **params,
                 root=root,
-                key=json.dumps([tenant, revision, root]),
+                key=key,
                 limit=node_limit - 1,
             )
             nodes.extend(Node.model_validate_json(row["payload"]) for row in rows)
     nodes.sort(key=lambda node: node.id)
-    ids = [node.id for node in nodes]
-    rows = tx.run(
-        "MATCH " + EDGE_SCOPE + " WHERE a.id IN $ids AND b.id IN $ids "
-        "RETURN r.payload AS payload ORDER BY r.id LIMIT $limit",
-        **params,
-        ids=ids,
-        limit=edge_limit,
-    )
-    edges = [Edge.model_validate_json(row["payload"]) for row in rows]
+    edges = cypher_internal_edges(tx, tenant, revision, [node.id for node in nodes], edge_limit)
     return GraphSlice(
         nodes=nodes,
         edges=edges,
         warnings=warnings,
         total_nodes=total_nodes,
         total_edges=total_edges,
+    )
+
+
+def cypher_cluster_members(tx, tenant: str, revision: str, ids: list[str], edge_limit: int) -> GraphSlice:
+    """A global-map leaf: its member nodes and the relationships among them."""
+    warnings = revision_warnings(tx, {"tenant": tenant, "revision": revision})
+    nodes = cypher_nodes(tx, tenant, revision, ids)
+    edges = cypher_internal_edges(tx, tenant, revision, [node.id for node in nodes], edge_limit)
+    return GraphSlice(nodes=nodes, edges=edges, warnings=warnings)
+
+
+def memory_cluster_members(snapshot: GraphSnapshot, ids: list[str], edge_limit: int) -> GraphSlice:
+    wanted = set(ids)
+    nodes = sorted((node for node in snapshot.nodes if node.id in wanted), key=lambda node: node.id)
+    edges = sorted(
+        (edge for edge in snapshot.edges if edge.source in wanted and edge.target in wanted),
+        key=lambda edge: edge.id,
+    )[:edge_limit]
+    return GraphSlice(
+        nodes=[node.model_copy(deep=True) for node in nodes],
+        edges=[edge.model_copy(deep=True) for edge in edges],
+        warnings=list(snapshot.warnings),
     )
 
 

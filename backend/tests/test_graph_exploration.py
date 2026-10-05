@@ -10,7 +10,7 @@ from sqlalchemy.exc import DBAPIError
 from app.api import routes
 from app.core.auth import Actor, current_actor
 from app.db.models import TenantState
-from app.graph.exploration import GraphSlice, RevisionUnavailable, RootNotFound
+from app.graph.exploration import GraphSlice, RevisionTotals, RevisionUnavailable, RootNotFound
 from app.graph.repository import CypherGraphStore, MemoryGraphStore
 from app.graph.schema import Edge, EdgeType, GraphSnapshot, Node, NodeType
 from app.main import create_app
@@ -196,9 +196,15 @@ class Transaction:
         if "count(" in query:
             return Rows([{"count": 2 if "count(n)" in query else 1}])
         if "r.payload" in query:
-            if self.edge.source not in params["ids"] or self.edge.target not in params["ids"]:
+            ids = {json.loads(key)[2] for key in params["keys"]}
+            if self.edge.source not in ids or self.edge.target not in ids:
                 return Rows([])
             return Rows([{"payload": self.edge.model_dump_json()}])
+        if "UNWIND $keys" in query:
+            wanted = {json.loads(key)[2] for key in params["keys"]}
+            return Rows(
+                [{"payload": n.model_dump_json()} for n in (self.neighbor, self.root) if n.id in wanted]
+            )
         if "CONTAINS" in query:
             return Rows([{"payload": node.model_dump_json()} for node in (self.neighbor, self.root)])
         if "WITH DISTINCT" in query:
@@ -231,23 +237,39 @@ def test_cypher_queries_bound_rows_parameterize_and_scope_all_entities_and_relat
     queries = tx.calls
     for query, params in queries:
         assert params["tenant"] == "tenant" and params["revision"] == "revision"
-        assert "tenant_id:$tenant" in query and "revision:$revision" in query
+        scoped = query.replace(
+            "{tenant_id:$tenant, revision:$revision}", "n.tenant_id=$tenant AND n.revision=$revision"
+        )
+        assert "tenant_id=$tenant" in scoped and "revision=$revision" in scoped
         assert "root" not in query.replace("$root", "")
         assert "*" not in query
         if "payload" in query:
             assert "LIMIT" in query and "ORDER BY" in query if "LIMIT $limit" in query else "LIMIT 1" in query
-        if "-[r:" in query:
-            assert query.count("tenant_id:$tenant") == 3 and query.count("revision:$revision") == 3
+        if "-[r:" in query and "count(" not in query:
+            # Anchored on a unique entity key; the relationship and far endpoint stay scoped.
+            assert "{key:" in query and "r.tenant_id=$tenant" in query and "r.revision=$revision" in query
             assert "STORES_PII" in query
     neighbor = next((q, p) for q, p in queries if "WITH DISTINCT" in q)
     assert neighbor[1]["limit"] == 2 and neighbor[1]["key"] == json.dumps(["tenant", "revision", "root"])
+    assert "n.tenant_id=$tenant AND n.revision=$revision" in neighbor[0]
     edges = next((q, p) for q, p in queries if "r.payload" in q)
-    assert edges[1]["limit"] == 4 and set(edges[1]["ids"]) == {"neighbor", "root"}
+    assert edges[1]["limit"] == 4
+    assert edges[1]["keys"] == [json.dumps(["tenant", "revision", i]) for i in ("neighbor", "root")]
+    assert "b.key IN $keys" in edges[0] and "a.tenant_id=$tenant" in edges[0]
     tx.calls.clear()
     sample = store.explore("tenant", "revision", None, 500, 2000)
     assert sample.truncated
     payload_query = next((q, p) for q, p in tx.calls if "n.payload" in q)
     assert "ORDER BY n.id LIMIT $limit" in payload_query[0] and payload_query[1]["limit"] == 500
+    tx.calls.clear()
+    # A stored ID sample replaces the sorted scan with key lookups of exactly those IDs.
+    stored = store.explore(
+        "tenant", "revision", None, 1, 5, RevisionTotals(9, 9, 0, 0, ("neighbor", "root", "zzz"))
+    )
+    assert [n.id for n in stored.nodes] == ["neighbor"] and stored.total_nodes == 9
+    assert not any("ORDER BY n.id LIMIT" in q for q, _ in tx.calls)
+    lookup = next((q, p) for q, p in tx.calls if "UNWIND $keys AS key MATCH (n:Entity" in q)
+    assert lookup[1]["keys"] == [json.dumps(["tenant", "revision", "neighbor"])]
     tx.calls.clear()
     root_only = store.explore("tenant", "revision", "root", 1, 1)
     assert [node.id for node in root_only.nodes] == ["root"] and root_only.edges == []

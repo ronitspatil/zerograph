@@ -11,5 +11,8 @@ export function middleware(request: NextRequest) {
   return response;
 }
 export const config = {
-  matcher: ["/((?!api|_next/static|_next/image|favicon.ico).*)"],
+  // Icons and the web manifest are static and need no per-request CSP nonce.
+  matcher: [
+    "/((?!api|_next/static|_next/image|favicon\\.ico|favicon\\.svg|apple-touch-icon\\.png|icon-\\d+\\.png|manifest\\.webmanifest).*)",
+  ],
 };

@@ -10,6 +10,7 @@ as before, so legacy revisions keep working without a migration-time backfill.
 """
 
 import argparse
+import heapq
 import json
 from dataclasses import dataclass
 
@@ -39,6 +40,15 @@ class ComputedAnalysis:
     totals: RevisionTotals
     total_asset_weight: int
     high_blast_ids: list[str]
+    # The first SAMPLE_SIZE node IDs in ascending order: the explore sample without a scan.
+    sample_ids: list[str] | None = None
+
+
+SAMPLE_SIZE = 500
+
+
+def sample_ids(ids) -> list[str]:
+    return heapq.nsmallest(SAMPLE_SIZE, ids)
 
 
 def compute_analysis(snapshot: GraphSnapshot) -> ComputedAnalysis:
@@ -74,7 +84,14 @@ def compute_analysis(snapshot: GraphSnapshot) -> ComputedAnalysis:
             for e in snapshot.edges
         ),
     )
-    return ComputedAnalysis(overview, findings, totals, prepared.total_asset_weight, high_blast)
+    return ComputedAnalysis(
+        overview,
+        findings,
+        totals,
+        prepared.total_asset_weight,
+        high_blast,
+        sample_ids(node.id for node in snapshot.nodes),
+    )
 
 
 def store_analysis(db: Session, tenant: str, revision: str, analysis: ComputedAnalysis) -> None:
@@ -92,6 +109,7 @@ def store_analysis(db: Session, tenant: str, revision: str, analysis: ComputedAn
             total_findings=len(analysis.findings),
             total_asset_weight=analysis.total_asset_weight,
             high_blast_ids=analysis.high_blast_ids,
+            sample_ids=analysis.sample_ids,
         )
     )
     if analysis.findings:
@@ -128,7 +146,13 @@ def stored_totals(db: Session, tenant: str, revision: str) -> RevisionTotals | N
     row = stored_analysis(db, tenant, revision)
     if row is None:
         return None
-    return RevisionTotals(row.total_nodes, row.total_edges, row.total_roles, row.total_role_edges)
+    return RevisionTotals(
+        row.total_nodes,
+        row.total_edges,
+        row.total_roles,
+        row.total_role_edges,
+        tuple(row.sample_ids) if row.sample_ids is not None else None,
+    )
 
 
 class UnknownCursor(ValueError):

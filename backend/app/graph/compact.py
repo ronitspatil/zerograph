@@ -42,6 +42,10 @@ class CompactGraph:
         self.privileged = bytearray()
         self.encrypted = bytearray()
         self.accounts: set[str] = set()
+        # Per-node display name and account (interned) for publish-time clustering.
+        self.names: list[str] = []
+        self.account: list[str] = []
+        self._interned: dict[str, str] = {}
         self.edge_source = array("l")
         self.edge_target = array("l")
         self.edge_traversal = bytearray()
@@ -68,8 +72,11 @@ class CompactGraph:
         self.entry.append(bool(node.get("internet_exposed", False)) and not node.get("authenticated", True))
         self.privileged.append(bool(node.get("privileged", False)))
         self.encrypted.append(bool(node.get("encrypted", True)))
-        if node.get("account_id"):
-            self.accounts.add(node["account_id"])
+        account = node.get("account_id") or ""
+        if account:
+            self.accounts.add(account)
+        self.account.append(self._interned.setdefault(account, account))
+        self.names.append(node.get("name") or node_id)
 
     def add_edge(self, edge: dict) -> None:
         try:
@@ -238,4 +245,6 @@ class CompactGraph:
                 and roles[self.edge_target[edge]]
             ),
         )
-        return ComputedAnalysis(overview, findings, totals, total_weight, high_blast)
+        from app.graph.analysis import sample_ids
+
+        return ComputedAnalysis(overview, findings, totals, total_weight, high_blast, sample_ids(self.ids))

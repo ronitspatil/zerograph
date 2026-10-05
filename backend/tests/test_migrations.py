@@ -26,6 +26,10 @@ def test_initial_migration_is_repeatable_and_versioned(tmp_path, monkeypatch):
         "revision_findings",
         "upload_sessions",
         "staged_entities",
+        "revision_cluster_summary",
+        "revision_clusters",
+        "revision_cluster_links",
+        "revision_cluster_members",
         "alembic_version",
     }
     engine.dispose()

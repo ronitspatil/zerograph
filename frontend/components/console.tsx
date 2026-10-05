@@ -18,15 +18,6 @@ import {
   Unplug,
   X,
 } from "lucide-react";
-import {
-  Bar,
-  BarChart,
-  Cell,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
 import { api, ApiError } from "@/lib/api";
 import type {
   Actor,
@@ -46,7 +37,9 @@ import { Button } from "@/components/ui/button";
 import { Simulator } from "@/components/simulator";
 import { RemediationHub } from "@/components/remediation-hub";
 import { Sources } from "@/components/sources";
+import { SensitivityChart } from "@/components/sensitivity-chart";
 import { Wordmark } from "@/components/ui/logo";
+import { GlobalMap } from "@/components/global-map";
 const GraphCanvas = dynamic(
   () => import("@/components/graph-canvas").then((m) => m.GraphCanvas),
   {
@@ -120,10 +113,12 @@ const emptyGraph: GraphView = {
 export function Console({ demo }: { demo: boolean }) {
   const [view, setView] = useState<View>("graph");
   const [graph, setGraph] = useState<GraphView | RoleMap>(emptyGraph);
-  const [graphMode, setGraphMode] = useState<"identities" | "roles">(
+  const [graphMode, setGraphMode] = useState<"identities" | "roles" | "map">(
     "identities",
   );
-  const graphModeRef = useRef<"identities" | "roles">("identities");
+  const graphModeRef = useRef<"identities" | "roles" | "map">("identities");
+  // Bumped by refresh so the global map reloads its top level with the workspace.
+  const [mapReload, setMapReload] = useState(0);
   const [graphBusy, setGraphBusy] = useState(false);
   const roles = graph.view.mode === "roles" ? (graph as RoleMap) : null;
   const [overview, setOverview] = useState<Overview | null>(null);
@@ -177,6 +172,7 @@ export function Console({ demo }: { demo: boolean }) {
     setSearchResults(null);
     setSearch("");
     setError("");
+    setMapReload((key) => key + 1);
     const workspaceError = (e: unknown) => {
       if (workspace.signal.aborted) return;
       if (e instanceof ApiError && e.status === 401) {
@@ -359,8 +355,17 @@ export function Console({ demo }: { demo: boolean }) {
     setGraphBusy(false);
     void refresh();
   };
+  const showMap = () => {
+    graphModeRef.current = "map";
+    setGraphMode("map");
+    setSelected(null);
+    setSimulation(null);
+    setSimulating(false);
+    setGraphBusy(false);
+    setError("");
+  };
   const explore = useCallback(
-    async (root: string) => {
+    async (root: string, pinned?: string) => {
       graphModeRef.current = "identities";
       setGraphMode("identities");
       setGraphBusy(true);
@@ -376,7 +381,7 @@ export function Console({ demo }: { demo: boolean }) {
         root_id: root,
         node_limit: "250",
         edge_limit: "1000",
-        revision: graph.revision,
+        revision: pinned ?? graph.revision,
       });
       try {
         const result = await api<GraphView>(`graph/explore?${params}`, {
@@ -716,8 +721,49 @@ export function Console({ demo }: { demo: boolean }) {
                     >
                       Role map
                     </button>
+                    <button
+                      type="button"
+                      aria-pressed={graphMode === "map"}
+                      onClick={showMap}
+                    >
+                      Global map
+                    </button>
                   </div>
-                  <section className="panel graph-panel">
+                  {graphMode === "map" && (
+                    <section className="panel graph-panel">
+                      <div className="panel-heading">
+                        <div>
+                          <h2>Global map</h2>
+                          <span className="muted">
+                            The whole revision, grouped by graph structure. Open
+                            a cluster to drill down; open a member to explore
+                            its neighborhood.
+                          </span>
+                        </div>
+                        {revisionStale && (
+                          <span className="live-label warning">
+                            <i
+                              className="status-dot warning"
+                              aria-hidden="true"
+                            />
+                            Revision changed — refresh required
+                          </span>
+                        )}
+                      </div>
+                      <GlobalMap
+                        reloadKey={mapReload}
+                        stale={revisionStale}
+                        onError={explorationError}
+                        onOpenNeighborhood={(id, revision) =>
+                          void explore(id, revision)
+                        }
+                      />
+                    </section>
+                  )}
+                  <section
+                    className="panel graph-panel"
+                    hidden={graphMode === "map"}
+                  >
                     <div className="panel-heading">
                       <div>
                         <h2>
@@ -809,12 +855,15 @@ export function Console({ demo }: { demo: boolean }) {
                             : "Last role page."}
                         </span>
                       )}
-                      {simulation && (
-                        <span>
-                          Server-side simulation: {outsideView} affected nodes
-                          outside the visible view.
-                        </span>
-                      )}
+                      {/* Always rendered so a simulation result never re-wraps this bar. */}
+                      <span
+                        className="simulation-note"
+                        data-active={simulation ? "true" : undefined}
+                        aria-hidden={simulation ? undefined : true}
+                      >
+                        Server-side simulation: {simulation ? outsideView : 0}{" "}
+                        affected nodes outside the visible view.
+                      </span>
                     </div>
                     <div className="graph-toolbar">
                       <div className="search-field">
@@ -1108,48 +1157,7 @@ export function Console({ demo }: { demo: boolean }) {
                       <p className="muted">
                         Classified data assets across the current snapshot
                       </p>
-                      <div style={{ height: 250 }}>
-                        <ResponsiveContainer width="100%" height="100%">
-                          <BarChart
-                            data={Object.entries(
-                              overview?.sensitivity || {},
-                            ).map(([name, value]) => ({ name, value }))}
-                          >
-                            <XAxis
-                              dataKey="name"
-                              tick={{ fill: "#8a96a8", fontSize: 11 }}
-                              axisLine={false}
-                              tickLine={false}
-                            />
-                            <YAxis
-                              allowDecimals={false}
-                              tick={{ fill: "#8a96a8", fontSize: 11 }}
-                              axisLine={false}
-                              tickLine={false}
-                            />
-                            <Tooltip
-                              contentStyle={{
-                                background: "#131b27",
-                                border: "1px solid #263142",
-                                borderRadius: 6,
-                                fontSize: 12,
-                              }}
-                              cursor={{ fill: "#182230" }}
-                            />
-                            <Bar
-                              dataKey="value"
-                              radius={[3, 3, 0, 0]}
-                              maxBarSize={40}
-                            >
-                              {["#5d6b7e", "#7f9bbd", "#d9a85b", "#e0707c"].map(
-                                (c) => (
-                                  <Cell key={c} fill={c} />
-                                ),
-                              )}
-                            </Bar>
-                          </BarChart>
-                        </ResponsiveContainer>
-                      </div>
+                      <SensitivityChart sensitivity={overview?.sensitivity} />
                     </div>
                     <div className="panel summary-panel">
                       <h3>Access evidence</h3>
