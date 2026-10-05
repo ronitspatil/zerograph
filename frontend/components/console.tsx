@@ -863,12 +863,15 @@ export function Console({ demo }: { demo: boolean }) {
                             : "Last role page."}
                         </span>
                       )}
-                      {simulation && (
-                        <span>
-                          Server-side simulation: {outsideView} affected nodes
-                          outside the visible view.
-                        </span>
-                      )}
+                      {/* Always rendered so a simulation result never re-wraps this bar. */}
+                      <span
+                        className="simulation-note"
+                        data-active={simulation ? "true" : undefined}
+                        aria-hidden={simulation ? undefined : true}
+                      >
+                        Server-side simulation: {simulation ? outsideView : 0}{" "}
+                        affected nodes outside the visible view.
+                      </span>
                     </div>
                     <div className="graph-toolbar">
                       <div className="search-field">
