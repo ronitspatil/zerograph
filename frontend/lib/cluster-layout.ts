@@ -1,4 +1,4 @@
-import { spacedLabels, type LabelBounds, type Position } from "./graph-layout";
+import type { LabelBounds, Position } from "./graph-layout";
 import type { ClusterLink, ClusterSummary } from "./types";
 
 /** Server bounds: at most 300 clusters per level and 2000 links per response. */
@@ -179,38 +179,81 @@ export function clusterLabelBox(
 export type LabelSide = "below" | "above";
 
 /**
- * Collision-aware labels in priority order (`spacedLabels`: inside the canvas,
- * 6px from every kept label, never over another cluster's circle), with a second
- * chance above the circle for labels that do not fit below. Required labels
- * (hovered, selected) are always shown below their circle.
+ * Collision-aware labels in priority order (largest cluster first), with the
+ * rules of `spacedLabels`: required labels (hovered, selected) are always shown
+ * below their circle; any other label must fit inside the canvas and keep 6px
+ * from every placed label. In addition a label never covers the circle of a
+ * cluster that ranks before it (`obstacles`, keyed by cluster id; `rank` gives the
+ * priority of every cluster), so a small cluster's label cannot hide a larger
+ * cluster, while the largest clusters stay labeled in dense levels. A label that
+ * does not fit below its circle tries above it.
  */
 export function placeLabels(
   candidates: { id: string; below: LabelBounds; above: LabelBounds }[],
   width: number,
   height: number,
-  options: { required?: Set<string>; obstacles?: LabelBounds[] } = {},
+  options: {
+    required?: Set<string>;
+    obstacles?: LabelBounds[];
+    rank?: Map<string, number>;
+  } = {},
 ): Map<string, LabelSide> {
-  const below = spacedLabels(
-    candidates.map((c) => c.below),
-    width,
-    height,
-    options,
-  );
-  const kept = candidates.filter((c) => below.has(c.id)).map((c) => c.below);
-  const above = spacedLabels(
-    [
-      ...kept,
-      ...candidates.filter((c) => !below.has(c.id)).map((c) => c.above),
-    ],
-    width,
-    height,
-    { obstacles: options.obstacles, required: below },
-  );
+  const required = options.required ?? new Set<string>();
+  const obstacles = (options.obstacles ?? []).filter(validBox);
+  const rank = options.rank ?? new Map<string, number>();
+  const rankOf = (id: string) => rank.get(id) ?? Number.MAX_SAFE_INTEGER;
   const placed = new Map<string, LabelSide>();
+  const chosen: LabelBounds[] = [];
   for (const c of candidates)
-    if (below.has(c.id)) placed.set(c.id, "below");
-    else if (above.has(c.id)) placed.set(c.id, "above");
+    if (required.has(c.id) && validBox(c.below)) {
+      placed.set(c.id, "below");
+      chosen.push(c.below);
+    }
+  const fits = (box: LabelBounds) => {
+    if (
+      !validBox(box) ||
+      box.x1 < 0 ||
+      box.y1 < 0 ||
+      box.x2 > width ||
+      box.y2 > height ||
+      chosen.some((other) => boxesOverlap(box, other, 6))
+    )
+      return false;
+    const own = rankOf(box.id);
+    return !obstacles.some(
+      (node) =>
+        node.id !== box.id &&
+        rankOf(node.id) < own &&
+        boxesOverlap(box, node, 0),
+    );
+  };
+  for (const c of candidates) {
+    if (placed.has(c.id)) continue;
+    for (const side of ["below", "above"] as const)
+      if (fits(c[side])) {
+        placed.set(c.id, side);
+        chosen.push(c[side]);
+        break;
+      }
+  }
   return placed;
+}
+
+function validBox(box: LabelBounds): boolean {
+  return (
+    [box.x1, box.y1, box.x2, box.y2].every(Number.isFinite) &&
+    box.x2 > box.x1 &&
+    box.y2 > box.y1
+  );
+}
+
+function boxesOverlap(a: LabelBounds, b: LabelBounds, gap: number): boolean {
+  return (
+    a.x1 < b.x2 + gap &&
+    a.x2 + gap > b.x1 &&
+    a.y1 < b.y2 + gap &&
+    a.y2 + gap > b.y1
+  );
 }
 
 /**
@@ -247,7 +290,10 @@ export function maxCircleDiameter(
 ): number {
   const area = Math.max(1, width) * Math.max(1, height);
   const share = 0.3 * Math.sqrt(area / Math.max(1, count));
-  return Math.max(24, Math.min(88, share, Math.min(width, height) / 3));
+  return Math.min(
+    Math.max(48, Math.min(88, share)),
+    Math.min(width, height) / 3,
+  );
 }
 
 export interface FitNode {

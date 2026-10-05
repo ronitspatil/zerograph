@@ -147,57 +147,63 @@ describe("cluster layout", () => {
     expect(clusterLabelBox("c", 40, 100, 50, 20).x2 - 100).toBe(23);
   });
 
-  it("thins labels that would cover another sizeable circle or each other, keeping the focused one", () => {
-    // Two big circles side by side; the smaller one's label would run under the larger.
-    const big = circleObstacle("big", 100, 100, 60)!;
-    const small = circleObstacle("small", 100, 160, 30)!;
-    expect(circleObstacle("dot", 0, 0, 8)).toBeNull();
-    const labels = [
-      clusterLabelBox("big", 120, 100, 100, 60), // y 133..150: crosses "small"'s circle
-      clusterLabelBox("small", 80, 100, 160, 30),
-      clusterLabelBox("other", 80, 110, 178, 4), // collides with "small"'s label
-    ];
-    const visible = spacedLabels(labels, 800, 600, { obstacles: [big, small] });
-    expect([...visible]).toEqual(["small"]);
-    const focused = spacedLabels(labels, 800, 600, {
-      obstacles: [big, small],
-      required: new Set(["big"]),
-    });
-    expect(focused.has("big")).toBe(true);
-  });
-
-  it("moves a label above its circle when the place below is taken", () => {
+  it("keeps labels apart and off larger clusters, moving one above its circle when needed", () => {
     const candidate = (id: string, x: number, y: number, d: number) => ({
       id,
       below: clusterLabelBox(id, 80, x, y, d, "below"),
       above: clusterLabelBox(id, 80, x, y, d, "above"),
     });
-    // "low" sits right under "high": its own label below would cross nothing,
-    // but "high"'s label below would cross "low"'s circle.
+    const rank = new Map([
+      ["big", 0],
+      ["small", 1],
+    ]);
+    expect(circleObstacle("dot", 0, 0, 8)).toBeNull();
+    // "small" sits right above "big": its label below would cross the larger circle.
     const candidates = [
-      candidate("high", 200, 100, 40),
-      candidate("low", 200, 150, 40),
+      candidate("big", 200, 150, 60),
+      candidate("small", 200, 100, 30),
     ];
-    const obstacles = [
-      circleObstacle("high", 200, 100, 40)!,
-      circleObstacle("low", 200, 150, 40)!,
+    const placed = placeLabels(candidates, 400, 300, {
+      obstacles: [
+        circleObstacle("big", 200, 150, 60)!,
+        circleObstacle("small", 200, 100, 30)!,
+      ],
+      rank,
+    });
+    expect(placed.get("big")).toBe("below");
+    expect(placed.get("small")).toBe("above");
+    expect(candidates[1].above.y2).toBeLessThanOrEqual(100 - 15);
+    // The larger cluster's label may cover a smaller circle (it draws above it).
+    const reversed = [
+      candidate("big", 200, 100, 60),
+      candidate("small", 200, 150, 30),
     ];
-    const placed = placeLabels(candidates, 400, 300, { obstacles });
-    expect(placed.get("high")).toBe("above");
-    expect(placed.get("low")).toBe("below");
-    expect(candidates[0].above.y2).toBeLessThanOrEqual(100 - 20);
-    // At the canvas top there is no room above: the label is dropped, unless required.
-    const top = [candidate("high", 200, 25, 40), candidate("low", 200, 75, 40)];
+    const covering = placeLabels(reversed, 400, 300, {
+      obstacles: [
+        circleObstacle("big", 200, 100, 60)!,
+        circleObstacle("small", 200, 150, 30)!,
+      ],
+      rank,
+    });
+    expect(covering.get("big")).toBe("below");
+    expect(covering.get("small")).toBe("below");
+    // Labels never overlap each other.
+    const crowded = [
+      candidate("big", 200, 100, 20),
+      candidate("small", 230, 100, 20),
+    ];
+    expect([...placeLabels(crowded, 400, 300, { rank }).keys()]).toEqual([
+      "big",
+      "small",
+    ]);
+    expect(placeLabels(crowded, 400, 300, { rank }).get("small")).toBe("above");
+    // No room inside the canvas: dropped, unless required (hovered or selected).
+    const edge = [candidate("small", 200, 10, 30)];
+    expect(placeLabels(edge, 400, 30, { rank }).size).toBe(0);
     expect(
-      placeLabels(top, 400, 300, {
-        obstacles: [
-          circleObstacle("high", 200, 25, 40)!,
-          circleObstacle("low", 200, 75, 40)!,
-        ],
-      }).has("high"),
-    ).toBe(false);
-    expect(
-      placeLabels(top, 400, 300, { required: new Set(["high"]) }).get("high"),
+      placeLabels(edge, 400, 30, { rank, required: new Set(["small"]) }).get(
+        "small",
+      ),
     ).toBe("below");
   });
 
@@ -206,7 +212,7 @@ describe("cluster layout", () => {
     expect(maxCircleDiameter(4, 310, 460)).toBeCloseTo(
       0.3 * Math.sqrt((310 * 460) / 4),
     );
-    expect(maxCircleDiameter(300, 894, 540)).toBe(24);
+    expect(maxCircleDiameter(300, 894, 540)).toBe(48);
     expect(maxCircleDiameter(1, 120, 90)).toBe(30);
   });
 

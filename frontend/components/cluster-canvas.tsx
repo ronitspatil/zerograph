@@ -94,8 +94,6 @@ export function ClusterCanvas({
           "text-background-color": "#0d1522",
           "text-background-opacity": 0.92,
           "text-background-shape": "roundrectangle",
-          // Labeled clusters draw above unlabeled dots, so no dot crosses a label.
-          "z-index": 2,
         },
       },
       {
@@ -108,7 +106,6 @@ export function ClusterCanvas({
           "border-width": 2,
           "border-color": "#f5faff",
           "background-opacity": 1,
-          "z-index": 3,
         },
       },
       {
@@ -159,6 +156,7 @@ export function ClusterCanvas({
     const order = [...input.clusters]
       .sort((a, b) => b.size - a.size || a.id.localeCompare(b.id))
       .map((c) => c.id);
+    const rank = new Map(order.map((id, i) => [id, i]));
     const widths = new Map(
       input.clusters.map((c) => [
         c.id,
@@ -238,7 +236,7 @@ export function ClusterCanvas({
       for (const id of required)
         if (!candidates.some((c) => c.id === id))
           candidates.push(candidate(id));
-      // A label never covers another sizeable circle; small dots draw beneath it.
+      // A label never covers a larger cluster's circle; small dots draw beneath it.
       const obstacles = order.flatMap((id) => {
         const node = instance.getElementById(id);
         const { x, y } = node.renderedPosition();
@@ -249,12 +247,20 @@ export function ClusterCanvas({
         candidates,
         instance.width(),
         instance.height(),
-        { required, obstacles },
+        { required, obstacles, rank },
       );
       instance.batch(() => {
         for (const id of order) {
           const node = instance.getElementById(id);
           const side = placed.get(id);
+          // Labeled clusters draw above unlabeled ones, larger above smaller and
+          // the hovered or selected one on top, so no circle crosses a label.
+          const z = required.has(id)
+            ? order.length * 2
+            : side
+              ? order.length * 2 - 1 - rank.get(id)!
+              : 1;
+          node.style("z-index", z);
           if (!side) node.removeClass("label-on label-above");
           else {
             node.toggleClass("label-above", side === "above");
