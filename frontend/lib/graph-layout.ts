@@ -66,20 +66,25 @@ export function startLayout(
     new Worker(
       new URL("./graph-layout.worker.ts", import.meta.url),
     ) as unknown as LayoutWorker,
+  /** Called once when the worker ends without valid positions (error, timeout, bad output). */
+  fail?: () => void,
 ): () => void {
   const limits = layoutLimits(input);
   if (input.nodes.length > limits.nodes || input.edges.length > limits.edges)
     return () => {};
   let active = true;
+  let applied = false;
   let worker: LayoutWorker;
   try {
     worker = factory();
   } catch {
+    fail?.();
     return () => {};
   }
   const stop = () => {
     if (!active) return;
     active = false;
+    if (!applied) queueMicrotask(() => fail?.());
     clearTimeout(timer);
     worker.onmessage = null;
     worker.onerror = null;
@@ -101,8 +106,10 @@ export function startLayout(
           Number.isFinite(p.x) &&
           Number.isFinite(p.y),
       )
-    )
+    ) {
+      applied = true;
       apply(positions as Position[]);
+    }
     stop();
   };
   worker.onerror = stop;
@@ -111,7 +118,11 @@ export function startLayout(
   } catch {
     stop();
   }
-  return stop;
+  // The caller cancelling is not a failure.
+  return () => {
+    applied = true;
+    stop();
+  };
 }
 
 function visibleDegree(graph: GraphData): Map<string, number> {
