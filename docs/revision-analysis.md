@@ -20,7 +20,7 @@ All readers keep the existing shared pin on the tenant pointer, five-second lock
 
 ## Revisions published before this change
 
-Revisions without a stored row, or with a row from another `analysis_version`, are computed on read from the snapshot, exactly as before. This was chosen over a migration-time backfill because it needs no graph access during `alembic upgrade`, is correct by construction, and costs only what every request cost before the change; such revisions are bounded by the existing 5,000-node cap and are replaced by the next publication. Operators who want the fast path immediately can backfill a tenant's current revision under the publication lock:
+Revisions without a stored row, or with a row from another `analysis_version`, are computed on read from the snapshot, exactly as before. This was chosen over a migration-time backfill because it needs no graph access during `alembic upgrade`, is correct by construction, and costs only what every request cost before the change; such revisions were bounded by the former 5,000-node cap and are replaced by the next publication. Operators who want the fast path immediately can backfill a tenant's current revision under the publication lock:
 
 ```sh
 python -m app.graph.analysis --tenant TENANT_ID
@@ -34,7 +34,7 @@ Applied retention deletes a revision's `revision_analysis` and `revision_finding
 
 ## Cost and capacity
 
-Analysis runs while the publish job holds the tenant publication lock, so publication (and the reader 503 window) grows by the analysis time until the short-lock publication of a later phase. `backend/scripts/qualify_scale.py` measures this alongside endpoint latency:
+Analysis runs while the publish job builds the revision, before the short pointer swap; since Phase 2 (see [ingestion-upgrades.md](ingestion-upgrades.md)) readers are not blocked during it. The worker computes it from a compact representation of the staged rows (`app/graph/compact.py`), asserted equal to `compute_analysis` on generated and edge-case graphs. `backend/scripts/qualify_scale.py` measures this alongside endpoint latency:
 
 ```sh
 cd backend

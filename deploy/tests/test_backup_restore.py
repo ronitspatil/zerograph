@@ -52,18 +52,45 @@ class ArchiveTests(unittest.TestCase):
         }
         self.addCleanup(self.directory.cleanup)
 
-    def archive(self, *, mutate=None, extra=None):
-        graph_file = self.root / "graph.json"
+    def stream(self, metadata=None, *, end=True):
+        """Version 2 NDJSON graph stream for the synthetic snapshots."""
+        lines = [{"format": "zerograph-graph", "version": 2, "metadata": metadata or self.metadata}]
+        for item in self.graph["snapshots"]:
+            lines.append(
+                {
+                    "revision": {
+                        "tenant": item["tenant"],
+                        "revision": item["revision"],
+                        "retention": item["retention"],
+                        "state": "ready",
+                        "source": "snapshot",
+                        "warnings": [],
+                        "nodes": 0,
+                        "edges": 0,
+                    }
+                }
+            )
+        if end:
+            lines.append({"end": {"revisions": len(self.graph["snapshots"]), "nodes": 0, "edges": 0}})
+        return "".join(json.dumps(line, sort_keys=True) + "\n" for line in lines).encode()
+
+    def archive(self, *, mutate=None, extra=None, version=1, stream=None):
+        name = "graph.json" if version == 1 else "graph.ndjson"
+        graph_file = self.root / name
         dump = self.root / "postgres.dump"
-        graph_file.write_text(json.dumps(self.graph))
+        if version == 1:
+            graph_file.write_text(json.dumps(self.graph))
+        else:
+            graph_file.write_bytes(stream if stream is not None else self.stream())
+            self.manifest["version"] = 2
         dump.write_bytes(b"PGDMPsynthetic-test-data")
-        self.manifest["checksums"] = {"graph.json": digest(graph_file), "postgres.dump": digest(dump)}
+        self.manifest["checksums"] = {name: digest(graph_file), "postgres.dump": digest(dump)}
         if mutate:
             mutate(self.manifest)
         archive = self.root / "backup.zip"
         with zipfile.ZipFile(archive, "w") as zipped:
             zipped.writestr("manifest.json", json.dumps(self.manifest))
-            zipped.write(graph_file, "graph.json")
+            zipped.write(graph_file, name)
             zipped.write(dump, "postgres.dump")
             if extra:
                 zipped.writestr(extra, "unexpected")
@@ -154,7 +181,15 @@ class ArchiveTests(unittest.TestCase):
         compose.offline.return_value = {"backend": {"ID": "container-id"}}
         compose.backend_image.return_value = "backend-id"
         compose.image.return_value = {"id": "backend-id"}
-        compose.bridge.side_effect = [self.graph, self.metadata]
+        stream = self.stream()
+
+        def bridge(action, data=None, *, stdin=None, output=None):
+            if action == "export":
+                output.write(stream)
+                return None
+            return self.metadata
+
+        compose.bridge.side_effect = bridge
 
         def dump(_args, *, output):
             self.assertEqual(stat.S_IMODE(os.fstat(output.fileno()).st_mode), 0o600)
@@ -180,7 +215,82 @@ class ArchiveTests(unittest.TestCase):
             backup(compose, archive)
         self.assertEqual(synced, [stat.S_IFREG, stat.S_IFDIR])
         self.assertEqual(stat.S_IMODE(archive.stat().st_mode), 0o600)
-        self.assertEqual(self.unpack(archive)["application"], self.metadata)
+        manifest = self.unpack(archive)
+        self.assertEqual(manifest["application"], self.metadata)
+        self.assertEqual(manifest["version"], 2)
+        with zipfile.ZipFile(archive) as zipped:
+            self.assertEqual(sorted(zipped.namelist()), ["graph.ndjson", "manifest.json", "postgres.dump"])
+            self.assertEqual(zipped.read("graph.ndjson"), stream)
+
+    def test_streamed_v2_archive_accepted_and_structurally_checked(self):
+        self.assertEqual(self.unpack(self.archive(version=2))["version"], 2)
+        for broken in (
+            self.stream(end=False),
+            self.stream(metadata={**self.metadata, "app_version": "other"}),
+            self.stream() + b'{"revision": {}}\n',
+        ):
+            with self.subTest(broken=broken[-40:]):
+                with self.assertRaises(BackupError):
+                    archive = self.archive(version=2, stream=broken)
+                    destination = self.root / "extracted"
+                    if destination.exists():
+                        for path in destination.iterdir():
+                            path.unlink()
+                        destination.rmdir()
+                    self.unpack(archive)
+
+    def test_v2_missing_pointer_and_mixed_members_refused(self):
+        self.graph["snapshots"] = []
+        with self.assertRaises(BackupError):
+            self.unpack(self.archive(version=2))
+        self.setUp()
+        with self.assertRaises(BackupError):  # version 1 manifest naming a v2 member
+            self.unpack(self.archive(version=2, mutate=lambda m: m.update({"version": 1})))
+
+    def test_v1_restore_is_converted_then_streamed_and_verified(self):
+        archive = self.archive()
+        converted = self.stream()
+        calls = []
+
+        def bridge(action, data=None, *, stdin=None, output=None):
+            calls.append(action)
+            if action == "convert-v1":
+                self.assertEqual(json.loads(stdin.read()), self.graph)
+                output.write(converted)
+            elif action == "validate":
+                self.assertEqual(stdin.read(), converted)
+                return self.metadata
+            elif action == "import":
+                self.assertEqual(stdin.read(), converted)
+            elif action == "export":
+                output.write(converted)
+            elif action == "metadata":
+                return self.metadata
+            return None
+
+        compose = Mock()
+        compose.backend_image.return_value = "backend-id"
+        compose.sql.return_value = "0"
+        compose.bridge.side_effect = bridge
+        with patch("deploy.backup_restore.engines", return_value=self.engines):
+            restore(compose, archive)
+        self.assertEqual(calls, ["convert-v1", "validate", "empty", "import", "metadata", "export"])
+
+    def test_restore_refuses_a_graph_that_differs_after_import(self):
+        archive = self.archive(version=2)
+
+        def bridge(action, data=None, *, stdin=None, output=None):
+            if action == "export":
+                output.write(self.stream().replace(b'"source": "snapshot"', b'"source": "changed"'))
+            return self.metadata if action in {"validate", "metadata"} else None
+
+        compose = Mock()
+        compose.backend_image.return_value = "backend-id"
+        compose.sql.return_value = "0"
+        compose.bridge.side_effect = bridge
+        with patch("deploy.backup_restore.engines", return_value=self.engines):
+            with self.assertRaises(BackupError):
+                restore(compose, archive)
 
 
 class OfflineTests(unittest.TestCase):

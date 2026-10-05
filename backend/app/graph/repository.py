@@ -29,11 +29,67 @@ from app.graph.schema import Edge, EdgeType, GraphSnapshot, Node, NodeType
 class RevisionMetadata:
     revision: str
     created_at_ms: int
+    # "ready" (published or legacy without a state), "building" (publication in
+    # progress or abandoned) or "deleting" (a batched delete started).
+    state: str = "ready"
+
+
+REVISION_STATES = ("ready", "building", "deleting")
+
+
+@dataclass(frozen=True)
+class NodeRow:
+    """One entity to write; ``payload`` is the node's JSON document."""
+
+    id: str
+    type: str
+    name: str
+    payload: str
+
+
+@dataclass(frozen=True)
+class EdgeRow:
+    """One relationship to write; ``payload`` is the edge's JSON document."""
+
+    id: str
+    source: str
+    target: str
+    type: str
+    certainty: str
+    payload: str
+
+
+def node_row(node: Node) -> NodeRow:
+    return NodeRow(node.id, node.type.value, node.name, node.model_dump_json())
+
+
+def edge_row(edge: Edge) -> EdgeRow:
+    return EdgeRow(edge.id, edge.source, edge.target, edge.type.value, edge.certainty, edge.model_dump_json())
+
+
+def _batches(rows, size: int):
+    batch = []
+    for row in rows:
+        batch.append(row)
+        if len(batch) >= size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
 
 
 class GraphStore(Protocol):
     def migrate(self) -> None: ...
     def publish(self, tenant: str, revision: str, snapshot: GraphSnapshot) -> None: ...
+    # Batched publication: the Snapshot node is written first with state "building",
+    # rows follow in bounded transactions, and "ready" is set last. The SQL pointer
+    # may reference a revision only after finish_revision returned.
+    def begin_revision(
+        self, tenant: str, revision: str, source: str = "combined", warnings: list[str] | None = None
+    ) -> bool: ...
+    def write_nodes(self, tenant: str, revision: str, rows: list[NodeRow]) -> None: ...
+    def write_edges(self, tenant: str, revision: str, rows: list[EdgeRow]) -> None: ...
+    def finish_revision(self, tenant: str, revision: str) -> None: ...
     def snapshot(self, tenant: str, revision: str) -> GraphSnapshot: ...
     def node(self, tenant: str, revision: str, node_id: str) -> Node | None: ...
     def explore(
@@ -56,9 +112,17 @@ class GraphStore(Protocol):
         totals: RevisionTotals | None = None,
     ) -> RoleMapSlice: ...
     def retention_candidates(
-        self, tenant: str, protected: str, cutoff_ms: int, keep: int, limit: int
+        self,
+        tenant: str,
+        protected: str,
+        cutoff_ms: int,
+        keep: int,
+        limit: int,
+        stale_building_cutoff_ms: int | None = None,
     ) -> list[RevisionMetadata]: ...
-    def delete_revision(self, tenant: str, revision: str, created_at_ms: int, cutoff_ms: int) -> bool: ...
+    def delete_revision(
+        self, tenant: str, revision: str, created_at_ms: int, cutoff_ms: int, state: str = "ready"
+    ) -> bool: ...
     def shortest_paths(
         self, tenant: str, revision: str, source: str, hops: int, include_uncertain: bool
     ) -> dict[str, list[str]]: ...
@@ -69,8 +133,11 @@ class MemoryGraphStore:
     """Explicit test/development adapter, never a production fallback."""
 
     def __init__(self):
+        # Ready (readable) revisions only; builds in progress live in ``building``.
         self.snapshots: dict[tuple[str, str], GraphSnapshot] = {}
         self.created_at: dict[tuple[str, str], int] = {}
+        self.building: dict[tuple[str, str], dict] = {}
+        self.deleting: set[tuple[str, str]] = set()
 
     def migrate(self) -> None:
         pass
@@ -78,6 +145,37 @@ class MemoryGraphStore:
     def publish(self, tenant: str, revision: str, snapshot: GraphSnapshot) -> None:
         self.snapshots[(tenant, revision)] = snapshot.model_copy(deep=True)
         self.created_at.setdefault((tenant, revision), time.time_ns() // 1_000_000)
+
+    def begin_revision(
+        self, tenant: str, revision: str, source: str = "combined", warnings: list[str] | None = None
+    ) -> bool:
+        key = tenant, revision
+        if key in self.snapshots or key in self.building:
+            raise ValueError("Revision already exists")
+        self.created_at.setdefault(key, time.time_ns() // 1_000_000)
+        self.building[key] = {"source": source, "warnings": list(warnings or []), "nodes": {}, "edges": {}}
+        return True
+
+    def write_nodes(self, tenant: str, revision: str, rows: list[NodeRow]) -> None:
+        build = self.building[(tenant, revision)]
+        for row in rows:
+            build["nodes"][row.id] = Node.model_validate_json(row.payload)
+
+    def write_edges(self, tenant: str, revision: str, rows: list[EdgeRow]) -> None:
+        build = self.building[(tenant, revision)]
+        for row in rows:
+            if row.source not in build["nodes"] or row.target not in build["nodes"]:
+                raise ValueError("Edge endpoint missing from revision")
+            build["edges"][row.id] = Edge.model_validate_json(row.payload)
+
+    def finish_revision(self, tenant: str, revision: str) -> None:
+        build = self.building.pop((tenant, revision))
+        self.snapshots[(tenant, revision)] = GraphSnapshot.model_construct(
+            nodes=list(build["nodes"].values()),
+            edges=list(build["edges"].values()),
+            warnings=build["warnings"],
+            source=build["source"],
+        )
 
     def snapshot(self, tenant: str, revision: str) -> GraphSnapshot:
         return self.snapshots.get((tenant, revision), GraphSnapshot()).model_copy(deep=True)
@@ -131,34 +229,42 @@ class MemoryGraphStore:
             totals,
         )
 
+    def _state(self, key: tuple[str, str]) -> str | None:
+        if key in self.deleting:
+            return "deleting"
+        if key in self.building:
+            return "building"
+        return "ready" if key in self.snapshots else None
+
     def retention_candidates(
-        self, tenant: str, protected: str, cutoff_ms: int, keep: int, limit: int
+        self,
+        tenant: str,
+        protected: str,
+        cutoff_ms: int,
+        keep: int,
+        limit: int,
+        stale_building_cutoff_ms: int | None = None,
     ) -> list[RevisionMetadata]:
         _validate_retention_bounds(keep, limit)
-        revisions = sorted(
-            (
-                RevisionMetadata(revision, created)
-                for (scope, revision), created in self.created_at.items()
-                if scope == tenant and (scope, revision) in self.snapshots
-            ),
-            key=lambda revision: (revision.created_at_ms, revision.revision),
-            reverse=True,
-        )
-        return [
-            revision
-            for revision in revisions[keep:]
-            if revision.revision != protected and revision.created_at_ms < cutoff_ms
-        ][:limit]
+        dated = [
+            RevisionMetadata(revision, created, self._state((scope, revision)))
+            for (scope, revision), created in self.created_at.items()
+            if scope == tenant and self._state((scope, revision)) is not None
+        ]
+        return _select_candidates(dated, protected, cutoff_ms, keep, limit, stale_building_cutoff_ms)
 
-    def delete_revision(self, tenant: str, revision: str, created_at_ms: int, cutoff_ms: int) -> bool:
+    def delete_revision(
+        self, tenant: str, revision: str, created_at_ms: int, cutoff_ms: int, state: str = "ready"
+    ) -> bool:
         key = tenant, revision
+        current = self._state(key)
         if self.created_at.get(key) != created_at_ms or created_at_ms >= cutoff_ms:
             return False
-        if key not in self.snapshots:
+        if current is None or not _state_matches(current, state):
             return False
-        if len(self.snapshots[key].nodes) > 5000:
-            raise ValueError("Revision exceeds bounded deletion node limit")
-        del self.snapshots[key]
+        self.snapshots.pop(key, None)
+        self.building.pop(key, None)
+        self.deleting.discard(key)
         del self.created_at[key]
         return True
 
@@ -178,6 +284,44 @@ def _validate_retention_bounds(keep: int, limit: int) -> None:
         raise ValueError("Keep count must be 2..1000 and batch size 1..50")
 
 
+def _state_matches(current: str, expected: str) -> bool:
+    # A delete that already started may be resumed whatever state it was chosen in.
+    return current == expected or current == "deleting"
+
+
+def _select_candidates(
+    dated: list[RevisionMetadata],
+    protected: str,
+    cutoff_ms: int,
+    keep: int,
+    limit: int,
+    stale_building_cutoff_ms: int | None,
+) -> list[RevisionMetadata]:
+    """Shared retention selection over dated revisions (undated ones are never candidates).
+
+    Ready revisions: rank newest first, keep ``keep`` regardless of age, then require
+    ``created_at_ms < cutoff_ms``. A building revision is a candidate only once older
+    than ``stale_building_cutoff_ms`` (an abandoned publication); a young one is never
+    selected and never counts toward ``keep``. An interrupted delete is always resumed.
+    The protected (current pointer) revision is never returned.
+    """
+    order = lambda revision: (revision.created_at_ms, revision.revision)  # noqa: E731
+    ready = sorted((r for r in dated if r.state == "ready"), key=order, reverse=True)
+    selected = [r for r in ready[keep:] if r.created_at_ms < cutoff_ms]
+    for revision in dated:
+        if revision.state == "deleting" or (
+            revision.state == "building"
+            and stale_building_cutoff_ms is not None
+            and revision.created_at_ms < stale_building_cutoff_ms
+        ):
+            selected.append(revision)
+    selected = [r for r in selected if r.revision != protected]
+    return sorted(selected, key=order, reverse=True)[:limit]
+
+
+SCHEMA_MIGRATIONS = ("001_schema.cypher", "003_entity_scope_id.cypher")
+
+
 class CypherGraphStore:
     def __init__(self):
         settings = get_settings()
@@ -193,75 +337,128 @@ class CypherGraphStore:
         )
 
     def migrate(self) -> None:
-        path = Path(__file__).parent / "migrations" / self.vendor / "001_schema.cypher"
+        folder = Path(__file__).parent / "migrations" / self.vendor
         with self.driver.session() as session:
-            for statement in path.read_text().split(";"):
-                if statement.strip():
-                    try:
-                        session.run(Query(statement, timeout=self.timeout)).consume()
-                    except Neo4jError as exc:
-                        if self.vendor != "memgraph" or "already exists" not in str(exc).lower():
-                            raise
+            for name in SCHEMA_MIGRATIONS:
+                for statement in (folder / name).read_text().split(";"):
+                    if statement.strip():
+                        try:
+                            session.run(Query(statement, timeout=self.timeout)).consume()
+                        except Neo4jError as exc:
+                            if self.vendor != "memgraph" or "already exists" not in str(exc).lower():
+                                raise
+
+    def _write(self, function, **kwargs):
+        with self.driver.session() as session:
+            return session.execute_write(unit_of_work(timeout=self.timeout)(function), **kwargs)
 
     def publish(self, tenant: str, revision: str, snapshot: GraphSnapshot) -> None:
+        """Whole-snapshot publication (restore, tests, small graphs) via the batched path.
+
+        Republishing an existing revision MERGEs idempotently; a new revision is created.
+        """
+        fresh = self.begin_revision(tenant, revision, snapshot.source, snapshot.warnings)
+        size = get_settings().graph_batch_size
+        for batch in _batches((node_row(node) for node in snapshot.nodes), size):
+            self.write_nodes(tenant, revision, batch, merge=not fresh)
+        for batch in _batches((edge_row(edge) for edge in snapshot.edges), size):
+            self.write_edges(tenant, revision, batch, merge=not fresh)
+        self.finish_revision(tenant, revision)
+
+    def begin_revision(
+        self, tenant: str, revision: str, source: str = "combined", warnings: list[str] | None = None
+    ) -> bool:
+        """Write the Snapshot node first, in state "building"; True when newly created."""
+
         def write(tx):
-            for kind in NodeType:
-                rows = [
-                    {
-                        "id": n.id,
-                        "name": n.name,
-                        "key": json.dumps([tenant, revision, n.id]),
-                        "payload": n.model_dump_json(),
-                    }
-                    for n in snapshot.nodes
-                    if n.type == kind
-                ]
-                if rows:
-                    tx.run(
-                        f"UNWIND $rows AS row MERGE (n:Entity:{kind.value} {{key: row.key}}) "
-                        "SET n.tenant_id=$tenant, n.revision=$revision, n.id=row.id, "
-                        "n.name=row.name, n.payload=row.payload",
-                        rows=rows,
-                        tenant=tenant,
-                        revision=revision,
-                    ).consume()
-            for kind in EdgeType:
-                rows = [
-                    {
-                        "source": e.source,
-                        "target": e.target,
-                        "id": e.id,
-                        "certainty": e.certainty,
-                        "payload": e.model_dump_json(),
-                    }
-                    for e in snapshot.edges
-                    if e.type == kind
-                ]
-                if rows:
-                    tx.run(
-                        "UNWIND $rows AS row "
-                        "MATCH (a:Entity {tenant_id:$tenant, revision:$revision, id:row.source}), "
-                        "(b:Entity {tenant_id:$tenant, revision:$revision, id:row.target}) "
-                        f"MERGE (a)-[r:{kind.value} {{id:row.id}}]->(b) "
-                        "SET r.tenant_id=$tenant, r.revision=$revision, r.certainty=row.certainty, "
-                        "r.payload=row.payload",
-                        rows=rows,
-                        tenant=tenant,
-                        revision=revision,
-                    ).consume()
-            tx.run(
-                "MERGE (s:Snapshot {key:$key}) ON CREATE SET s.created_at_ms=$created_at "
-                "SET s.tenant_id=$tenant, s.revision=$revision, s.source=$source, s.warnings=$warnings",
+            return tx.run(
+                "MERGE (s:Snapshot {key:$key}) "
+                "ON CREATE SET s.created_at_ms=$created_at, s.state='building', s.fresh=true "
+                "ON MATCH SET s.fresh=false "
+                "SET s.tenant_id=$tenant, s.revision=$revision, s.source=$source, s.warnings=$warnings "
+                "RETURN s.fresh AS fresh",
                 created_at=time.time_ns() // 1_000_000,
                 key=json.dumps([tenant, revision]),
                 tenant=tenant,
                 revision=revision,
-                source=snapshot.source,
-                warnings=snapshot.warnings,
-            ).consume()
+                source=source,
+                warnings=list(warnings or []),
+            ).single()["fresh"]
 
-        with self.driver.session() as session:
-            session.execute_write(unit_of_work(timeout=self.timeout)(write))
+        return bool(self._write(write))
+
+    def write_nodes(self, tenant: str, revision: str, rows: list[NodeRow], merge: bool = False) -> None:
+        """One transaction per call; callers bound ``rows`` (Settings.graph_batch_size)."""
+        verb = "MERGE" if merge else "CREATE"
+
+        def write(tx):
+            by_type: dict[str, list[dict]] = {}
+            for row in rows:
+                by_type.setdefault(NodeType(row.type).value, []).append(
+                    {
+                        "key": json.dumps([tenant, revision, row.id]),
+                        "id": row.id,
+                        "name": row.name,
+                        "payload": row.payload,
+                    }
+                )
+            for kind, items in by_type.items():
+                tx.run(
+                    f"UNWIND $rows AS row {verb} (n:Entity:{kind} {{key: row.key}}) "
+                    "SET n.tenant_id=$tenant, n.revision=$revision, n.id=row.id, "
+                    "n.name=row.name, n.payload=row.payload",
+                    rows=items,
+                    tenant=tenant,
+                    revision=revision,
+                ).consume()
+
+        if rows:
+            self._write(write)
+
+    def write_edges(self, tenant: str, revision: str, rows: list[EdgeRow], merge: bool = False) -> None:
+        """Endpoints are matched through the unique entity key, never a label scan."""
+        verb = "MERGE" if merge else "CREATE"
+
+        def write(tx):
+            by_type: dict[str, list[dict]] = {}
+            for row in rows:
+                by_type.setdefault(EdgeType(row.type).value, []).append(
+                    {
+                        "source": json.dumps([tenant, revision, row.source]),
+                        "target": json.dumps([tenant, revision, row.target]),
+                        "id": row.id,
+                        "certainty": row.certainty,
+                        "payload": row.payload,
+                    }
+                )
+            for kind, items in by_type.items():
+                summary = tx.run(
+                    "UNWIND $rows AS row "
+                    "MATCH (a:Entity {key:row.source}) MATCH (b:Entity {key:row.target}) "
+                    f"{verb} (a)-[r:{kind} {{id:row.id}}]->(b) "
+                    "SET r.tenant_id=$tenant, r.revision=$revision, r.certainty=row.certainty, "
+                    "r.payload=row.payload RETURN count(r) AS written",
+                    rows=items,
+                    tenant=tenant,
+                    revision=revision,
+                ).single()
+                if summary["written"] != len(items):
+                    raise ValueError("Edge endpoint missing from revision")
+
+        if rows:
+            self._write(write)
+
+    def finish_revision(self, tenant: str, revision: str) -> None:
+        def write(tx):
+            row = tx.run(
+                "MATCH (s:Snapshot {key:$key}) WHERE coalesce(s.state, 'ready') <> 'deleting' "
+                "SET s.state='ready' REMOVE s.fresh RETURN s.key AS key",
+                key=json.dumps([tenant, revision]),
+            ).single()
+            if row is None:
+                raise ValueError("Revision under construction disappeared")
+
+        self._write(write)
 
     def snapshot(self, tenant: str, revision: str) -> GraphSnapshot:
         if not revision:
@@ -372,63 +569,79 @@ class CypherGraphStore:
             )
 
     def retention_candidates(
-        self, tenant: str, protected: str, cutoff_ms: int, keep: int, limit: int
+        self,
+        tenant: str,
+        protected: str,
+        cutoff_ms: int,
+        keep: int,
+        limit: int,
+        stale_building_cutoff_ms: int | None = None,
     ) -> list[RevisionMetadata]:
         _validate_retention_bounds(keep, limit)
-        # Rank before the age filter: keep the newest revisions regardless of age.
-        # Undated legacy revisions are never inferred old enough for deletion.
+        # Snapshot metadata only (one small node per revision). Ranking keeps the
+        # newest ready revisions regardless of age; undated legacy revisions are never
+        # inferred old enough for deletion. Selection is shared with the memory adapter.
         query = (
             "MATCH (s:Snapshot {tenant_id:$tenant}) WHERE s.created_at_ms IS NOT NULL "
-            "WITH s ORDER BY s.created_at_ms DESC, s.revision DESC SKIP $keep "
-            "WITH s WHERE s.revision <> $protected AND s.created_at_ms < $cutoff "
-            "RETURN s.revision AS revision, s.created_at_ms AS created_at "
-            "ORDER BY created_at DESC, revision DESC LIMIT $limit"
+            "RETURN s.revision AS revision, s.created_at_ms AS created_at, "
+            "coalesce(s.state, 'ready') AS state"
         )
         with self.driver.session() as session:
-            return [
-                RevisionMetadata(row["revision"], row["created_at"])
-                for row in session.run(
-                    Query(query, timeout=self.timeout),
-                    tenant=tenant,
-                    protected=protected,
-                    cutoff=cutoff_ms,
-                    keep=keep,
-                    limit=limit,
-                )
+            dated = [
+                RevisionMetadata(row["revision"], row["created_at"], row["state"])
+                for row in session.run(Query(query, timeout=self.timeout), tenant=tenant)
+                if row["state"] in REVISION_STATES
             ]
+        return _select_candidates(dated, protected, cutoff_ms, keep, limit, stale_building_cutoff_ms)
 
-    def delete_revision(self, tenant: str, revision: str, created_at_ms: int, cutoff_ms: int) -> bool:
-        # Call only while holding the SQL tenant publication lock. No graph-only
-        # check can safely establish which revision the SQL pointer references.
-        def delete(tx):
+    def delete_revision(
+        self, tenant: str, revision: str, created_at_ms: int, cutoff_ms: int, state: str = "ready"
+    ) -> bool:
+        """Batched delete. Call only while holding the tenant publication lock.
+
+        The Snapshot node is marked "deleting" first and removed last, so an
+        interrupted delete stays discoverable and is resumed by the next run. No
+        graph-only check can establish which revision the SQL pointer references.
+        """
+        key = json.dumps([tenant, revision])
+
+        def mark(tx):
             row = tx.run(
-                "MATCH (s:Snapshot {tenant_id:$tenant, revision:$revision}) "
-                "WHERE s.created_at_ms=$created AND s.created_at_ms < $cutoff "
-                "RETURN s.key AS key",
+                "MATCH (s:Snapshot {key:$key}) "
+                "WHERE s.tenant_id=$tenant AND s.revision=$revision "
+                "AND s.created_at_ms=$created AND s.created_at_ms < $cutoff "
+                "AND coalesce(s.state, 'ready') IN [$state, 'deleting'] "
+                "SET s.state='deleting' RETURN s.key AS key",
+                key=key,
                 tenant=tenant,
                 revision=revision,
                 created=created_at_ms,
                 cutoff=cutoff_ms,
+                state=state,
             ).single()
-            if row is None:
-                return False
-            count = tx.run(
-                "MATCH (n:Entity {tenant_id:$tenant, revision:$revision}) RETURN count(n) AS count",
-                tenant=tenant,
-                revision=revision,
-            ).single()["count"]
-            if count > 5000:
-                raise ValueError("Revision exceeds bounded deletion node limit")
-            tx.run(
-                "MATCH (n:Entity {tenant_id:$tenant, revision:$revision}) DETACH DELETE n",
-                tenant=tenant,
-                revision=revision,
-            ).consume()
-            tx.run("MATCH (s:Snapshot {key:$key}) DELETE s", key=row["key"]).consume()
-            return True
+            return row is not None
 
-        with self.driver.session() as session:
-            return session.execute_write(unit_of_work(timeout=self.timeout)(delete))
+        if not self._write(mark):
+            return False
+        size = get_settings().graph_batch_size
+
+        def delete_batch(tx):
+            return tx.run(
+                "MATCH (n:Entity {tenant_id:$tenant, revision:$revision}) "
+                "WITH n LIMIT $limit DETACH DELETE n RETURN count(*) AS deleted",
+                tenant=tenant,
+                revision=revision,
+                limit=max(1, size // 2),
+            ).single()["deleted"]
+
+        while self._write(delete_batch):
+            pass
+
+        def remove(tx):
+            tx.run("MATCH (s:Snapshot {key:$key}) DELETE s", key=key).consume()
+
+        self._write(remove)
+        return True
 
     def shortest_paths(
         self, tenant: str, revision: str, source: str, hops: int, include_uncertain: bool

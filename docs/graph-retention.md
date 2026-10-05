@@ -41,18 +41,34 @@ backup/restore archives. Legacy cleanup requires separately verified age evidenc
 
 ## Concurrency and failure behavior
 
-Maintenance holds the same PostgreSQL `TenantState` row lock that ingestion holds
-before publishing or advancing its pointer. A publishing ingestion and cleanup
-cannot operate on a tenant simultaneously. Maintenance refuses a tenant without
-an authoritative SQL row. Lock acquisition has a five-second timeout; rerun
-later if an active publisher owns the lock. The lock is held across the bounded
-batch, so ingestion of that tenant waits while deletion runs.
+Maintenance takes the same per-tenant PostgreSQL advisory publication lock
+(`pg_advisory_xact_lock`) that an ingestion worker holds for the whole build of a
+revision, plus a shared lock on the tenant's `TenantState` row. A publishing
+ingestion and cleanup therefore never operate on a tenant at the same time, and
+the SQL pointer cannot move while cleanup runs. Maintenance refuses a tenant
+without an authoritative SQL row. Lock acquisition has a five-second timeout; if
+a publication is in progress the run fails with "publication or maintenance is
+in progress" and can simply be rerun later. Ingestion of that tenant waits while
+deletion runs. Readers are not blocked: they only ever pin the current pointer,
+which retention never deletes.
 
-Each revision deletion is a graph transaction scoped by tenant and revision,
-rechecking its exact creation timestamp and cutoff. It removes at most the normal
-5000-node snapshot bound plus relationships and metadata. An unexpected larger
-revision fails closed. Driver query timeouts still apply. A failed per-revision
-graph transaction rolls back that revision's Entity and Snapshot deletion.
+Revisions carry a state on their `Snapshot` node: `ready` (published, or legacy
+without a state), `building` (a publication in progress or abandoned) or
+`deleting` (a batched delete started). Only `ready` revisions are ranked for the
+keep count and age cutoff. A `building` revision becomes a candidate only once it
+is older than one hour (`STALE_BUILDING_AGE`, longer than the 21-minute ingestion
+lease), so a young build in progress is never selected; an abandoned build (the
+worker died or its SQL commit failed) is cleaned up once stale, regardless of the
+keep count. A `deleting` revision is always resumed.
+
+Each revision deletion first marks the `Snapshot` node `deleting` after rechecking
+its exact creation timestamp, state and cutoff, then deletes the revision's
+entities and relationships in bounded transactions (`ZG_GRAPH_BATCH_SIZE`/2 nodes
+each, default 2,500) and removes the `Snapshot` node last. There is no size
+refusal: a 100,000-node / 417,000-edge revision was deleted in under a second on
+Memgraph 3.2.0 (see [graph-scale.md](graph-scale.md)). An interrupted deletion
+leaves a partially deleted, `deleting` revision that is never the SQL pointer and
+that the next run resumes. Driver query timeouts apply per batch.
 
 Deletion is irreversible without a verified backup. Graph and SQL operations are
 not a distributed transaction: if a later deletion or SQL audit commit fails,
@@ -76,9 +92,9 @@ any still-present candidate.
 Do not run retention during backup/restore or while external tools write graph
 revisions or SQL tenant pointers outside the application's lock protocol. API graph readers pin the current SQL pointer using a shared tenant row lock
 held by the existing request database session through snapshot and shortest-path
-materialization. Publication and cleanup take an exclusive lock, so they wait
-for existing readers and new readers wait up to five seconds for cleanup or
-publication. A PostgreSQL lock acquisition timeout returns a sanitized HTTP503
+materialization. Only a publisher's final pointer swap takes the row exclusively
+(milliseconds); it waits for existing readers, and new readers wait for it up to
+five seconds. A PostgreSQL lock acquisition timeout returns a sanitized HTTP503
 with `Retry-After: 5`; other database errors use the existing error handler.
 No read-drained window is
 required for the current API read paths. Locks end with request transaction
@@ -92,8 +108,10 @@ jobs, remediations or audit history.
 
 Tests cover dry-run defaults, tenant boundaries, age/keep/batch limits, legacy
 retention, exact timestamp rechecks and PostgreSQL publication-lock exclusion.
-The graph integration suite exercises retention queries and transaction rollback
-against both Memgraph and Neo4j. These tests operate only on synthetic random test
+The graph integration suite exercises retention queries, state-checked batched
+deletion, resumption of an interrupted delete and building-state selection against
+a real graph database (Memgraph 3.2.0 in Phase 2; Neo4j parity is not
+scale-qualified). These tests operate only on synthetic random test
 tenants; no existing application data is deleted.
 
 Before enabling scheduled maintenance in a target environment, verify backup

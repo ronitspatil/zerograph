@@ -165,7 +165,7 @@ def test_failed_analysis_publishes_nothing(client, environment):
             "/api/v1/ingestions",
             json={"source": "snapshot", "payload": demo_snapshot().model_dump(mode="json")},
         ).json()
-    with patch("app.collectors.tasks.compute_analysis", side_effect=RuntimeError("analysis bug")):
+    with patch("app.graph.compact.CompactGraph.analyze", side_effect=RuntimeError("analysis bug")):
         with pytest.raises(RuntimeError):
             process_job(job["id"])
     with factory() as db:

@@ -10,9 +10,9 @@ temporary SQLite (or a disposable schema of ``--database-url`` PostgreSQL). It r
   the in-process ASGI app, warm, as p50/p95/max over ``--requests`` sequential calls;
 * the legacy compute-on-read cost of the same two endpoints, for comparison.
 
-Sizes at or above the 5,000-node/20,000-edge snapshot caps lift the Pydantic caps in this
-process only (``caps_lifted`` in the report); product caps are unchanged. The HTTP
-ingestion body limit is bypassed by queuing the job row directly.
+Caps are the Settings defaults (100,000 nodes / 500,000 edges), so no cap lifting is
+needed. The HTTP ingestion body limit is bypassed by queuing the job row directly.
+Memgraph publication at 100k is measured by ``qualify_publication.py``.
 """
 
 import argparse
@@ -32,12 +32,9 @@ from uuid import uuid4
 os.environ.update(ZG_ENVIRONMENT="test", ZG_GRAPH_VENDOR="memory")
 
 from loguru import logger  # noqa: E402
-from pydantic.fields import FieldInfo  # noqa: E402
 
-from app.graph import schema  # noqa: E402
 from app.graph.schema import Edge, EdgeType, GraphSnapshot, Node, NodeType, Sensitivity  # noqa: E402
 
-NODE_CAP, EDGE_CAP = 5000, 20000
 MIX = [
     (NodeType.HUMAN, 0.08),
     (NodeType.SERVICE, 0.25),
@@ -133,13 +130,6 @@ def generate(n: int, seed: int = 7, exposed_rate: float = 0.002) -> GraphSnapsho
     )
 
 
-def lift_snapshot_caps() -> None:
-    """Measurement-only: remove per-snapshot list caps in this process."""
-    schema.GraphSnapshot.model_fields["nodes"] = FieldInfo(annotation=list[schema.Node], default_factory=list)
-    schema.GraphSnapshot.model_fields["edges"] = FieldInfo(annotation=list[schema.Edge], default_factory=list)
-    schema.GraphSnapshot.model_rebuild(force=True)
-
-
 @contextmanager
 def app_database(url: str | None):
     """Yield a SQLAlchemy URL for disposable app state, removed afterwards."""
@@ -195,7 +185,7 @@ def qualify(
     from app.core.config import get_settings
     from app.db.models import Base, IngestionJob, TenantState
     from app.db.session import session_factory
-    from app.graph import analysis as analysis_module
+    from app.graph.compact import CompactGraph
     from app.graph.repository import get_graph_store
     from app.main import create_app
 
@@ -245,18 +235,14 @@ def qualify(
         runs = {"without": [], "with": [], "analysis": []}
         for run in range(publish_runs):
             with (
-                patch.object(tasks, "compute_analysis", lambda snapshot: None),
+                patch.object(CompactGraph, "analyze", lambda self: None),
                 patch.object(tasks, "store_analysis", lambda *args: None),
             ):
                 runs["without"].append(publish(f"legacy-{run}"))
             spent: dict[str, float] = {}
             with (
-                patch.object(
-                    tasks, "compute_analysis", measured(spent, "compute", analysis_module.compute_analysis)
-                ),
-                patch.object(
-                    tasks, "store_analysis", measured(spent, "store", analysis_module.store_analysis)
-                ),
+                patch.object(CompactGraph, "analyze", measured(spent, "compute", CompactGraph.analyze)),
+                patch.object(tasks, "store_analysis", measured(spent, "store", tasks.store_analysis)),
             ):
                 runs["with"].append(publish(f"stored-{run}"))
             runs["analysis"].append(spent)
@@ -370,18 +356,12 @@ def main():
     ):
         parser.error("Sizes 100..100000, requests 5..1000 and publish runs 1..5 are required")
     logger.remove()  # Per-request INFO logs would distort sub-millisecond timings.
-    # Classification adds DataCategory nodes/edges at publication, so a graph at the
-    # cap publishes slightly above it; lift for any size at or above a cap.
-    caps_lifted = any(size >= NODE_CAP or len(generate(size).edges) >= EDGE_CAP for size in args.sizes)
-    if caps_lifted:
-        lift_snapshot_caps()
     report = {
         "measured_at": datetime.now(UTC).isoformat(),
         "python": platform.python_version(),
         "platform": platform.platform(),
         "app_database": "postgresql" if args.database_url else "sqlite",
         "graph_adapter": "memory",
-        "caps_lifted": caps_lifted,
         "fixture": FIXTURE,
         "exposed_rate": args.exposed_rate,
         "limitations": LIMITATIONS,

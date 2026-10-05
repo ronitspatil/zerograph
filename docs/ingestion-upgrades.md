@@ -35,8 +35,9 @@ redispatches due jobs every 30 seconds. Each dispatcher sweep reserves at most
 may duplicate delivery after the reservation expires; the SQL claim deduplicates
 execution. A failed broker send does not revoke a worker that already claimed it.
 
-Publication checks the current lease token and holds the job and tenant row locks
-through graph publication and SQL commit. Older same-source submissions cannot
+Publication checks the current lease token and holds the job row lock and the
+tenant's advisory publication lock through graph publication and SQL commit; the
+tenant row is locked only for the final pointer swap (see migration `0004` below). Older same-source submissions cannot
 overwrite newer successfully published snapshots. Such jobs complete with an
 `ingestion.superseded` audit event instead of a new graph revision.
 
@@ -60,3 +61,49 @@ would publish revisions without stored analysis, which stay correct (computed on
 read) but slow. Revisions published before the upgrade are computed on read until
 republished or backfilled with `python -m app.graph.analysis --tenant TENANT_ID`;
 see [revision-analysis.md](revision-analysis.md).
+
+## Chunked ingestion and short-lock publication (migration `0004`)
+
+Migration `0004` adds `upload_sessions` and `staged_entities`. Every source's
+latest snapshot is now an *entity set* of validated rows (`staged_entities`) and
+`source_snapshots.payload` holds `{"entity_set": <id>}` instead of the whole
+snapshot document. Existing documents are not rewritten by the migration: the next
+publication of the tenant stages each legacy document as rows under the
+publication lock, so the upgrade itself needs no graph access and stays fast.
+
+Large snapshots use upload sessions: `POST /api/v1/ingestions/uploads` (admin)
+returns a session; `PUT /api/v1/ingestions/uploads/{id}/chunks/{n}` stages one
+NDJSON chunk (at most the 4 MB body limit; lines `{"node": …}`, `{"edge": …}` or
+`{"warning": "…"}`), validating each line with the same models as the single-body
+endpoint and refusing duplicates within the chunk or across chunks; resending a
+chunk number replaces it. `POST …/commit` checks edge endpoints in SQL and queues
+the ingestion job (`payload = {"upload_session": id}`). Sessions expire after
+`ZG_UPLOAD_SESSION_TTL_SECONDS` (default 24 h) and at most `ZG_MAX_OPEN_UPLOADS`
+(default 4) may be open per tenant; expired sessions are purged when the next one
+starts. `POST /api/v1/ingestions` keeps working for small snapshots.
+
+Caps come from `ZG_MAX_NODES` / `ZG_MAX_EDGES` (defaults 100,000 / 500,000) and are
+enforced on each upload, on single-body snapshots, and on the merged submitted
+entities of all sources before any graph write. Classification annotations are
+derived on top (at most one category node per rule and one annotation edge per
+tagged data asset and rule). The Pydantic list caps no longer exist.
+
+The worker merges all active sets in SQL (conflicting definitions of one node or
+edge ID across sources fail the attempt; identical ones collapse), then writes a
+new, invisible revision in bounded transactions (`ZG_GRAPH_BATCH_SIZE`, default
+5,000 rows; edges are matched through the unique entity key). Its `Snapshot` node
+is written first with `state='building'` and set to `ready` last. Publication
+analysis is computed from a compact in-worker representation streamed from the
+staged rows (no whole-graph Pydantic snapshot). Publishers serialize per tenant on
+`pg_advisory_xact_lock`; `TenantState` is locked `FOR UPDATE` only for the pointer
+swap and the commit of the analysis rows, so dashboard readers are not blocked
+while a revision builds. An abandoned build stays `building` and is removed by
+retention once stale ([graph-retention.md](graph-retention.md)).
+
+Run the Cypher schema migration (`python -m app.db.migrate`) to add the
+`(tenant_id, revision, id)` entity index (`003_entity_scope_id.cypher`, Memgraph
+and Neo4j). Drain old workers before starting new ones, as for earlier migrations:
+an old worker locks `TenantState` for its whole publication (safe, but blocks
+readers) and would overwrite an `entity_set` pointer with a whole document. An old
+retention CLI (row lock only) can run safely beside new workers: a building
+revision is younger than its age cutoff (at least one day).

@@ -24,6 +24,8 @@ def test_initial_migration_is_repeatable_and_versioned(tmp_path, monkeypatch):
         "remediations",
         "revision_analysis",
         "revision_findings",
+        "upload_sessions",
+        "staged_entities",
         "alembic_version",
     }
     engine.dispose()
