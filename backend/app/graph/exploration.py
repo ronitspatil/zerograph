@@ -274,19 +274,25 @@ def cypher_cluster_expansion(
     edges: list[Edge] = []
     if present:
         keys = [entity_key(tenant, revision, node_id) for node_id in present]
-        scope = keys + [entity_key(tenant, revision, node_id) for node_id in known]
+        scope = set(keys) | {entity_key(tenant, revision, node_id) for node_id in known}
+        # Expand from the new members' keys and keep the other endpoint here: a
+        # `b.key IN $list` filter in Cypher is a linear scan per relationship, which at
+        # 5,000 members costs seconds; a set lookup costs the members' degree.
         rows = tx.run(
             f"UNWIND $keys AS key MATCH (a:Entity {{key:key}})-[r:{EDGE_TYPES}]-(b:Entity) "
-            "WITH r, b WHERE b.key IN $scope AND r.tenant_id=$tenant AND r.revision=$revision "
-            # A relationship between two new members is matched from both ends.
-            "WITH DISTINCT r RETURN r.payload AS payload ORDER BY r.id LIMIT $limit",
+            "WITH key, r, b WHERE r.tenant_id=$tenant AND r.revision=$revision "
+            # One record per member, not per relationship: the driver's per-record cost dominates.
+            "RETURN key, collect([r.id, b.key, r.payload]) AS rels",
             keys=keys,
-            scope=scope,
             tenant=tenant,
             revision=revision,
-            limit=edge_limit + 1,
         )
-        edges = [Edge.model_validate_json(row["payload"]) for row in rows]
+        kept: dict[str, str] = {}
+        for row in rows:
+            for edge_id, other, payload in row["rels"]:
+                if other in scope:
+                    kept.setdefault(edge_id, payload)
+        edges = [Edge.model_validate_json(kept[edge_id]) for edge_id in sorted(kept)[: edge_limit + 1]]
     return GraphSlice(
         nodes=nodes,
         edges=edges[:edge_limit],
