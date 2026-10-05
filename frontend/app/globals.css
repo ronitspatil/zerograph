@@ -63,6 +63,8 @@
     --space-10: 40px;
     --space-12: 48px;
     --active: #1d2836;
+    /* One canvas height for graph, map and their loading states. */
+    --canvas-h: 540px;
     --primary-active: #cdd6e1;
     --font-sans:
       -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
@@ -916,7 +918,7 @@
   }
   .canvas-wrap {
     position: relative;
-    height: 540px;
+    height: var(--canvas-h);
     background: var(--bg);
   }
   .graph-canvas {
@@ -1295,8 +1297,9 @@
     color: var(--muted);
     font-size: 13px;
   }
+  /* Same height as the canvas it stands in for, so loading never resizes the panel. */
   .canvas-loading {
-    height: 450px;
+    height: var(--canvas-h);
   }
 
   /* Overview */
@@ -1753,8 +1756,8 @@
 
   /* Responsive */
   @media (min-width: 1500px) {
-    .canvas-wrap {
-      height: 580px;
+    :root {
+      --canvas-h: 580px;
     }
     .node-sidebar {
       width: 280px;
@@ -1906,8 +1909,8 @@
     .graph-footer > span:first-child {
       display: none;
     }
-    .canvas-wrap {
-      height: 460px;
+    :root {
+      --canvas-h: 460px;
     }
     .panel-heading {
       padding: 12px;
