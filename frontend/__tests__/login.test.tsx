@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { Login } from "@/components/login";
 
 describe("Login", () => {
-  it("keeps the sign-in actions and brand while hiding decoration from assistive tech", () => {
+  it("keeps the sign-in actions and brand, with the mark hidden from assistive tech", () => {
     const { container } = render(<Login demo />);
     expect(
       screen.getByRole("heading", { level: 1, name: "Sign in" }),
@@ -17,7 +17,6 @@ describe("Login", () => {
     expect(screen.getByText("ZeroGraph")).toBeInTheDocument();
     for (const svg of container.querySelectorAll("svg"))
       expect(svg).toHaveAttribute("aria-hidden", "true");
-    expect(container.querySelectorAll(".login-motif-node.lit").length).toBe(4);
   });
 
   it("omits the demo entry outside demo mode and surfaces sign-in errors", () => {
