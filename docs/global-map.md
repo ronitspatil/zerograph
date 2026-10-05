@@ -35,11 +35,17 @@ Both endpoints require the viewer role, take the tenant only from the verified a
 - `GET /api/v1/graph/clusters?level=0[&edge_limit=1..2000][&revision=]` returns the top-level clusters (at most 300), their links (heaviest first, `edge_limit` default 1000) and `view` totals: entities, relationships, clusters at all levels, shown/total clusters and links, entities without relationships, `truncated`, and the structural `notice`. Only level 0 is served.
 - `GET /api/v1/graph/clusters/{id}[?member_limit=1..500][&edge_limit=1..2000][&revision=]` returns the cluster, its breadcrumb `path`, and either its child clusters with the links among them (`view.mode = "clusters"`), or, for a leaf, its members (highest degree first, at most 500) with the relationships among them and each member's count of relationships leaving the cluster (`view.mode = "members"`). Shown/total counts and `truncated` are always reported.
 
-Member nodes and relationships come from the graph store by unique entity key (`GraphStore.cluster_members`); everything else is read from PostgreSQL. Leaf neighborhoods stay on `/graph/explore`.
+- `GET /api/v1/graph/clusters/{id}/members[?expanded=<id>...][&member_limit=1..5000][&edge_limit=1..20000][&revision=]` returns **every** member below the cluster (all levels, highest degree first) for in-place display, with the relationships among them and to the members of the clusters named in `expanded` (the ones already on screen, at most 64), so relationships between expanded clusters arrive with the later one. Each member's whole-revision relationship count is in `degrees`. The clusters shown together may hold at most **5,000** entities: a request beyond that returns **422** with an explanation. `view` reports shown/total members, members visible after this expansion, shown relationships and `truncated` (the relationship limit is 20,000).
+
+Member nodes and relationships come from the graph store by unique entity key (`GraphStore.cluster_members`, `GraphStore.cluster_expansion`); everything else is read from PostgreSQL. Leaf neighborhoods stay on `/graph/explore`.
 
 ## Console
 
-Knowledge graph → **Global map** (next to Identity & data and Role map) draws the top level as circles sized by entity count (area), colored by the most common node type, with lines weighted by the number of relationships between clusters. Selecting a circle (or its button in the list below the canvas, for keyboard use) opens that cluster in place; the breadcrumb returns to any ancestor or the top. A leaf shows its members with the existing canvas and worker layout; selecting a member shows how many of its relationships leave the cluster, and **Open neighborhood** hands off to the bounded explorer pinned to the same revision. Labels are drawn at a fixed 12 px at every zoom. The largest clusters claim label space first (the largest 14 at the fitted view, more as you zoom in); a label never overlaps another label, never covers the circle of a larger cluster, and moves above its circle when the place below is taken; labeled clusters draw above smaller ones. The hovered cluster's label is always shown. The fitted view leaves room for the labels it shows, the legend and the zoom controls, and the largest circle takes at most a share of the canvas that shrinks with the number of clusters (48–88 px), so a four-cluster map does not fill the canvas.
+Knowledge graph → **Global map** (next to Identity & data and Role map) draws the top level as circles sized by entity count (area), colored by the most common node type, with lines weighted by the number of relationships between clusters. Selecting a circle (or its button in the list below the canvas, for keyboard use) opens that cluster as a new level (its sub-groups); the breadcrumb returns to any ancestor or the top. A cluster that fits the on-screen budget (5,000 members across every expanded cluster) expands **in place** instead: its members are laid out on the worker as a packed disc (one patch per role community, loose members on the rim) at the circle's position, and only the circles that disc overlaps move aside, so the rest of the map keeps its shape. An overlay on the canvas shows how many members are shown and explains a refusal; **Collapse all**, the sidebar's **Collapse cluster** or selecting the cluster's button again removes them. Larger clusters open as a level, and a leaf beyond the remaining budget shows its members with the existing canvas and worker layout; selecting a member shows how many of its relationships leave the cluster, and **Open neighborhood** hands off to the bounded explorer pinned to the same revision. Labels are drawn at a fixed 12 px at every zoom. The largest clusters claim label space first (the largest 14 at the fitted view, more as you zoom in); a label never overlaps another label, never covers the circle of a larger cluster, and moves above its circle when the place below is taken; labeled clusters draw above smaller ones. The hovered cluster's label is always shown. The fitted view leaves room for the labels it shows, the legend and the zoom controls, and the largest circle takes at most a share of the canvas that shrinks with the number of clusters (48–88 px), so a four-cluster map does not fill the canvas.
+
+### Rendering
+
+The global map uses Cytoscape's WebGL renderer (`renderer: {name: "canvas", webgl: true}`, Cytoscape 3.34, no extra dependency) whenever the browser offers WebGL 2; detail views of at most 500 nodes (the explorer and leaf members) keep the canvas renderer, whose labels are sharpest. WebGL support is detected once with a throwaway context; if it is missing, or the WebGL renderer fails to start, the same view is built on the canvas renderer (panning a cached texture for large views), so the map always renders. Both work under the console's CSP: no `eval`, no blob workers (`worker-src 'self'`). Labels follow the same rules in both renderers (fixed 12 px, collision thinning, the largest clusters first, hovered and selected always shown); label sizes follow zoom in steps of 1/16 octave so WebGL label textures are reused while zooming, and member labels appear once members are far enough apart on screen, highest degree first. Under `prefers-reduced-motion` the in-place expansion and the neighbours moving aside happen without animation.
 
 ## Measured capacity (Memgraph 3.2.0, PostgreSQL 16)
 
@@ -59,6 +65,26 @@ Knowledge graph → **Global map** (next to Identity & data and Role map) draws 
 | Worker peak RSS | 409.1 / 391.1 MB |
 | Readers during the second publication | 5,643 requests, all 200 (cluster map and explore pollers) |
 | Retention | deleted revision 1 and all its cluster rows |
+
+### In-place expansion and rendering (Phase 5)
+
+`backend/scripts/qualify_expansion.py` publishes a 100,000-node / 416,158-relationship revision (the enterprise-shaped fixture at 93,500 nodes plus three disjoint components of 500 / 2,000, 1,000 / 4,000 and 5,000 / 20,000 nodes / relationships) through the worker on Memgraph 3.2.0 and PostgreSQL 16, then calls `GET /graph/clusters/{id}/members` in process. All 6 checks pass (exact members and relationships for each component, every relationship among progressively expanded clusters delivered exactly once, 422 beyond the budget).
+
+| Expansion (Memgraph) | p50 / p95 (7 requests; p95 includes the first, cold request) | Response |
+|---|---|---|
+| 500 members / 2,000 relationships | 34 / 466 ms | 0.45 MB |
+| 1,000 / 4,000 | 67 / 71 ms | 0.89 MB |
+| 5,000 / 20,000 | 309 / 745 ms | 4.4 MB |
+
+The console was measured in headless Chrome 154 (ANGLE Metal, Apple M5, 1440 × 900) against the production build, with the 100k map: expand the component's cluster in place, then 3 s of one viewport change per frame (wheel zoom, then drag pan) while recording `requestAnimationFrame` intervals. Median of 3 runs; "first frame" is from the click to the members drawn, API included (in-memory graph store for these runs).
+
+| Visible members / relationships | WebGL fps, p95 frame, first frame | Canvas fallback fps, p95 frame, first frame |
+|---|---|---|
+| 500 / 2,000 | 59.8, 16.7 ms, 0.23 s | 59.4, 16.8 ms, 0.28 s |
+| 1,000 / 4,000 | 59.8, 16.8 ms, 0.30 s | 59.3, 16.8 ms, 0.44 s |
+| 5,000 / 20,000 | 59.6, 16.8 ms, 0.83 s | 55.9, 16.8 ms, 1.26 s (max frame 150 ms) |
+
+The canvas fallback's frame rate comes from panning a cached texture (`textureOnViewport`): the view is not redrawn while it moves. Drawn every frame, as on the Phase 4 benchmark page, the canvas renderer manages 10.7 fps at 5,000 nodes and WebGL 60 fps; at 20,000 nodes (above the console's 5,000 cap, informational) WebGL draws 17.3 fps (p95 62 ms, first frame 2.0 s) and canvas 2 fps.
 
 ## Bounded exploration on Memgraph
 

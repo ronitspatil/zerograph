@@ -262,6 +262,73 @@ def cypher_cluster_members(tx, tenant: str, revision: str, ids: list[str], edge_
     return GraphSlice(nodes=nodes, edges=edges, warnings=warnings)
 
 
+def cypher_cluster_expansion(
+    tx, tenant: str, revision: str, ids: list[str], known: list[str], edge_limit: int
+) -> GraphSlice:
+    """Members newly shown in place, with their relationships among themselves and to
+    members already on screen (``known``); ``total_edges`` exceeds the shown edges when
+    ``edge_limit`` truncated them. Anchored on the new members' unique keys."""
+    warnings = revision_warnings(tx, {"tenant": tenant, "revision": revision})
+    nodes = cypher_nodes(tx, tenant, revision, ids)
+    present = [node.id for node in nodes]
+    edges: list[Edge] = []
+    if present:
+        keys = [entity_key(tenant, revision, node_id) for node_id in present]
+        scope = set(keys) | {entity_key(tenant, revision, node_id) for node_id in known}
+        # Expand from the new members' keys and keep the other endpoint here: a
+        # `b.key IN $list` filter in Cypher is a linear scan per relationship, which at
+        # 5,000 members costs seconds; a set lookup costs the members' degree.
+        rows = tx.run(
+            f"UNWIND $keys AS key MATCH (a:Entity {{key:key}})-[r:{EDGE_TYPES}]-(b:Entity) "
+            "WITH key, r, b WHERE r.tenant_id=$tenant AND r.revision=$revision "
+            # One record per member, not per relationship: the driver's per-record cost dominates.
+            "RETURN key, collect([r.id, b.key, r.payload]) AS rels",
+            keys=keys,
+            tenant=tenant,
+            revision=revision,
+        )
+        kept: dict[str, str] = {}
+        for row in rows:
+            for edge_id, other, payload in row["rels"]:
+                if other in scope:
+                    kept.setdefault(edge_id, payload)
+        edges = [Edge.model_validate_json(kept[edge_id]) for edge_id in sorted(kept)[: edge_limit + 1]]
+    return GraphSlice(
+        nodes=nodes,
+        edges=edges[:edge_limit],
+        warnings=warnings,
+        total_nodes=len(nodes),
+        total_edges=len(edges),
+    )
+
+
+def memory_cluster_expansion(
+    snapshot: GraphSnapshot, ids: list[str], known: list[str], edge_limit: int
+) -> GraphSlice:
+    wanted = set(ids)
+    nodes = sorted((node for node in snapshot.nodes if node.id in wanted), key=lambda node: node.id)
+    present = {node.id for node in nodes}
+    scope = present | set(known)
+    edges = sorted(
+        (
+            edge
+            for edge in snapshot.edges
+            if (edge.source in present or edge.target in present)
+            and edge.source in scope
+            and edge.target in scope
+        ),
+        key=lambda edge: edge.id,
+    )
+    return GraphSlice(
+        nodes=[node.model_copy(deep=True) for node in nodes],
+        edges=[edge.model_copy(deep=True) for edge in edges[:edge_limit]],
+        warnings=list(snapshot.warnings),
+        total_nodes=len(nodes),
+        # Same as the Cypher query: one past the limit marks truncation.
+        total_edges=min(len(edges), edge_limit + 1),
+    )
+
+
 def memory_cluster_members(snapshot: GraphSnapshot, ids: list[str], edge_limit: int) -> GraphSlice:
     wanted = set(ids)
     nodes = sorted((node for node in snapshot.nodes if node.id in wanted), key=lambda node: node.id)

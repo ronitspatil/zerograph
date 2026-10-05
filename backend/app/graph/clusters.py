@@ -45,8 +45,9 @@ from app.db.models import (
     TenantState,
 )
 from app.db.session import session_factory
+from app.graph import repository
 from app.graph.compact import CompactGraph
-from app.graph.repository import get_graph_store
+from app.graph.repository import MAX_VISIBLE_EDGES, MAX_VISIBLE_MEMBERS, get_graph_store
 from app.graph.schema import Node
 
 # Bump when the partition or stored fields change: other versions read as missing.
@@ -1055,6 +1056,143 @@ def cluster_detail(
                 not row.child_count
                 and (len(sliced.nodes) < row.member_count or shown_edges < row.internal_edges)
             ),
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# In-place expansion: a whole cluster's members on the map (WebGL), at most
+# MAX_VISIBLE_MEMBERS on screen across every expanded cluster.
+
+MAX_EXPANDED = 64
+
+
+class ClusterMembersView(BaseModel):
+    total_members: int
+    shown_members: int
+    member_limit: int
+    # Members on screen after this expansion, counting the clusters already expanded.
+    visible_members: int
+    visible_limit: int
+    shown_edges: int
+    edge_limit: int
+    truncated: bool
+    notice: str = STRUCTURAL_NOTICE
+
+
+class ClusterMembersResponse(BaseModel):
+    revision: str
+    cluster: ClusterSummary
+    nodes: list[Node]
+    # Relationships among the new members and to members of the already expanded clusters.
+    edges: list[dict]
+    # Each new member's relationship count in the whole revision.
+    degrees: dict[str, int]
+    warnings: list[str]
+    view: ClusterMembersView
+
+
+class ExpansionTooLarge(ValueError):
+    pass
+
+
+def subtree_leaves(db: Session, tenant: str, revision: str, row: RevisionCluster) -> list[str]:
+    """IDs of the leaf clusters under ``row`` (itself when it is a leaf), level by level."""
+    leaves: list[str] = []
+    frontier = [row]
+    for _ in range(MAX_DEPTH + 1):
+        if not frontier:
+            break
+        leaves += [item.cluster_id for item in frontier if not item.child_count]
+        parents = [item.cluster_id for item in frontier if item.child_count]
+        frontier = []
+        for i in range(0, len(parents), 500):
+            frontier += db.scalars(
+                select(RevisionCluster).where(
+                    RevisionCluster.tenant_id == tenant,
+                    RevisionCluster.revision == revision,
+                    RevisionCluster.parent_id.in_(parents[i : i + 500]),
+                )
+            ).all()
+    return leaves
+
+
+def subtree_members(
+    db: Session, tenant: str, revision: str, leaves: list[str], limit: int | None
+) -> list[tuple[str, int]]:
+    """(entity ID, degree) of every member of ``leaves``, highest degree first."""
+    rows: list[tuple[str, int]] = []
+    for i in range(0, len(leaves), 500):
+        rows += [
+            (entity, degree)
+            for entity, degree in db.execute(
+                select(RevisionClusterMember.entity_id, RevisionClusterMember.degree).where(
+                    RevisionClusterMember.tenant_id == tenant,
+                    RevisionClusterMember.revision == revision,
+                    RevisionClusterMember.cluster_id.in_(leaves[i : i + 500]),
+                )
+            )
+        ]
+    rows.sort(key=lambda item: (-item[1], item[0]))
+    return rows if limit is None else rows[:limit]
+
+
+def cluster_expansion(
+    db: Session,
+    graph,
+    tenant: str,
+    revision: str,
+    cluster_id: str,
+    expanded: list[str],
+    member_limit: int,
+    edge_limit: int,
+) -> ClusterMembersResponse:
+    """Every member of one cluster (all levels below it) for in-place display, with the
+    relationships among them and to the members of clusters already expanded on screen.
+
+    The clusters shown together may hold at most ``MAX_VISIBLE_MEMBERS`` entities.
+    """
+    if not 1 <= member_limit <= repository.MAX_VISIBLE_MEMBERS or not 1 <= edge_limit <= MAX_VISIBLE_EDGES:
+        raise ValueError("Cluster expansion limits outside supported bounds")
+    others = sorted(set(expanded) - {cluster_id})
+    if len(others) > MAX_EXPANDED:
+        raise ValueError("Too many expanded clusters")
+    row = cluster_row(db, tenant, revision, cluster_id)
+    other_rows = [cluster_row(db, tenant, revision, other) for other in others]
+    visible = row.size + sum(other.size for other in other_rows)
+    if visible > MAX_VISIBLE_MEMBERS:
+        raise ExpansionTooLarge(
+            f"Expanding this cluster would show {visible:,} entities; at most "
+            f"{MAX_VISIBLE_MEMBERS:,} can be shown at once. Collapse a cluster or open this one instead."
+        )
+    members = subtree_members(db, tenant, revision, subtree_leaves(db, tenant, revision, row), member_limit)
+    known = sorted(
+        {
+            entity
+            for other in other_rows
+            for entity, _ in subtree_members(
+                db, tenant, revision, subtree_leaves(db, tenant, revision, other), None
+            )
+        }
+        - {entity for entity, _ in members}
+    )
+    sliced = graph.cluster_expansion(tenant, revision, [m[0] for m in members], known, edge_limit)
+    return ClusterMembersResponse(
+        revision=revision,
+        cluster=_summary(row),
+        nodes=sliced.nodes,
+        edges=[{**edge.model_dump(mode="json"), "id": edge.id} for edge in sliced.edges],
+        degrees=dict(members),
+        warnings=sliced.warnings,
+        view=ClusterMembersView(
+            total_members=row.size,
+            shown_members=len(sliced.nodes),
+            member_limit=member_limit,
+            visible_members=len(known) + len(sliced.nodes),
+            visible_limit=MAX_VISIBLE_MEMBERS,
+            shown_edges=len(sliced.edges),
+            edge_limit=edge_limit,
+            truncated=len(sliced.nodes) < row.size or sliced.total_edges > len(sliced.edges),
         ),
     )
 

@@ -366,3 +366,103 @@ export function fitClusters(
     },
   };
 }
+
+/** Members shown in place on the map at once (server bound, WebGL renderer). */
+export const MAX_VISIBLE_MEMBERS = 5000;
+/** Model-space distance unit of the packed member layout (one member per pi units^2). */
+export const MEMBER_SPACING = 3;
+/** Model-space diameter of a member dot shown in place. */
+export const MEMBER_DOT = 3.2;
+
+/** Radius of the disc that holds `count` members laid out in place (never smaller than the circle). */
+export function expansionRadius(count: number, clusterRadius = 0): number {
+  return Math.max(
+    clusterRadius,
+    MEMBER_SPACING * Math.sqrt(Math.max(1, count)) + MEMBER_DOT,
+  );
+}
+
+/**
+ * Map a packed layout (centred near the origin, radius about sqrt(n)) into the
+ * expanded cluster's disc at (cx, cy). Returns the positions and the disc radius.
+ */
+export function placeInDisc(
+  positions: Position[],
+  cx: number,
+  cy: number,
+  clusterRadius: number,
+): { positions: Position[]; radius: number } {
+  if (!positions.length) return { positions, radius: clusterRadius };
+  let mx = 0;
+  let my = 0;
+  for (const p of positions) {
+    mx += p.x;
+    my += p.y;
+  }
+  mx /= positions.length;
+  my /= positions.length;
+  let reach = 0;
+  for (const p of positions)
+    reach = Math.max(reach, Math.hypot(p.x - mx, p.y - my));
+  // Small groups spread to the circle they replace; large ones keep their density.
+  const target = Math.max(
+    clusterRadius * 0.8,
+    MEMBER_SPACING * Math.max(reach, 1),
+  );
+  const scale = reach > 0 ? target / reach : 0;
+  return {
+    positions: positions.map((p) => ({
+      id: p.id,
+      x: cx + (p.x - mx) * scale,
+      y: cy + (p.y - my) * scale,
+    })),
+    radius: Math.max(clusterRadius, target + MEMBER_DOT),
+  };
+}
+
+/**
+ * Make room for expanded discs without a re-layout: only circles that overlap
+ * an expanded (pinned) disc or a moved neighbour are pushed outward, along the
+ * line between centres, until every pair keeps `gap`. Pinned circles never move.
+ * Returns new positions for every circle (unchanged ones keep their values).
+ */
+export function makeRoom(
+  circles: { id: string; x: number; y: number; r: number; pinned?: boolean }[],
+  gap = 26,
+  passes = 80,
+): Position[] {
+  const n = circles.length;
+  const x = Float64Array.from(circles, (c) => c.x);
+  const y = Float64Array.from(circles, (c) => c.y);
+  for (let pass = 0; pass < passes; pass++) {
+    let moved = false;
+    for (let a = 0; a < n; a++) {
+      for (let b = a + 1; b < n; b++) {
+        const pa = !!circles[a].pinned;
+        const pb = !!circles[b].pinned;
+        if (pa && pb) continue;
+        let dx = x[b] - x[a];
+        let dy = y[b] - y[a];
+        const need = circles[a].r + circles[b].r + gap;
+        let distance = Math.hypot(dx, dy);
+        if (distance >= need) continue;
+        if (distance < 1e-6) {
+          dx = Math.cos(a + b);
+          dy = Math.sin(a + b);
+          distance = 1;
+        }
+        const push = (need - distance) / distance;
+        moved = true;
+        // A pinned disc pushes the other circle the whole way; free pairs share it.
+        const shareA = pa ? 0 : pb ? 1 : 0.5;
+        const shareB = 1 - shareA;
+        x[a] -= dx * push * shareA;
+        y[a] -= dy * push * shareA;
+        x[b] += dx * push * shareB;
+        y[b] += dy * push * shareB;
+      }
+    }
+    if (!moved) break;
+  }
+  return circles.map((c, i) => ({ id: c.id, x: x[i], y: y[i] }));
+}

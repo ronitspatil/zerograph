@@ -15,9 +15,11 @@ from app.graph.exploration import (
     RevisionTotals,
     RevisionUnavailable,
     RootNotFound,
+    cypher_cluster_expansion,
     cypher_cluster_members,
     cypher_explore,
     cypher_search,
+    memory_cluster_expansion,
     memory_cluster_members,
     memory_explore,
     memory_search,
@@ -108,6 +110,12 @@ class GraphStore(Protocol):
     # Global-map leaf: the given member nodes (at most 500) and relationships among them.
     # Raises RevisionUnavailable when the revision's metadata is missing.
     def cluster_members(self, tenant: str, revision: str, ids: list[str], edge_limit: int) -> GraphSlice: ...
+    # Global-map in-place expansion: the given members (``ids``) and their relationships
+    # among themselves and to members already shown (``known``); at most
+    # MAX_VISIBLE_MEMBERS members in all and MAX_VISIBLE_EDGES relationships.
+    def cluster_expansion(
+        self, tenant: str, revision: str, ids: list[str], known: list[str], edge_limit: int
+    ) -> GraphSlice: ...
     def roles(
         self,
         tenant: str,
@@ -223,6 +231,14 @@ class MemoryGraphStore:
             raise RevisionUnavailable("Published graph revision unavailable")
         return memory_cluster_members(self.snapshots[(tenant, revision)], ids, edge_limit)
 
+    def cluster_expansion(
+        self, tenant: str, revision: str, ids: list[str], known: list[str], edge_limit: int
+    ) -> GraphSlice:
+        _validate_expansion_bounds(ids, known, edge_limit)
+        if (tenant, revision) not in self.snapshots:
+            raise RevisionUnavailable("Published graph revision unavailable")
+        return memory_cluster_expansion(self.snapshots[(tenant, revision)], ids, known, edge_limit)
+
     def roles(
         self,
         tenant: str,
@@ -292,6 +308,20 @@ class MemoryGraphStore:
 
     def close(self) -> None:
         pass
+
+
+# The browser renders at most this many members and relationships at once (WebGL).
+MAX_VISIBLE_MEMBERS = 5000
+MAX_VISIBLE_EDGES = 20000
+
+
+def _validate_expansion_bounds(ids: list[str], known: list[str], edge_limit: int) -> None:
+    if (
+        len(set(ids) | set(known)) > MAX_VISIBLE_MEMBERS
+        or not 1 <= edge_limit <= MAX_VISIBLE_EDGES
+        or any(not 1 <= len(i) <= 512 for i in (*ids, *known))
+    ):
+        raise ValueError("Cluster expansion bounds outside supported limits")
 
 
 def _validate_member_bounds(ids: list[str], edge_limit: int) -> None:
@@ -645,6 +675,19 @@ class CypherGraphStore:
             return session.execute_read(
                 unit_of_work(timeout=self.timeout)(
                     lambda tx: cypher_cluster_members(tx, tenant, revision, ids, edge_limit)
+                )
+            )
+
+    def cluster_expansion(
+        self, tenant: str, revision: str, ids: list[str], known: list[str], edge_limit: int
+    ) -> GraphSlice:
+        _validate_expansion_bounds(ids, known, edge_limit)
+        if not revision:
+            raise RevisionUnavailable("Published graph revision unavailable")
+        with self.driver.session(fetch_size=1000) as session:
+            return session.execute_read(
+                unit_of_work(timeout=self.timeout)(
+                    lambda tx: cypher_cluster_expansion(tx, tenant, revision, ids, known, edge_limit)
                 )
             )
 

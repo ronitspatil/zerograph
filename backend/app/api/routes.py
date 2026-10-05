@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 from datetime import datetime, timedelta
 from typing import Annotated, Literal
 from uuid import uuid4
@@ -42,10 +43,14 @@ from app.graph.analysis import (
     stored_totals,
 )
 from app.graph.clusters import (
+    MAX_EXPANDED,
     ClusterDetailResponse,
     ClusterMapResponse,
+    ClusterMembersResponse,
     ClusterNotFound,
+    ExpansionTooLarge,
     cluster_detail,
+    cluster_expansion,
     cluster_map,
     stored_summary,
 )
@@ -56,7 +61,7 @@ from app.graph.exploration import (
     RootNotFound,
     SearchResponse,
 )
-from app.graph.repository import GraphStore, get_graph_store
+from app.graph.repository import MAX_VISIBLE_EDGES, MAX_VISIBLE_MEMBERS, GraphStore, get_graph_store
 from app.graph.role_map import RoleMapResponse, RoleMapView
 from app.graph.schema import DATA_TYPES, IDENTITY_TYPES, GraphSnapshot, Node, NodeType
 from app.remediation.gitops_sync import GitOpsClient, GitOpsConflict, GitOpsError
@@ -290,6 +295,41 @@ def graph_cluster(
         return cluster_detail(db, graph, actor.tenant_id, current, cluster_id, member_limit, edge_limit)
     except ClusterNotFound:
         raise HTTPException(404, "Cluster not found in this revision") from None
+    except RevisionUnavailable:
+        raise _unavailable() from None
+
+
+@router.get("/graph/clusters/{cluster_id}/members", response_model=ClusterMembersResponse)
+def graph_cluster_members(
+    db: DB,
+    graph: Graph,
+    actor: Viewer,
+    cluster_id: Annotated[str, Path(pattern=CLUSTER_ID)],
+    expanded: Annotated[list[str], Query(max_length=MAX_EXPANDED)] = [],  # noqa: B006
+    member_limit: Annotated[int, Query(ge=1, le=MAX_VISIBLE_MEMBERS)] = MAX_VISIBLE_MEMBERS,
+    edge_limit: Annotated[int, Query(ge=1, le=MAX_VISIBLE_EDGES)] = MAX_VISIBLE_EDGES,
+    revision: str | None = None,
+):
+    """Every member of one cluster, shown in place on the map, with its relationships among
+    them and to the members of the ``expanded`` clusters already on screen.
+
+    At most 5,000 entities may be shown at once (422 above). Clusters group entities by
+    graph structure only; they are not permission boundaries.
+    """
+    if any(not re.fullmatch(CLUSTER_ID, item) for item in expanded):
+        raise HTTPException(422, "Invalid expanded cluster ID")
+    current = expected_revision(db, actor.tenant_id, revision)
+    if not current:
+        raise _clusters_missing()
+    _cluster_summary(db, actor.tenant_id, current)
+    try:
+        return cluster_expansion(
+            db, graph, actor.tenant_id, current, cluster_id, expanded, member_limit, edge_limit
+        )
+    except ClusterNotFound:
+        raise HTTPException(404, "Cluster not found in this revision") from None
+    except ExpansionTooLarge as error:
+        raise HTTPException(422, str(error)) from None
     except RevisionUnavailable:
         raise _unavailable() from None
 

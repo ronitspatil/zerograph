@@ -107,3 +107,47 @@
 .global-map .identity-list button:disabled {
   opacity: 0.5;
 }
+/* Members shown in place: an overlay on the canvas, so expanding or collapsing
+   never moves the layout around it. */
+.global-map-inplace {
+  position: absolute;
+  top: var(--space-3);
+  left: var(--space-4);
+  right: 64px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  pointer-events: none;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.global-map-inplace > span {
+  padding: var(--space-1) var(--space-2);
+  border-radius: 4px;
+  background: rgba(10, 16, 27, 0.88);
+}
+.global-map-inplace .inplace-notice {
+  color: var(--muted);
+}
+.global-map-inplace button {
+  pointer-events: auto;
+  height: 24px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--accent);
+  font-size: 12px;
+  transition: background-color 0.12s;
+}
+.global-map-inplace button:hover {
+  background: var(--hover);
+}
+.global-map-inplace button:active {
+  background: var(--active);
+}
+.global-map-canvas {
+  position: relative;
+}

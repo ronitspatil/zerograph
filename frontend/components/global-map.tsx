@@ -3,10 +3,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { ChevronRight, LoaderCircle, Network } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
-import { kindNote, topFacets } from "@/lib/cluster-layout";
+import { kindNote, MAX_VISIBLE_MEMBERS, topFacets } from "@/lib/cluster-layout";
+import type { MapExpansion } from "@/components/cluster-canvas";
 import type {
   ClusterDetail,
   ClusterMap,
+  ClusterMembers,
   ClusterSummary,
   GraphData,
   GraphNode,
@@ -41,13 +43,17 @@ const typeNames: Record<string, string> = {
   DataCategory: "Data categories",
 };
 const noRisk = new Set<string>();
+/** Members listed for keyboard selection (the map itself shows up to 5,000). */
+export const LISTED_MEMBERS = 300;
 /** A revision without clusters is backfilled by the worker; check again this often. */
 export const UNAVAILABLE_RETRY_MS = 30_000;
 
 /**
  * Obsidian-like global view: precomputed structural clusters as sized
- * super-nodes, expanded in place level by level down to at most 500 members,
- * then handed off to the bounded neighborhood explorer.
+ * super-nodes. A cluster that fits the on-screen budget (5,000 members across
+ * all expanded clusters) expands in place into its members; a larger one opens
+ * its sub-groups as a new level. Members hand off to the bounded neighborhood
+ * explorer.
  */
 export function GlobalMap({
   reloadKey,
@@ -66,14 +72,22 @@ export function GlobalMap({
   const [busy, setBusy] = useState(true);
   const [hovered, setHovered] = useState<ClusterSummary | null>(null);
   const [member, setMember] = useState<GraphNode | null>(null);
+  const [expansions, setExpansions] = useState<MapExpansion[]>([]);
+  const [expanding, setExpanding] = useState<string | null>(null);
+  const [notice, setNotice] = useState("");
   const request = useRef<AbortController | null>(null);
+  const expandRequest = useRef<AbortController | null>(null);
   const begin = () => {
     request.current?.abort();
+    expandRequest.current?.abort();
     const controller = new AbortController();
     request.current = controller;
     setBusy(true);
     setHovered(null);
     setMember(null);
+    setExpansions([]);
+    setExpanding(null);
+    setNotice("");
     return controller;
   };
   const loadTop = useCallback(async () => {
@@ -117,9 +131,72 @@ export function GlobalMap({
     },
     [map, onError],
   );
+  const visible = expansions.reduce((sum, e) => sum + e.nodes.length, 0);
+  const expand = useCallback(
+    async (target: ClusterSummary) => {
+      if (!map) return;
+      expandRequest.current?.abort();
+      const controller = new AbortController();
+      expandRequest.current = controller;
+      setExpanding(target.id);
+      setNotice("");
+      const params = new URLSearchParams({ revision: map.revision });
+      for (const e of expansions) params.append("expanded", e.cluster.id);
+      try {
+        const result = await api<ClusterMembers>(
+          `graph/clusters/${encodeURIComponent(target.id)}/members?${params}`,
+          { signal: controller.signal },
+        );
+        if (controller.signal.aborted) return;
+        setExpansions((list) => [
+          ...list.filter((e) => e.cluster.id !== target.id),
+          {
+            cluster: result.cluster,
+            nodes: result.nodes,
+            edges: result.edges,
+            degrees: result.degrees,
+          },
+        ]);
+        if (result.view.truncated)
+          setNotice(
+            `${result.cluster.label}: ${count(result.view.shown_members)} of ${count(result.view.total_members)} members and the first ${count(result.view.shown_edges)} relationships shown.`,
+          );
+      } catch (e) {
+        if (controller.signal.aborted) return;
+        if (e instanceof ApiError && e.status === 422) setNotice(e.message);
+        else onError(e);
+      } finally {
+        if (!controller.signal.aborted) setExpanding(null);
+      }
+    },
+    [map, expansions, onError],
+  );
+  const collapse = (id: string) => {
+    setExpansions((list) => list.filter((e) => e.cluster.id !== id));
+    setMember((m) =>
+      m &&
+      expansions.some(
+        (e) => e.cluster.id === id && e.degrees[m.id] !== undefined,
+      )
+        ? null
+        : m,
+    );
+    setNotice("");
+  };
+  /** Expand in place when the cluster fits the on-screen budget; otherwise open its level. */
+  const activate = (target: ClusterSummary) => {
+    if (expansions.some((e) => e.cluster.id === target.id)) collapse(target.id);
+    else if (fitsInPlace(target)) void expand(target);
+    else void openCluster(target.id);
+  };
+  const fitsInPlace = (target: ClusterSummary) =>
+    target.size <= MAX_VISIBLE_MEMBERS - visible;
   useEffect(() => {
     void loadTop();
-    return () => request.current?.abort();
+    return () => {
+      request.current?.abort();
+      expandRequest.current?.abort();
+    };
   }, [loadTop, reloadKey]);
   useEffect(() => {
     if (!unavailable) return;
@@ -141,6 +218,38 @@ export function GlobalMap({
   const clusters = detail ? detail.children : (map?.clusters ?? []);
   const links = detail ? detail.edges : (map?.edges ?? []);
   const focus = hovered ?? detail?.cluster ?? null;
+  const inPlace = member
+    ? expansions.find((e) => e.degrees[member.id] !== undefined)
+    : undefined;
+  const shownIds = useMemo(
+    () => new Set(expansions.flatMap((e) => e.nodes.map((n) => n.id))),
+    [expansions],
+  );
+  const listedMembers = useMemo(
+    () =>
+      expansions
+        .flatMap((e) =>
+          e.nodes.map((n) => ({ node: n, degree: e.degrees[n.id] ?? 0 })),
+        )
+        .sort(
+          (a, b) => b.degree - a.degree || a.node.id.localeCompare(b.node.id),
+        )
+        .slice(0, LISTED_MEMBERS)
+        .map((m) => m.node),
+    [expansions],
+  );
+  const shownRelationships = (id: string) => {
+    const seen = new Set<string>();
+    for (const e of expansions)
+      for (const edge of e.edges)
+        if (
+          (edge.source === id || edge.target === id) &&
+          shownIds.has(edge.source) &&
+          shownIds.has(edge.target)
+        )
+          seen.add(edge.id);
+    return seen.size;
+  };
 
   if (unavailable)
     return (
@@ -234,13 +343,42 @@ export function GlobalMap({
               onSelect={setMember}
             />
           ) : (
-            <ClusterCanvas
-              clusters={clusters}
-              links={links}
-              selected={null}
-              onOpen={(c) => void openCluster(c.id)}
-              onHover={setHovered}
-            />
+            <div className="global-map-canvas">
+              <ClusterCanvas
+                clusters={clusters}
+                links={links}
+                expansions={expansions}
+                selected={inPlace ? (member?.id ?? null) : null}
+                onOpen={activate}
+                onHover={setHovered}
+                onSelect={setMember}
+              />
+              {(expansions.length > 0 || expanding || notice) && (
+                <div className="global-map-inplace" role="status">
+                  {expanding ? (
+                    <span>Expanding…</span>
+                  ) : (
+                    <span>
+                      {count(visible)} / {count(MAX_VISIBLE_MEMBERS)} members
+                      shown in place
+                    </span>
+                  )}
+                  {notice && <span className="inplace-notice">{notice}</span>}
+                  {expansions.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setExpansions([]);
+                        setMember(null);
+                        setNotice("");
+                      }}
+                    >
+                      Collapse all
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
           )}
           <div
             className="identity-list"
@@ -256,19 +394,67 @@ export function GlobalMap({
                     {n.name}
                   </button>
                 ))
-              : clusters.map((c) => (
-                  <button
-                    key={c.id}
-                    disabled={stale}
-                    onClick={() => void openCluster(c.id)}
-                  >
-                    {c.label} · {count(c.size)}
-                  </button>
-                ))}
+              : [
+                  ...clusters.map((c) => (
+                    <button
+                      key={c.id}
+                      disabled={stale}
+                      aria-pressed={expansions.some(
+                        (e) => e.cluster.id === c.id,
+                      )}
+                      onClick={() => activate(c)}
+                    >
+                      {c.label} · {count(c.size)}
+                    </button>
+                  )),
+                  ...listedMembers.map((n) => (
+                    <button
+                      key={`m:${n.id}`}
+                      className={member?.id === n.id ? "selected" : ""}
+                      onClick={() => setMember(n)}
+                    >
+                      {n.name}
+                    </button>
+                  )),
+                ]}
           </div>
         </div>
         <aside className="node-sidebar global-map-sidebar">
-          {member && detail ? (
+          {member && inPlace ? (
+            <>
+              <span className="section-label">Member</span>
+              <h3 title={member.name}>{member.name}</h3>
+              <span className="node-type">{member.type}</span>
+              <dl>
+                <dt>Account</dt>
+                <dd>{member.account_id || "Unspecified"}</dd>
+                <dt>Relationships</dt>
+                <dd>{count(inPlace.degrees[member.id] ?? 0)}</dd>
+                <dt>Shown here</dt>
+                <dd>{count(shownRelationships(member.id))}</dd>
+                <dt>Cluster</dt>
+                <dd title={inPlace.cluster.label}>{inPlace.cluster.label}</dd>
+              </dl>
+              <Button
+                variant="outline"
+                disabled={stale || !map}
+                onClick={() =>
+                  map && onOpenNeighborhood(member.id, map.revision)
+                }
+              >
+                Open neighborhood
+              </Button>
+              <Button
+                variant="ghost"
+                onClick={() => collapse(inPlace.cluster.id)}
+              >
+                Collapse cluster
+              </Button>
+              <small className="node-id" title={member.id}>
+                {member.id}
+              </small>
+            </>
+          ) : member && detail ? (
             <>
               <span className="section-label">Member</span>
               <h3 title={member.name}>{member.name}</h3>
@@ -328,7 +514,11 @@ export function GlobalMap({
                 ))}
               </dl>
               {hovered && (
-                <small>Select the circle to open this cluster.</small>
+                <small>
+                  {fitsInPlace(hovered)
+                    ? `Select the circle to show its ${count(hovered.size)} members here.`
+                    : "Select the circle to open this cluster."}
+                </small>
               )}
             </>
           ) : (
