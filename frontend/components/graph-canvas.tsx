@@ -248,10 +248,14 @@ export function GraphCanvas({
         // Labels keep one screen size at every zoom, in step with the UI type scale.
         instance.nodes().style({
           "font-size": labelFontSize(11, zoom),
-          "text-max-width": `${(narrow ? 110 : 140) / zoom}px`,
+          "text-max-width": `${(narrow ? 130 : 140) / zoom}px`,
           "text-margin-y": 5 / zoom,
-          "text-background-padding": `${3 / zoom}px`,
+          "text-background-padding": "0px",
         });
+        // Only focused labels draw a backdrop, so only they need padding.
+        instance
+          .nodes(".focus-root, .focus-neighbor")
+          .style({ "text-background-padding": `${3 / zoom}px` });
         instance.nodes(".focus-root").style({
           "font-size": labelFontSize(12, zoom),
           "text-max-width": `${(narrow ? 150 : 180) / zoom}px`,
@@ -272,10 +276,12 @@ export function GraphCanvas({
           includeLabels: true,
         }),
       }));
-      const obstacles = instance.nodes().map((n) => ({
-        id: n.id(),
-        ...n.renderedBoundingBox({ includeLabels: false }),
-      }));
+      // A label may graze a dot's rim but must not cover its core.
+      const obstacles = instance.nodes().map((n) => {
+        const { x, y } = n.renderedPosition();
+        const r = n.renderedWidth() / 4;
+        return { id: n.id(), x1: x - r, y1: y - r, x2: x + r, y2: y + r };
+      });
       const visible = spacedLabels(
         labels,
         instance.width(),

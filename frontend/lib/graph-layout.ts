@@ -218,7 +218,7 @@ export function spacedLabels(
     )
       continue;
     if (chosen.some((other) => overlaps(box, other, 6))) continue;
-    if (obstacles.some((node) => node.id !== box.id && overlaps(box, node, 2)))
+    if (obstacles.some((node) => node.id !== box.id && overlaps(box, node, 0)))
       continue;
     chosen.push(box);
   }
@@ -233,7 +233,7 @@ export interface Bounds {
 }
 
 /** Highest zoom a fit may reach, so small slices keep labels and dots in proportion to the UI. */
-export const MAX_FIT_ZOOM = 1.2;
+export const MAX_FIT_ZOOM = 1.8;
 
 /**
  * Fit node bounds into the canvas, leaving room for the labels drawn under nodes,
