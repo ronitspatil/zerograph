@@ -4,6 +4,7 @@ Every test owns a random schema. No existing tables are modified or removed.
 """
 
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from threading import Barrier, Event
@@ -15,7 +16,17 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import sessionmaker
 
 from app.collectors import tasks
-from app.db.models import AuditEvent, Base, IngestionJob, SourceSnapshot, TenantState, now
+from app.db.models import (
+    AuditEvent,
+    Base,
+    IngestionJob,
+    RevisionAnalysis,
+    RevisionFinding,
+    SourceSnapshot,
+    TenantState,
+    now,
+)
+from app.graph.analysis import compute_analysis, store_analysis
 from app.graph.repository import MemoryGraphStore
 from app.graph.schema import GraphSnapshot, Node, NodeType
 
@@ -47,6 +58,25 @@ def postgres_environment(monkeypatch):
         with admin.begin() as connection:
             connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
         admin.dispose()
+
+
+def exposed():
+    """One exposed agent reaching restricted data, so analysis stores findings rows."""
+    return GraphSnapshot.model_validate(
+        {
+            "nodes": [
+                {
+                    "id": "agent",
+                    "name": "agent",
+                    "type": "AIAgent",
+                    "internet_exposed": True,
+                    "authenticated": False,
+                },
+                {"id": "data", "name": "data", "type": "Database", "sensitivity": "restricted"},
+            ],
+            "edges": [{"source": "agent", "target": "data", "type": "CAN_READ"}],
+        }
+    )
 
 
 def enqueue(factory, source="snapshot"):
@@ -104,6 +134,11 @@ def test_concurrent_publishers_preserve_both_sources(postgres_environment):
     with factory() as db:
         revision = db.get(TenantState, "tenant").revision
         assert {row.source for row in db.scalars(select(SourceSnapshot))} == {"one", "two"}
+        # Each serialized publication committed its own analysis with its pointer swap.
+        rows = {row.revision: row for row in db.scalars(select(RevisionAnalysis))}
+        assert set(rows) == {r for (_, r) in graph.snapshots} and len(rows) == 2
+        assert rows[revision].overview["data_assets"] == 2
+        assert rows[revision].total_nodes == 2
     assert {n.id for n in graph.snapshot("tenant", revision).nodes} == {"one", "two"}
 
 
@@ -204,6 +239,10 @@ def test_postgres_upgrade_preserves_legacy_outbox(postgres_environment, monkeypa
         assert "ix_ingestion_jobs_dispatch" in {
             i["name"] for i in inspect(engine).get_indexes("ingestion_jobs")
         }
+        assert {"revision_analysis", "revision_findings"} <= set(inspect(engine).get_table_names())
+        assert "ux_revision_findings_finding" in {
+            i["name"] for i in inspect(engine).get_indexes("revision_findings")
+        }
         tasks._recover_expired(now())
         assert tasks._claim_job("legacy")
     finally:
@@ -218,16 +257,19 @@ def test_retention_protects_publication_pointer_with_real_tenant_lock(postgres_e
     factory, graph = postgres_environment
     # Old revisions and pointer are synthetic and scoped to this disposable schema.
     for index in range(8):
-        graph.publish("tenant", f"old-{index}", GraphSnapshot())
+        graph.publish("tenant", f"old-{index}", exposed())
         graph.created_at["tenant", f"old-{index}"] = index + 1
     with factory() as db:
+        for index in range(8):
+            store_analysis(db, "tenant", f"old-{index}", compute_analysis(exposed()))
+        store_analysis(db, "other", "old-5", compute_analysis(exposed()))
         db.get(TenantState, "tenant").revision = "old-0"
         db.commit()
     monkeypatch.setattr(retention, "session_factory", lambda: factory)
     monkeypatch.setattr(retention, "get_graph_store", lambda: graph)
     deleting, release, published = Event(), Event(), Event()
     original_delete = graph.delete_revision
-    original_publish = graph.publish
+    original_begin = graph.begin_revision
 
     def paused_delete(*args):
         deleting.set()
@@ -236,12 +278,12 @@ def test_retention_protects_publication_pointer_with_real_tenant_lock(postgres_e
 
     def observed_publish(*args):
         published.set()
-        return original_publish(*args)
+        return original_begin(*args)
 
     job_id = enqueue(factory)
     with (
         patch.object(graph, "delete_revision", side_effect=paused_delete),
-        patch.object(graph, "publish", side_effect=observed_publish),
+        patch.object(graph, "begin_revision", side_effect=observed_publish),
     ):
         with ThreadPoolExecutor(max_workers=2) as pool:
             cleanup = pool.submit(
@@ -253,8 +295,8 @@ def test_retention_protects_publication_pointer_with_real_tenant_lock(postgres_e
             )
             assert deleting.wait(timeout=10)
             ingestion = pool.submit(tasks.process_job, job_id)
-            # Worker can claim/collect, but cannot publish while retention owns
-            # the tenant row lock. This bounded wait tests exclusion, not speed.
+            # Worker can claim/collect, but cannot start building while retention
+            # owns the tenant publication lock. This bounded wait tests exclusion.
             assert not published.wait(timeout=0.2)
             release.set()
             result = cleanup.result(timeout=10)
@@ -266,6 +308,13 @@ def test_retention_protects_publication_pointer_with_real_tenant_lock(postgres_e
         assert state.revision not in {"old-5", "old-0"}
         assert graph.snapshot("tenant", state.revision).nodes
         assert db.scalar(select(AuditEvent).where(AuditEvent.action == "graph.revision_deleted"))
+        # Analysis rows left with the deleted revision only; the other tenant's
+        # same-named revision, retained revisions and the new publication remain.
+        analyzed = {(row.tenant_id, row.revision) for row in db.scalars(select(RevisionAnalysis))}
+        assert ("tenant", "old-5") not in analyzed
+        assert {("other", "old-5"), ("tenant", "old-0"), ("tenant", state.revision)} <= analyzed
+        finding_scopes = {(row.tenant_id, row.revision) for row in db.scalars(select(RevisionFinding))}
+        assert ("tenant", "old-5") not in finding_scopes and ("other", "old-5") in finding_scopes
 
 
 def test_retention_missing_or_recent_revisions_are_not_deleted(postgres_environment, monkeypatch):
@@ -296,6 +345,9 @@ def test_retention_intent_survives_graph_commit_and_completion_commit_failure(
     for index in range(5):
         graph.publish("tenant", f"old-{index}", GraphSnapshot())
         graph.created_at["tenant", f"old-{index}"] = index + 1
+    with factory() as db:
+        store_analysis(db, "tenant", "old-2", compute_analysis(exposed()))
+        db.commit()
     original_commit = Session.commit
 
     def fail_completion(db):
@@ -315,6 +367,10 @@ def test_retention_intent_survives_graph_commit_and_completion_commit_failure(
         assert intent.detail["operation_id"]
         assert db.scalar(select(AuditEvent).where(AuditEvent.action == "graph.revision_deleted")) is None
         assert db.get(TenantState, "tenant").revision == "initial"
+        # The analysis delete rolled back with the completion record. The rows
+        # are unreachable (no pointer can name a deleted revision) and a retry
+        # of the same revision is skipped, so they are inert, not visible data.
+        assert db.get(RevisionAnalysis, ("tenant", "old-2")) is not None
 
 
 def test_retention_refuses_deletion_when_durable_intent_commit_fails(postgres_environment, monkeypatch):
@@ -340,7 +396,12 @@ def test_retention_refuses_deletion_when_durable_intent_commit_fails(postgres_en
         assert db.scalar(select(AuditEvent)) is None
 
 
-def test_api_reader_pin_blocks_publication_and_cleanup_through_paths(postgres_environment, monkeypatch):
+def test_api_reader_pin_blocks_only_the_pointer_swap_and_never_its_revision(
+    postgres_environment, monkeypatch
+):
+    """Short-lock contract: a reader's shared pin delays only a publisher's pointer
+    swap. The new revision is built while the reader runs, and retention proceeds
+    without waiting, but never deletes the pinned (current) revision."""
     from app.api.routes import load_snapshot
     from app.graph import retention
 
@@ -359,6 +420,8 @@ def test_api_reader_pin_blocks_publication_and_cleanup_through_paths(postgres_en
         db.commit()
     snapshot_started, paths_started, release_snapshot, release_paths = Event(), Event(), Event(), Event()
     original_snapshot, original_paths = graph.snapshot, graph.shortest_paths
+    original_finish = graph.finish_revision
+    built = Event()
 
     def paused_snapshot(tenant, revision):
         if revision == "old-0":
@@ -371,6 +434,10 @@ def test_api_reader_pin_blocks_publication_and_cleanup_through_paths(postgres_en
         assert release_paths.wait(timeout=10)
         return original_paths(*args)
 
+    def observed_finish(*args):
+        original_finish(*args)
+        built.set()
+
     def reader():
         with factory() as db:
             snapshot, revision = load_snapshot(db, graph, "tenant")
@@ -379,41 +446,34 @@ def test_api_reader_pin_blocks_publication_and_cleanup_through_paths(postgres_en
             graph.shortest_paths("tenant", revision, "asset", 1, False)
         return revision
 
-    collected = Event()
-    original_collect = tasks.collect
-
-    def observed_collect(*args):
-        snapshot = original_collect(*args)
-        collected.set()
-        return snapshot
-
     job_id = enqueue(factory)
     with (
         patch.object(graph, "snapshot", side_effect=paused_snapshot),
         patch.object(graph, "shortest_paths", side_effect=paused_paths),
-        patch.object(tasks, "collect", side_effect=observed_collect),
+        patch.object(graph, "finish_revision", side_effect=observed_finish),
     ):
         with ThreadPoolExecutor(max_workers=3) as pool:
             read = pool.submit(reader)
             assert snapshot_started.wait(timeout=10)
-            publish = pool.submit(tasks.process_job, job_id)
+            # Retention does not wait for the reader and spares its revision.
             cleanup = pool.submit(
                 retention.prune_revisions, "tenant", retention.RetentionPolicy(1, 2, 3), apply=True
-            )
-            assert collected.wait(timeout=10)
-            assert not publish.done()
-            assert not cleanup.done()
+            ).result(timeout=10)
+            assert "old-0" not in cleanup.deleted and cleanup.deleted
+            assert ("tenant", "old-0") in graph.snapshots
+            publish = pool.submit(tasks.process_job, job_id)
+            # The whole revision is built while the reader holds its pin ...
+            assert built.wait(timeout=10)
             release_snapshot.set()
             assert paths_started.wait(timeout=10)
+            # ... but the pointer swap waits for the reader's shared lock.
             with pytest.raises(TimeoutError):
-                publish.result(timeout=0.1)
-            with pytest.raises(TimeoutError):
-                cleanup.result(timeout=0.1)
-            assert ("tenant", "old-0") in graph.snapshots
+                publish.result(timeout=0.2)
+            with factory() as db:
+                assert db.get(TenantState, "tenant").revision == "old-0"
             release_paths.set()
             assert read.result(timeout=10) == "old-0"
             publish.result(timeout=10)
-            cleanup.result(timeout=10)
     with factory() as db:
         snapshot, revision = load_snapshot(db, graph, "tenant")
         assert revision != "old-0"
@@ -462,6 +522,9 @@ def test_api_pointer_pin_timeout_returns_sanitized_retry_response(postgres_envir
             select(TenantState).where(TenantState.tenant_id == "tenant").with_for_update()
         ).scalar_one()
         with TestClient(app) as client:
+            for path in ("overview", "findings"):
+                busy = client.get(f"/api/v1/{path}")
+                assert busy.status_code == 503 and busy.headers["retry-after"] == "5"
             response = client.get("/api/v1/graph")
         assert response.status_code == 503
         assert response.headers["retry-after"] == "5"
@@ -470,3 +533,214 @@ def test_api_pointer_pin_timeout_returns_sanitized_retry_response(postgres_envir
         assert "55P03" not in response.text
     with TestClient(app) as client:
         assert client.get("/api/v1/graph").status_code == 200
+
+
+def test_stored_analysis_read_under_pointer_pin_blocks_publication(postgres_environment):
+    from app.api.routes import pin_revision
+    from app.graph.analysis import stored_analysis, stored_findings_page
+
+    factory, graph = postgres_environment
+    graph.publish("tenant", "pinned", exposed())
+    with factory() as db:
+        store_analysis(db, "tenant", "pinned", compute_analysis(exposed()))
+        db.get(TenantState, "tenant").revision = "pinned"
+        db.commit()
+    job_id = enqueue(factory)
+    with factory() as reader:
+        revision = pin_revision(reader, "tenant")
+        row = stored_analysis(reader, "tenant", revision)
+        assert revision == "pinned" and row.total_findings == 1
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            publish = pool.submit(tasks.process_job, job_id)
+            # The publisher's pointer swap and analysis insert wait for the reader's share lock.
+            with pytest.raises(TimeoutError):
+                publish.result(timeout=0.3)
+            page, more = stored_findings_page(reader, "tenant", revision, None, 10)
+            assert [finding["target"] for finding in page] == ["data"] and not more
+            reader.commit()
+            publish.result(timeout=10)
+    with factory() as db:
+        current = db.get(TenantState, "tenant").revision
+        assert current != "pinned"
+        assert stored_analysis(db, "tenant", current).overview["data_assets"] == 1
+        assert stored_analysis(db, "tenant", "pinned").total_findings == 1
+
+
+def api_client(factory, graph, tenant="tenant", roles=frozenset({"viewer", "analyst", "admin"})):
+    from fastapi.testclient import TestClient
+
+    from app.core.auth import Actor, current_actor
+    from app.db.session import get_db
+    from app.graph.repository import get_graph_store
+    from app.main import create_app
+
+    def reader_db():
+        with factory() as db:
+            yield db
+
+    app = create_app()
+    app.dependency_overrides[get_db] = reader_db
+    app.dependency_overrides[get_graph_store] = lambda: graph
+    app.dependency_overrides[current_actor] = lambda: Actor("actor", tenant, roles)
+    return TestClient(app)
+
+
+def test_readers_and_retention_during_a_long_build(postgres_environment, monkeypatch):
+    """Zero read outage while a revision builds; retention fails fast on the lock."""
+    from app.api import routes
+    from app.graph import retention
+
+    factory, graph = postgres_environment
+    graph.publish("tenant", "pinned", exposed())
+    with factory() as db:
+        store_analysis(db, "tenant", "pinned", compute_analysis(exposed()))
+        db.get(TenantState, "tenant").revision = "pinned"
+        db.commit()
+    monkeypatch.setattr(routes, "SNAPSHOT_LOCK_TIMEOUT_MS", 50)
+    monkeypatch.setattr(retention, "session_factory", lambda: factory)
+    monkeypatch.setattr(retention, "get_graph_store", lambda: graph)
+    monkeypatch.setattr(retention, "LOCK_TIMEOUT", "100ms")
+    building, release = Event(), Event()
+    original = graph.write_nodes
+
+    def paused(*args, **kwargs):
+        building.set()
+        assert release.wait(timeout=10)
+        return original(*args, **kwargs)
+
+    job_id = enqueue(factory)
+    with patch.object(graph, "write_nodes", side_effect=paused), ThreadPoolExecutor(max_workers=1) as pool:
+        publish = pool.submit(tasks.process_job, job_id)
+        assert building.wait(timeout=10)
+        with api_client(factory, graph) as client:
+            for path in ("graph/explore", "overview", "findings", "graph/roles", "graph/search?q=a"):
+                response = client.get(f"/api/v1/{path}")
+                assert response.status_code == 200, (path, response.text)
+            assert client.get("/api/v1/graph/explore").json()["revision"] == "pinned"
+        with pytest.raises(ValueError, match="in progress"):
+            retention.prune_revisions("tenant", retention.RetentionPolicy(1, 2, 1), apply=True)
+        release.set()
+        publish.result(timeout=10)
+    with factory() as db:
+        assert db.get(TenantState, "tenant").revision != "pinned"
+
+
+def test_chunked_upload_and_sql_conflict_detection_on_postgres(postgres_environment):
+    import json
+
+    factory, graph = postgres_environment
+    snapshot = exposed()
+    lines = [json.dumps({"node": n.model_dump(mode="json")}) for n in snapshot.nodes]
+    lines += [json.dumps({"edge": e.model_dump(mode="json")}) for e in snapshot.edges]
+    with api_client(factory, graph) as client, patch("app.api.routes.ingest.delay"):
+        upload_id = client.post("/api/v1/ingestions/uploads", json={}).json()["id"]
+        assert (
+            client.put(f"/api/v1/ingestions/uploads/{upload_id}/chunks/0", content=lines[0]).status_code
+            == 200
+        )
+        duplicate = client.put(f"/api/v1/ingestions/uploads/{upload_id}/chunks/1", content=lines[0])
+        assert duplicate.status_code == 422
+        body = "\n".join(lines[1:]).encode()
+        assert client.put(f"/api/v1/ingestions/uploads/{upload_id}/chunks/1", content=body).status_code == 200
+        job = client.post(f"/api/v1/ingestions/uploads/{upload_id}/commit").json()
+    tasks.process_job(job["id"])
+    with factory() as db:
+        revision = db.get(TenantState, "tenant").revision
+        assert db.get(RevisionAnalysis, ("tenant", revision)).total_findings == 1
+    assert {n.id for n in graph.snapshot("tenant", revision).nodes} == {"agent", "data"}
+    conflicting = GraphSnapshot(nodes=[Node(id="data", name="other", type=NodeType.DATABASE)])
+    job_id = str(uuid4())
+    with factory() as db:
+        db.add(
+            IngestionJob(
+                id=job_id,
+                tenant_id="tenant",
+                actor="a",
+                source="other",
+                payload=conflicting.model_dump(mode="json"),
+            )
+        )
+        db.commit()
+    with (
+        patch.object(tasks, "collect", return_value=conflicting),
+        pytest.raises(ValueError, match="Conflicting"),
+    ):
+        tasks.process_job(job_id)
+    with factory() as db:
+        assert db.get(TenantState, "tenant").revision == revision
+
+
+def test_abandoned_build_is_invisible_and_cleaned_once_stale(postgres_environment, monkeypatch):
+    from datetime import UTC, datetime
+
+    from app.graph import retention
+
+    factory, graph = postgres_environment
+    monkeypatch.setattr(retention, "session_factory", lambda: factory)
+    monkeypatch.setattr(retention, "get_graph_store", lambda: graph)
+    job_id = enqueue(factory)
+    with patch.object(graph, "write_edges", side_effect=RuntimeError("worker died")):
+        with patch.object(graph, "finish_revision", side_effect=RuntimeError("worker died")):
+            with pytest.raises(RuntimeError):
+                tasks.process_job(job_id)
+    (abandoned,) = list(graph.building)
+    with factory() as db:
+        assert db.get(TenantState, "tenant").revision == "initial"
+    timestamp = datetime.now(UTC)
+    young = retention.prune_revisions(
+        "tenant", retention.RetentionPolicy(1, 2, 5), apply=True, timestamp=timestamp
+    )
+    assert young.deleted == [] and abandoned in graph.building
+    later = timestamp + retention.STALE_BUILDING_AGE + timedelta(minutes=1)
+    stale = retention.prune_revisions(
+        "tenant", retention.RetentionPolicy(1, 2, 5), apply=True, timestamp=later
+    )
+    assert stale.deleted == [abandoned[1]] and not graph.building
+
+
+def test_new_readers_queue_behind_a_waiting_pointer_swap(postgres_environment, monkeypatch):
+    """Overlapping shared pins cannot starve publication: once the swap waits, a new
+    reader waits behind it and then reads the new revision."""
+    from app.api import routes
+    from app.api.routes import pin_revision
+
+    factory, graph = postgres_environment
+    monkeypatch.setattr(routes, "SNAPSHOT_LOCK_TIMEOUT_MS", 10_000)
+    built = Event()
+    original_finish = graph.finish_revision
+
+    def observed_finish(*args):
+        original_finish(*args)
+        built.set()
+
+    job_id = enqueue(factory)
+    with factory() as first, patch.object(graph, "finish_revision", side_effect=observed_finish):
+        assert pin_revision(first, "tenant") == "initial"
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            publish = pool.submit(tasks.process_job, job_id)
+            try:
+                assert built.wait(timeout=10)
+                # Wait until the swap is actually queued on the gate.
+                with factory() as probe:
+                    for _ in range(200):
+                        waiting = probe.scalar(
+                            text("SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND NOT granted")
+                        )
+                        if waiting:
+                            break
+                        time.sleep(0.01)
+                assert waiting
+
+                def second_reader():
+                    with factory() as db:
+                        return pin_revision(db, "tenant")
+
+                second = pool.submit(second_reader)
+                with pytest.raises(TimeoutError):
+                    second.result(timeout=0.3)  # Queued behind the swap, not joining the old pin.
+            finally:
+                first.commit()  # Never leave the publisher blocked if an assertion failed.
+            publish.result(timeout=10)
+            new = second.result(timeout=10)
+    with factory() as db:
+        assert new == db.get(TenantState, "tenant").revision != "initial"

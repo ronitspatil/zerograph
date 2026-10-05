@@ -85,13 +85,16 @@ def test_graph_failure_does_not_advance_revision(client, environment):
             "/api/v1/ingestions",
             json={"source": "snapshot", "payload": demo_snapshot().model_dump(mode="json")},
         ).json()
-    with patch.object(graph, "publish", side_effect=RuntimeError("database unavailable")):
+    with patch.object(graph, "write_edges", side_effect=RuntimeError("database unavailable")):
         try:
             process_job(job["id"])
         except RuntimeError:
             pass
     with factory() as db:
         assert db.get(TenantState, "tenant-a").revision == "revision-a"
+    # The partial revision stays invisible ("building") until retention removes it.
+    assert list(graph.snapshots) == [("tenant-a", "revision-a")]
+    assert len(graph.building) == 1
 
 
 def test_mcp_secret_redaction_and_outbox_survives_broker_failure(client, environment):

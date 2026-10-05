@@ -115,3 +115,42 @@ def test_snapshot_pin_preserves_non_lock_database_errors(environment):
         with pytest.raises(DBAPIError) as raised:
             load_snapshot(db, graph, "tenant-a")
     assert raised.value is original
+
+
+def test_building_revisions_young_are_never_selected_and_stale_are_cleaned(environment):
+    from app.graph.retention import STALE_BUILDING_AGE
+
+    _, graph = environment
+    timestamp = aged_revisions(graph)
+    now_ms = int(timestamp.timestamp() * 1000)
+    graph.begin_revision("tenant-a", "young-build")
+    graph.created_at["tenant-a", "young-build"] = now_ms - 60_000
+    graph.begin_revision("tenant-a", "stale-build")
+    stale_ms = int((timestamp - STALE_BUILDING_AGE).timestamp() * 1000) - 1
+    graph.created_at["tenant-a", "stale-build"] = stale_ms
+    # A young build neither becomes a candidate nor displaces kept ready revisions.
+    result = prune_revisions("tenant-a", RetentionPolicy(30, 2, 50), timestamp=timestamp)
+    states = {item.revision: item.state for item in result.candidates}
+    assert "young-build" not in states
+    assert states["stale-build"] == "building"
+    assert "revision-7" not in states and "revision-6" in states
+    # State-checked deletion: a building revision is not deletable as "ready", a
+    # young build is not deletable at all, and an interrupted delete is resumed.
+    assert not graph.delete_revision("tenant-a", "stale-build", stale_ms, now_ms, "ready")
+    assert not graph.delete_revision("tenant-a", "young-build", now_ms - 60_000, stale_ms, "building")
+    graph.deleting.add(("tenant-a", "revision-2"))
+    resumed = graph.retention_candidates("tenant-a", "revision-a", 0, 1000, 50, None)
+    assert [(item.revision, item.state) for item in resumed] == [("revision-2", "deleting")]
+    assert graph.delete_revision("tenant-a", "revision-2", resumed[0].created_at_ms, now_ms, "deleting")
+    assert graph.delete_revision("tenant-a", "stale-build", stale_ms, stale_ms + 1, "building")
+    assert ("tenant-a", "stale-build") not in graph.building
+
+
+def test_large_revisions_are_deletable(environment):
+    from app.graph.schema import Node, NodeType
+
+    _, graph = environment
+    big = GraphSnapshot(nodes=[Node(id=f"n{i}", name="n", type=NodeType.BUCKET) for i in range(6000)])
+    graph.publish("tenant-a", "big", big)
+    graph.created_at["tenant-a", "big"] = 1
+    assert graph.delete_revision("tenant-a", "big", 1, 2)

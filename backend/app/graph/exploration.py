@@ -17,6 +17,16 @@ class RootNotFound(ValueError):
     pass
 
 
+@dataclass(frozen=True)
+class RevisionTotals:
+    """Whole-revision counts stored at publication; same semantics as the scoped aggregates."""
+
+    nodes: int
+    edges: int
+    roles: int
+    role_edges: int
+
+
 @dataclass
 class GraphSlice:
     nodes: list[Node] = field(default_factory=list)
@@ -68,7 +78,13 @@ def search_text(q: str, limit: int) -> str:
     return q.lower()
 
 
-def memory_explore(snapshot: GraphSnapshot, root: str | None, node_limit: int, edge_limit: int) -> GraphSlice:
+def memory_explore(
+    snapshot: GraphSnapshot,
+    root: str | None,
+    node_limit: int,
+    edge_limit: int,
+    totals: RevisionTotals | None = None,
+) -> GraphSlice:
     validate_bounds(node_limit, edge_limit, root)
     if root is None:
         selected = sorted(snapshot.nodes, key=lambda node: node.id)[:node_limit]
@@ -90,8 +106,8 @@ def memory_explore(snapshot: GraphSnapshot, root: str | None, node_limit: int, e
         nodes=[node.model_copy(deep=True) for node in selected],
         edges=[edge.model_copy(deep=True) for edge in edges],
         warnings=list(snapshot.warnings),
-        total_nodes=len(snapshot.nodes),
-        total_edges=len(snapshot.edges),
+        total_nodes=totals.nodes if totals else len(snapshot.nodes),
+        total_edges=totals.edges if totals else len(snapshot.edges),
     )
 
 
@@ -123,14 +139,27 @@ def revision_warnings(tx, params):
     return meta["warnings"] or []
 
 
+def scoped_totals(tx, params) -> tuple[int, int]:
+    total_nodes = tx.run("MATCH " + NODE_SCOPE + " RETURN count(n) AS count", **params).single()["count"]
+    total_edges = tx.run("MATCH " + EDGE_SCOPE + " RETURN count(r) AS count", **params).single()["count"]
+    return total_nodes, total_edges
+
+
 def cypher_explore(
-    tx, tenant: str, revision: str, root: str | None, node_limit: int, edge_limit: int
+    tx,
+    tenant: str,
+    revision: str,
+    root: str | None,
+    node_limit: int,
+    edge_limit: int,
+    totals: RevisionTotals | None = None,
 ) -> GraphSlice:
     validate_bounds(node_limit, edge_limit, root)
     params = {"tenant": tenant, "revision": revision}
     warnings = revision_warnings(tx, params)
-    total_nodes = tx.run("MATCH " + NODE_SCOPE + " RETURN count(n) AS count", **params).single()["count"]
-    total_edges = tx.run("MATCH " + EDGE_SCOPE + " RETURN count(r) AS count", **params).single()["count"]
+    # Stored publication totals avoid two whole-revision count scans per request.
+    # Legacy revisions without stored analysis keep the scoped aggregates.
+    total_nodes, total_edges = (totals.nodes, totals.edges) if totals else scoped_totals(tx, params)
     if root is None:
         rows = tx.run(
             "MATCH " + NODE_SCOPE + " RETURN n.payload AS payload ORDER BY n.id LIMIT $limit",

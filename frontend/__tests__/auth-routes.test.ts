@@ -114,6 +114,33 @@ it("BFF forwards only server credentials and rejects upstream redirects", async 
     }),
   );
 });
+it("BFF passes through only findings paging headers", async () => {
+  fetchMock.mockResolvedValue(
+    new Response("[]", {
+      status: 200,
+      headers: {
+        "X-Graph-Revision": "r1",
+        "X-Total-Count": "250",
+        "X-Next-Cursor": "f0199",
+        "Set-Cookie": "upstream=1",
+        "X-Internal": "secret",
+      },
+    }),
+  );
+  const response = await GET(
+    new Request("https://console.example/api/zg/findings?limit=200"),
+    { params: Promise.resolve({ path: ["findings"] }) },
+  );
+  expect(fetchMock).toHaveBeenCalledWith(
+    "https://backend.example/api/v1/findings?limit=200",
+    expect.anything(),
+  );
+  expect(response.headers.get("x-graph-revision")).toBe("r1");
+  expect(response.headers.get("x-total-count")).toBe("250");
+  expect(response.headers.get("x-next-cursor")).toBe("f0199");
+  expect(response.headers.get("set-cookie")).toBeNull();
+  expect(response.headers.get("x-internal")).toBeNull();
+});
 it("OIDC discovery rejects mismatched issuers and credential-bearing endpoints", async () => {
   for (const changes of [
     { issuer: "https://other.example" },

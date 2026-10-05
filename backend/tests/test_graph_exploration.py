@@ -148,8 +148,9 @@ def test_revision_share_lock_refresh_and_timeout_before_direct_queries():
     )
     graph = MagicMock()
 
-    def explore(*args):
+    def explore(*args, **kwargs):
         assert args == ("tenant", "current", None, 5, 6)
+        assert kwargs == {"totals": None}  # No stored analysis for this mocked revision.
         statement = db.execute.call_args.args[0]
         assert "FOR SHARE" in str(statement.compile(dialect=postgresql.dialect()))
         assert statement.get_execution_options()["populate_existing"]

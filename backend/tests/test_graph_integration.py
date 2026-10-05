@@ -103,8 +103,9 @@ def test_real_graph_retention_age_scope_bounds_and_atomic_rollback(environment, 
             tenant, candidate.revision, candidate.created_at_ms, candidate.created_at_ms
         )
 
-        # Inject a failure after Entity deletion but before Snapshot deletion.
-        # Both supported graph engines must roll back the entire transaction.
+        # Inject a failure after the batched Entity deletion but before the Snapshot
+        # node is removed. The revision stays discoverable ("deleting") and the next
+        # run resumes it; the pointer never references a non-current revision.
         original = repository.unit_of_work
 
         class FailureTransaction:
@@ -126,8 +127,12 @@ def test_real_graph_retention_age_scope_bounds_and_atomic_rollback(environment, 
             injected.setattr(repository, "unit_of_work", failing_unit_of_work)
             with pytest.raises(RuntimeError, match="injected deletion"):
                 store.delete_revision(tenant, candidate.revision, candidate.created_at_ms, plan.cutoff_ms)
-        assert len(store.snapshot(tenant, candidate.revision).nodes) == 12
-        assert store.delete_revision(tenant, candidate.revision, candidate.created_at_ms, plan.cutoff_ms)
+        assert store.snapshot(tenant, candidate.revision).nodes == []
+        resumed = store.retention_candidates(tenant, "revision-0", plan.cutoff_ms, 2, 10)
+        assert (candidate.revision, "deleting") in {(item.revision, item.state) for item in resumed}
+        assert store.delete_revision(
+            tenant, candidate.revision, candidate.created_at_ms, plan.cutoff_ms, "deleting"
+        )
         assert store.snapshot(tenant, candidate.revision).nodes == []
         assert not store.delete_revision(tenant, candidate.revision, candidate.created_at_ms, plan.cutoff_ms)
         assert len(store.snapshot(other, candidate.revision).nodes) == 12
@@ -350,10 +355,111 @@ def test_real_role_map_label_counts_keyset_pages_and_scoped_structural_summaries
             assert store.roles(other, revision, 2, 10, None) == memory.roles(tenant, revision, 2, 10, None)
             with pytest.raises(RevisionUnavailable):
                 store.roles(tenant, "missing", 2, 10, None)
+            # Totals stored at publication equal the scoped aggregates they replace,
+            # despite the deliberately malformed cross-scope relationships above.
+            from app.graph.analysis import compute_analysis
+
+            totals = compute_analysis(snapshot).totals
+            for role_limit, edge_limit, cursor in ((2, 10, None), (100, 100, "role:03a")):
+                assert store.roles(tenant, revision, role_limit, edge_limit, cursor, totals=totals) == (
+                    store.roles(tenant, revision, role_limit, edge_limit, cursor)
+                )
+            for root in (None, "role:00"):
+                assert store.explore(tenant, revision, root, 5, 10, totals=totals) == store.explore(
+                    tenant, revision, root, 5, 10
+                )
+            # Single keyed node lookup is tenant- and revision-scoped.
+            assert store.node(tenant, revision, "role:03") == memory.node(tenant, revision, "role:03")
+            assert store.node(tenant, revision, "neighbor:AIAgent").type == NodeType.AGENT
+            assert store.node(tenant, revision, "missing") is None
+            assert store.node(tenant, "missing", "role:03") is None
+            assert store.node("roles-absent-" + str(uuid4()), revision, "role:03") is None
     finally:
         with store.driver.session() as session:
             session.run(
                 "MATCH (n) WHERE n.tenant_id IN $tenants DETACH DELETE n", tenants=[tenant, other]
             ).consume()
+        store.close()
+        get_settings.cache_clear()
+
+
+@pytest.mark.skipif(not os.getenv("ZG_INTEGRATION_GRAPH"), reason="No real graph database configured")
+def test_real_batched_publication_building_state_and_batched_delete(monkeypatch):
+    import sys
+    from pathlib import Path
+
+    from app.graph.repository import MemoryGraphStore, edge_row, node_row
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from qualify_scale import generate
+
+    monkeypatch.setenv("ZG_GRAPH_VENDOR", os.environ["ZG_INTEGRATION_GRAPH"])
+    monkeypatch.setenv("ZG_GRAPH_BATCH_SIZE", "100")
+    get_settings.cache_clear()
+    store = CypherGraphStore()
+    for attempt in range(45):
+        try:
+            store.driver.verify_connectivity()
+            break
+        except Exception:
+            if attempt == 44:
+                raise
+            time.sleep(1)
+    store.migrate()
+    tenant = "batched-" + str(uuid4())
+    snapshot = generate(600)
+    try:
+        # Whole-snapshot publish goes through multiple bounded transactions.
+        store.publish(tenant, "whole", snapshot)
+        memory = MemoryGraphStore()
+        memory.publish(tenant, "whole", snapshot)
+        loaded = store.snapshot(tenant, "whole")
+        assert sorted(n.id for n in loaded.nodes) == sorted(n.id for n in snapshot.nodes)
+        assert sorted(e.id for e in loaded.edges) == sorted(e.id for e in snapshot.edges)
+        # Idempotent republish of the same revision MERGEs instead of duplicating.
+        store.publish(tenant, "whole", snapshot)
+        assert len(store.snapshot(tenant, "whole").edges) == len(snapshot.edges)
+
+        # A build in progress is "building": never a retention candidate while young,
+        # and does not count toward the kept newest revisions.
+        assert store.begin_revision(tenant, "partial", "combined", [])
+        store.write_nodes(tenant, "partial", [node_row(n) for n in snapshot.nodes[:150]])
+        with pytest.raises(ValueError, match="endpoint"):
+            store.write_edges(
+                tenant,
+                "partial",
+                [edge_row(e) for e in snapshot.edges if e.source not in {n.id for n in snapshot.nodes[:150]}][
+                    :5
+                ],
+            )
+        future = 2**62
+        found = {c.revision: c.state for c in store.retention_candidates(tenant, "", future, 2, 50, None)}
+        assert "partial" not in found
+        stale = {c.revision: c.state for c in store.retention_candidates(tenant, "", future, 2, 50, future)}
+        assert stale == {"partial": "building"}
+        created = next(c.created_at_ms for c in store.retention_candidates(tenant, "", future, 2, 50, future))
+        # A ready-state delete request cannot remove a building revision, and vice versa.
+        assert not store.delete_revision(tenant, "partial", created, future, "ready")
+        assert store.delete_revision(tenant, "partial", created, future, "building")
+        with store.driver.session() as session:
+            remaining = session.run(
+                "MATCH (n {tenant_id:$tenant, revision:'partial'}) RETURN count(n) AS count", tenant=tenant
+            ).single()["count"]
+        assert remaining == 0
+        # Batched delete of a multi-batch ready revision (several 50-node transactions).
+        with store.driver.session() as session:
+            created = session.run(
+                "MATCH (s:Snapshot {tenant_id:$tenant, revision:'whole'}) RETURN s.created_at_ms AS c",
+                tenant=tenant,
+            ).single()["c"]
+        assert store.delete_revision(tenant, "whole", created, future)
+        with store.driver.session() as session:
+            remaining = session.run(
+                "MATCH (n {tenant_id:$tenant}) RETURN count(n) AS count", tenant=tenant
+            ).single()["count"]
+        assert remaining == 0
+    finally:
+        with store.driver.session() as session:
+            session.run("MATCH (n {tenant_id:$tenant}) DETACH DELETE n", tenant=tenant).consume()
         store.close()
         get_settings.cache_clear()
