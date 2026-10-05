@@ -239,9 +239,6 @@ def overview(db: DB, graph: Graph, actor: Viewer):
     return {"revision": revision, **compute_analysis(snapshot).overview}
 
 
-FINDINGS_PAGE_HEADERS = ("X-Graph-Revision", "X-Total-Count", "X-Next-Cursor")
-
-
 @router.get("/findings", response_model=list[Finding])
 def findings(
     db: DB,
