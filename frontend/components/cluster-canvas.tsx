@@ -79,6 +79,10 @@ const MEMBER_LABEL_SPACING = 9;
 /** Member labels offered per frame (highest degree on screen first). */
 const MEMBER_LABEL_CANDIDATES = 80;
 
+/** Above this many members on screen, labels are placed when the view rests. */
+const LIVE_LABEL_MEMBERS = 1000;
+const SETTLE_MS = 120;
+
 /** One cluster shown as its members, in place of its circle. */
 export interface MapExpansion {
   cluster: ClusterSummary;
@@ -330,6 +334,8 @@ export function ClusterCanvas({
     let fitted = 1;
     let hovered: string | null = null;
     let labeled = new Set<string>();
+    const applied = new Map<string, string>();
+    const zIndex = new Map<string, number>();
     const labels = () => {
       if (instance.destroyed()) return;
       const zoom = instance.zoom();
@@ -387,11 +393,23 @@ export function ClusterCanvas({
         rank,
       });
       const size = labelZoom(zoom);
+      // Only changed styles are written: every style write re-sorts and re-uploads
+      // elements, which at 5,000 members costs more than drawing the frame.
+      const setZ = (id: string, z: number) => {
+        if (zIndex.get(id) === z) return;
+        zIndex.set(id, z);
+        instance.getElementById(id).style("z-index", z);
+      };
       instance.batch(() => {
         for (const id of labeled)
-          if (!placed.has(id))
+          if (!placed.has(id)) {
             instance.getElementById(id).removeClass("label-on label-above");
+            applied.delete(id);
+          }
         for (const [id, side] of placed) {
+          const key = `${size}:${side}`;
+          if (applied.get(id) === key) continue;
+          applied.set(id, key);
           const node = instance.getElementById(id);
           // Fixed screen size at every zoom.
           node.style({
@@ -407,24 +425,23 @@ export function ClusterCanvas({
         // the hovered or selected one on top, so no circle crosses a label.
         for (const id of order) {
           if (shown.has(id)) continue;
-          const z = required.has(id)
-            ? order.length * 2
-            : placed.has(id)
-              ? order.length * 2 - 1 - rank.get(id)!
-              : 1;
-          instance.getElementById(id).style("z-index", z);
+          setZ(
+            id,
+            required.has(id)
+              ? order.length * 2
+              : placed.has(id)
+                ? order.length * 2 - 1 - rank.get(id)!
+                : 1,
+          );
         }
         for (const id of placed.keys())
           if (memberNodes.has(id))
-            instance
-              .getElementById(id)
-              .style(
-                "z-index",
-                required.has(id) ? order.length * 2 + 2 : order.length * 2 + 1,
-              );
+            setZ(
+              id,
+              required.has(id) ? order.length * 2 + 2 : order.length * 2 + 1,
+            );
         for (const id of labeled)
-          if (memberNodes.has(id) && !placed.has(id))
-            instance.getElementById(id).style("z-index", 2);
+          if (memberNodes.has(id) && !placed.has(id)) setZ(id, 2);
       });
       labeled = new Set(placed.keys());
     };
@@ -437,9 +454,45 @@ export function ClusterCanvas({
         labels();
       });
     };
+    // With many members on screen, every label shown or hidden re-sorts all
+    // elements (Cytoscape's z-order), so while the view moves the shown labels only
+    // keep their screen size, and placement is redone once it rests.
+    let settle: ReturnType<typeof setTimeout> | undefined;
+    let moving = 0;
+    const rescale = () => {
+      if (instance.destroyed()) return;
+      const size = labelZoom(instance.zoom());
+      instance.batch(() => {
+        for (const id of labeled) {
+          const side = applied.get(id)?.split(":")[1] ?? "below";
+          const key = `${size}:${side}`;
+          if (applied.get(id) === key) continue;
+          applied.set(id, key);
+          instance.getElementById(id).style({
+            "font-size": LABEL_FONT_PX / size,
+            "text-max-width": `${LABEL_MAX_WIDTH / size}px`,
+            "text-background-padding": `${2 / size}px`,
+            "text-margin-y": (side === "above" ? -5 : 5) / size,
+          });
+        }
+      });
+    };
+    const onViewport = () => {
+      if (memberNodes.size <= LIVE_LABEL_MEMBERS) {
+        schedule();
+        return;
+      }
+      if (!moving)
+        moving = requestAnimationFrame(() => {
+          moving = 0;
+          rescale();
+        });
+      clearTimeout(settle);
+      settle = setTimeout(schedule, SETTLE_MS);
+    };
     fit();
     labels();
-    instance.on("pan zoom", schedule);
+    instance.on("pan zoom", onViewport);
     instance.on("mouseover", "node", (event) => {
       if (shown.has(event.target.id())) return;
       hovered = event.target.id();
@@ -528,6 +581,11 @@ export function ClusterCanvas({
       instance.batch(() => {
         node.data("diameter", radius * 2).addClass("expanded");
         node.removeClass("label-on label-above hovered");
+        // The disc draws beneath every member.
+        node.style("z-index", 0);
+        zIndex.set(id, 0);
+        applied.delete(id);
+        labeled.delete(id);
         node.connectedEdges().removeClass("hovered");
         for (const target of moved) {
           const other = instance.getElementById(target.id);
@@ -594,9 +652,13 @@ export function ClusterCanvas({
           members.merge(instance.getElementById(mid));
           memberNodes.delete(mid);
           degrees.delete(mid);
+          applied.delete(mid);
+          zIndex.delete(mid);
+          labeled.delete(mid);
         }
         instance.remove(members);
         const node = instance.getElementById(id);
+        zIndex.delete(id);
         node
           .removeClass("expanded")
           .data("diameter", clusterDiameter(byId.get(id)!.size, largest));
@@ -662,6 +724,8 @@ export function ClusterCanvas({
     observer.observe(container.current);
     return () => {
       cancelAnimationFrame(frame);
+      cancelAnimationFrame(moving);
+      clearTimeout(settle);
       observer.disconnect();
       for (const entry of shown.values()) entry.cancel();
       instance.destroy();
