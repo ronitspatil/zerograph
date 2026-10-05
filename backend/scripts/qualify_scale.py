@@ -51,8 +51,8 @@ MIX = [
 SENSITIVITIES = [Sensitivity.PUBLIC, Sensitivity.INTERNAL, Sensitivity.CONFIDENTIAL, Sensitivity.RESTRICTED]
 FIXTURE = (
     "Per N nodes: 8% human, 25% service account, 5% agent, 2% MCP, 15% role, 45% data; ~4 edges/node; "
-    "Zipf role popularity and data fan-out with 3 admin hub roles; 0.2% of agents/MCPs exposed and "
-    "unauthenticated (seeded, deterministic)."
+    "Zipf role popularity and data fan-out with 3 admin hub roles; --exposed-rate (default 0.2%) of agents/MCPs "
+    "exposed and unauthenticated (seeded, deterministic)."
 )
 LIMITATIONS = (
     "In-process ASGI calls with the memory graph adapter; excludes network/TLS, the Next.js proxy, "
@@ -64,7 +64,7 @@ def zipf_pick(rng: random.Random, n: int, s: float = 1.1) -> int:
     return min(n - 1, int(n ** (rng.random() ** s) - 1))
 
 
-def generate(n: int, seed: int = 7) -> GraphSnapshot:
+def generate(n: int, seed: int = 7, exposed_rate: float = 0.002) -> GraphSnapshot:
     """Synthetic enterprise-shaped identity graph (from the scale-plan benchmark generator)."""
     rng = random.Random(seed)
     nodes, by_type = [], {}
@@ -73,7 +73,7 @@ def generate(n: int, seed: int = 7) -> GraphSnapshot:
         for i in range(max(3, int(n * share))):
             node_id = f"{kind.value.lower()}:{i:07d}"
             data = kind in (NodeType.DATABASE, NodeType.BUCKET, NodeType.VECTOR)
-            exposed = kind in (NodeType.AGENT, NodeType.MCP) and rng.random() < 0.002
+            exposed = kind in (NodeType.AGENT, NodeType.MCP) and rng.random() < exposed_rate
             nodes.append(
                 Node(
                     id=node_id,
@@ -185,7 +185,9 @@ def timed_requests(client, path: str, requests: int, warmup: int = 3) -> tuple[d
     return percentiles(samples), response
 
 
-def qualify(size: int, requests: int, publish_runs: int, database_url: str | None) -> dict:
+def qualify(
+    size: int, requests: int, publish_runs: int, database_url: str | None, exposed_rate: float
+) -> dict:
     from fastapi.testclient import TestClient
 
     from app.collectors import tasks
@@ -197,7 +199,7 @@ def qualify(size: int, requests: int, publish_runs: int, database_url: str | Non
     from app.graph.repository import get_graph_store
     from app.main import create_app
 
-    snapshot = generate(size)
+    snapshot = generate(size, exposed_rate=exposed_rate)
     payload = snapshot.model_dump(mode="json")
     result = {"target_nodes": size, "nodes": len(snapshot.nodes), "edges": len(snapshot.edges)}
     with app_database(database_url) as url:
@@ -350,6 +352,12 @@ def main():
     parser.add_argument("--requests", type=int, default=50)
     parser.add_argument("--publish-runs", type=int, default=2)
     parser.add_argument(
+        "--exposed-rate",
+        type=float,
+        default=0.002,
+        help="Share of agents/MCP servers exposed and unauthenticated (more findings per graph)",
+    )
+    parser.add_argument(
         "--database-url", help="Disposable PostgreSQL URL; a random schema is created and dropped"
     )
     parser.add_argument("--output", type=Path, required=True)
@@ -358,6 +366,7 @@ def main():
         any(not 100 <= size <= 100_000 for size in args.sizes)
         or not 5 <= args.requests <= 1000
         or not 1 <= args.publish_runs <= 5
+        or not 0 <= args.exposed_rate <= 1
     ):
         parser.error("Sizes 100..100000, requests 5..1000 and publish runs 1..5 are required")
     logger.remove()  # Per-request INFO logs would distort sub-millisecond timings.
@@ -374,6 +383,7 @@ def main():
         "graph_adapter": "memory",
         "caps_lifted": caps_lifted,
         "fixture": FIXTURE,
+        "exposed_rate": args.exposed_rate,
         "limitations": LIMITATIONS,
         "budgets": {
             "p95_ms_at_5k_and_above": LATENCY_BUDGET_MS,
@@ -382,7 +392,9 @@ def main():
         "results": [],
     }
     for size in args.sizes:
-        report["results"].append(qualify(size, args.requests, args.publish_runs, args.database_url))
+        report["results"].append(
+            qualify(size, args.requests, args.publish_runs, args.database_url, args.exposed_rate)
+        )
         args.output.write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps(report["results"][-1]), flush=True)
     report["checks"] = evaluate(report["results"], LATENCY_BUDGET_MS, RATIO_BUDGET)
