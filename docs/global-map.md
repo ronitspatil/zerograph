@@ -66,6 +66,26 @@ The global map uses Cytoscape's WebGL renderer (`renderer: {name: "canvas", webg
 | Readers during the second publication | 5,643 requests, all 200 (cluster map and explore pollers) |
 | Retention | deleted revision 1 and all its cluster rows |
 
+### In-place expansion and rendering (Phase 5)
+
+`backend/scripts/qualify_expansion.py` publishes a 100,000-node / 416,158-relationship revision (the enterprise-shaped fixture at 93,500 nodes plus three disjoint components of 500 / 2,000, 1,000 / 4,000 and 5,000 / 20,000 nodes / relationships) through the worker on Memgraph 3.2.0 and PostgreSQL 16, then calls `GET /graph/clusters/{id}/members` in process. All 6 checks pass (exact members and relationships for each component, every relationship among progressively expanded clusters delivered exactly once, 422 beyond the budget).
+
+| Expansion (Memgraph) | p50 / p95 (7 requests; p95 includes the first, cold request) | Response |
+|---|---|---|
+| 500 members / 2,000 relationships | 34 / 466 ms | 0.45 MB |
+| 1,000 / 4,000 | 67 / 71 ms | 0.89 MB |
+| 5,000 / 20,000 | 309 / 745 ms | 4.4 MB |
+
+The console was measured in headless Chrome 154 (ANGLE Metal, Apple M5, 1440 × 900) against the production build, with the 100k map: expand the component's cluster in place, then 3 s of one viewport change per frame (wheel zoom, then drag pan) while recording `requestAnimationFrame` intervals. Median of 3 runs; "first frame" is from the click to the members drawn, API included (in-memory graph store for these runs).
+
+| Visible members / relationships | WebGL fps, p95 frame, first frame | Canvas fallback fps, p95 frame, first frame |
+|---|---|---|
+| 500 / 2,000 | 59.8, 16.7 ms, 0.23 s | 59.4, 16.8 ms, 0.28 s |
+| 1,000 / 4,000 | 59.8, 16.8 ms, 0.30 s | 59.3, 16.8 ms, 0.44 s |
+| 5,000 / 20,000 | 59.6, 16.8 ms, 0.83 s | 55.9, 16.8 ms, 1.26 s (max frame 150 ms) |
+
+The canvas fallback's frame rate comes from panning a cached texture (`textureOnViewport`): the view is not redrawn while it moves. Drawn every frame, as on the Phase 4 benchmark page, the canvas renderer manages 10.7 fps at 5,000 nodes and WebGL 60 fps; at 20,000 nodes (above the console's 5,000 cap, informational) WebGL draws 17.3 fps (p95 62 ms, first frame 2.0 s) and canvas 2 fps.
+
 ## Bounded exploration on Memgraph
 
 Phase 2 measured `/graph/explore` at 0.4–0.6 s at 100k. The visible-edge query matched `a.id IN $ids AND b.id IN $ids` over the scoped pattern, so Memgraph scanned every entity of the revision and expanded its relationships; the sample sorted the whole revision by ID. Now:
