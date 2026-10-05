@@ -1,4 +1,4 @@
-import type { Position } from "./graph-layout";
+import type { LabelBounds, Position } from "./graph-layout";
 import type { ClusterLink, ClusterSummary } from "./types";
 
 /** Server bounds: at most 300 clusters per level and 2000 links per response. */
@@ -75,7 +75,9 @@ export function clusterPositions(
       w: 0.02 + 0.08 * (Math.log(1 + l.weight) / Math.log(1 + heaviest)),
     }))
     .filter(({ a, b }) => a !== undefined && b !== undefined);
-  const gap = 26; // Room for the label under each circle.
+  // Room for a label under one circle and above the next; small levels, which
+  // show every label, get more.
+  const gap = n < 40 ? 26 + 30 * (1 - n / 40) : 26;
   const separate = (): boolean => {
     let moved = false;
     for (let a = 0; a < n; a++) {
@@ -147,21 +149,220 @@ export function topFacets(
   return [...ranked.slice(0, limit - 1), { name: "Other", count: rest }];
 }
 
-/** Screen box of a cluster label drawn under its circle (12px text, at most 170px wide). */
+/** Cluster labels render at this fixed screen size at every zoom. */
+export const LABEL_FONT_PX = 12;
+/** Longest label line before an ellipsis, in screen pixels. */
+export const LABEL_MAX_WIDTH = 170;
+/** Label line height under a circle (text, backdrop padding and margin). */
+export const LABEL_LINE = 22;
+
+/** Estimated rendered width of a 12px label (used when the canvas cannot measure). */
+export function estimateLabelWidth(label: string): number {
+  return Math.min(LABEL_MAX_WIDTH, 6.6 * label.length + 6);
+}
+
+/** Screen box of a cluster label drawn under (or above) its circle (12px text, at most 170px wide). */
 export function clusterLabelBox(
   id: string,
-  label: string,
+  width: number,
   x: number,
   y: number,
   diameter: number,
-): { id: string; x1: number; y1: number; x2: number; y2: number } {
-  const width = Math.min(170, 6.6 * label.length + 6);
-  const top = y + diameter / 2 + 3;
-  return { id, x1: x - width / 2, y1: top, x2: x + width / 2, y2: top + 17 };
+  side: LabelSide = "below",
+): LabelBounds {
+  const w = Math.min(LABEL_MAX_WIDTH, width) + 6;
+  const top =
+    side === "below" ? y + diameter / 2 + 3 : y - diameter / 2 - 3 - 17;
+  return { id, x1: x - w / 2, y1: top, x2: x + w / 2, y2: top + 17 };
+}
+
+export type LabelSide = "below" | "above";
+
+/**
+ * Collision-aware labels in priority order (largest cluster first), with the
+ * rules of `spacedLabels`: required labels (hovered, selected) are always shown
+ * below their circle; any other label must fit inside the canvas and keep 6px
+ * from every placed label. In addition a label never covers the circle of a
+ * cluster that ranks before it (`obstacles`, keyed by cluster id; `rank` gives the
+ * priority of every cluster), so a small cluster's label cannot hide a larger
+ * cluster, while the largest clusters stay labeled in dense levels. A label that
+ * does not fit below its circle tries above it.
+ */
+export function placeLabels(
+  candidates: { id: string; below: LabelBounds; above: LabelBounds }[],
+  width: number,
+  height: number,
+  options: {
+    required?: Set<string>;
+    obstacles?: LabelBounds[];
+    rank?: Map<string, number>;
+  } = {},
+): Map<string, LabelSide> {
+  const required = options.required ?? new Set<string>();
+  const obstacles = (options.obstacles ?? []).filter(validBox);
+  const rank = options.rank ?? new Map<string, number>();
+  const rankOf = (id: string) => rank.get(id) ?? Number.MAX_SAFE_INTEGER;
+  const placed = new Map<string, LabelSide>();
+  const chosen: LabelBounds[] = [];
+  for (const c of candidates)
+    if (required.has(c.id) && validBox(c.below)) {
+      placed.set(c.id, "below");
+      chosen.push(c.below);
+    }
+  const fits = (box: LabelBounds) => {
+    if (
+      !validBox(box) ||
+      box.x1 < 0 ||
+      box.y1 < 0 ||
+      box.x2 > width ||
+      box.y2 > height ||
+      chosen.some((other) => boxesOverlap(box, other, 6))
+    )
+      return false;
+    const own = rankOf(box.id);
+    return !obstacles.some(
+      (node) =>
+        node.id !== box.id &&
+        rankOf(node.id) < own &&
+        boxesOverlap(box, node, 0),
+    );
+  };
+  for (const c of candidates) {
+    if (placed.has(c.id)) continue;
+    for (const side of ["below", "above"] as const)
+      if (fits(c[side])) {
+        placed.set(c.id, side);
+        chosen.push(c[side]);
+        break;
+      }
+  }
+  return placed;
+}
+
+function validBox(box: LabelBounds): boolean {
+  return (
+    [box.x1, box.y1, box.x2, box.y2].every(Number.isFinite) &&
+    box.x2 > box.x1 &&
+    box.y2 > box.y1
+  );
+}
+
+function boxesOverlap(a: LabelBounds, b: LabelBounds, gap: number): boolean {
+  return (
+    a.x1 < b.x2 + gap &&
+    a.x2 + gap > b.x1 &&
+    a.y1 < b.y2 + gap &&
+    a.y2 + gap > b.y1
+  );
+}
+
+/**
+ * Screen box a label must not cover: the square inscribed in another cluster's
+ * circle. Only circles at least `minDiameter` on screen count; smaller dots may
+ * sit under a label's backdrop.
+ */
+export function circleObstacle(
+  id: string,
+  x: number,
+  y: number,
+  diameter: number,
+  minDiameter = 16,
+): LabelBounds | null {
+  if (!(diameter >= minDiameter)) return null;
+  const half = (diameter / 2) * Math.SQRT1_2;
+  return { id, x1: x - half, y1: y - half, x2: x + half, y2: y + half };
 }
 
 /** Labels offered at a zoom relative to the fitted view: the largest 14, more as you zoom in. */
 export function labelBudget(relativeZoom: number): number {
   const scale = Number.isFinite(relativeZoom) ? Math.max(1, relativeZoom) : 1;
   return Math.min(MAX_CLUSTER_NODES, Math.round(14 * scale * scale));
+}
+
+/**
+ * Largest on-screen circle diameter for a level: a share of the canvas per
+ * cluster, so four clusters do not fill the canvas and 300 still get room.
+ */
+export function maxCircleDiameter(
+  count: number,
+  width: number,
+  height: number,
+): number {
+  const area = Math.max(1, width) * Math.max(1, height);
+  const share = 0.3 * Math.sqrt(area / Math.max(1, count));
+  return Math.min(
+    Math.max(48, Math.min(88, share)),
+    Math.min(width, height) / 3,
+  );
+}
+
+export interface FitNode {
+  x: number;
+  y: number;
+  /** Model-space radius. */
+  r: number;
+  /** Screen width of the label under the circle, or 0 when it is not reserved. */
+  label: number;
+}
+
+export interface FitPadding {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}
+
+/**
+ * Fit circles and the labels reserved under them into the canvas. Labels have a
+ * fixed screen size, so the extent at zoom z is linear in z per node and the
+ * largest zoom that fits is found by bisection. Zoom is capped so the largest
+ * circle renders at most `maxDiameter` pixels.
+ */
+export function fitClusters(
+  nodes: FitNode[],
+  width: number,
+  height: number,
+  padding: FitPadding,
+  options: { minZoom: number; maxZoom: number },
+): { zoom: number; pan: { x: number; y: number } } {
+  const usableW = Math.max(1, width - padding.left - padding.right);
+  const usableH = Math.max(1, height - padding.top - padding.bottom);
+  const extent = (zoom: number) => {
+    let x1 = Infinity;
+    let x2 = -Infinity;
+    let y1 = Infinity;
+    let y2 = -Infinity;
+    for (const n of nodes) {
+      const half = Math.max(n.r * zoom, n.label / 2);
+      x1 = Math.min(x1, n.x * zoom - half);
+      x2 = Math.max(x2, n.x * zoom + half);
+      y1 = Math.min(y1, (n.y - n.r) * zoom);
+      y2 = Math.max(y2, (n.y + n.r) * zoom + (n.label ? LABEL_LINE : 0));
+    }
+    return { x1, x2, y1, y2 };
+  };
+  const fits = (zoom: number) => {
+    const e = extent(zoom);
+    return e.x2 - e.x1 <= usableW && e.y2 - e.y1 <= usableH;
+  };
+  let zoom = options.maxZoom;
+  if (nodes.length && !fits(zoom)) {
+    let low = options.minZoom;
+    let high = options.maxZoom;
+    for (let step = 0; step < 40; step++) {
+      const mid = (low + high) / 2;
+      if (fits(mid)) low = mid;
+      else high = mid;
+    }
+    zoom = low;
+  }
+  if (!nodes.length) return { zoom, pan: { x: width / 2, y: height / 2 } };
+  const e = extent(zoom);
+  return {
+    zoom,
+    pan: {
+      x: padding.left + (usableW - (e.x2 - e.x1)) / 2 - e.x1,
+      y: padding.top + (usableH - (e.y2 - e.y1)) / 2 - e.y1,
+    },
+  };
 }

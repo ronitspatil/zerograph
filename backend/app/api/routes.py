@@ -220,15 +220,20 @@ def explore_graph(
 
 CLUSTER_ID = r"^c[0-9a-f]{15}$|^[A-Za-z0-9_-]{1,32}$"
 CLUSTERS_UNAVAILABLE = (
-    "The global map is not computed for this revision yet; it is built at the next publication "
-    "(or by an operator backfill)"
+    "The global map is not computed for this revision yet; the worker builds it within a few minutes"
 )
+# The worker's backfill sweep runs every 60 s; the console retries on this hint.
+CLUSTERS_RETRY_AFTER = "60"
+
+
+def _clusters_missing() -> HTTPException:
+    return HTTPException(404, CLUSTERS_UNAVAILABLE, headers={"Retry-After": CLUSTERS_RETRY_AFTER})
 
 
 def _cluster_summary(db: Session, tenant: str, revision: str):
     summary = stored_summary(db, tenant, revision)
     if summary is None:
-        raise HTTPException(404, CLUSTERS_UNAVAILABLE)
+        raise _clusters_missing()
     return summary
 
 
@@ -253,7 +258,7 @@ def graph_clusters(
     """
     current = expected_revision(db, actor.tenant_id, revision)
     if not current:
-        raise HTTPException(404, CLUSTERS_UNAVAILABLE)
+        raise _clusters_missing()
     summary = _cluster_summary(db, actor.tenant_id, current)
     try:
         # Confirms the revision's graph metadata, as explore does, and carries its warnings.
@@ -279,7 +284,7 @@ def graph_cluster(
     """
     current = expected_revision(db, actor.tenant_id, revision)
     if not current:
-        raise HTTPException(404, CLUSTERS_UNAVAILABLE)
+        raise _clusters_missing()
     _cluster_summary(db, actor.tenant_id, current)
     try:
         return cluster_detail(db, graph, actor.tenant_id, current, cluster_id, member_limit, edge_limit)

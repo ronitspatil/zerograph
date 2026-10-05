@@ -17,7 +17,7 @@ from app.db.locks import acquire_pointer_gate, acquire_publication_lock
 from app.db.models import IngestionJob, SourceSnapshot, TenantState, UploadSession, now
 from app.db.session import audit, session_factory
 from app.graph.analysis import store_analysis
-from app.graph.clusters import compute_clusters, load_previous, store_clusters
+from app.graph.clusters import backfill_missing, compute_clusters, load_previous, store_clusters
 from app.graph.demo import demo_snapshot
 from app.graph.repository import get_graph_store
 from app.graph.schema import GraphSnapshot
@@ -382,6 +382,13 @@ def dispatch_pending() -> int:
     return dispatched
 
 
+@celery_app.task
+def backfill_clusters() -> int:
+    """Global-map clusters for current revisions that lack them (pre-0005 or an older version)."""
+    return sum(1 for result in backfill_missing() if result.get("backfilled"))
+
+
 celery_app.conf.beat_schedule = {
-    "recover-queued-jobs": {"task": "app.collectors.tasks.dispatch_pending", "schedule": 30.0}
+    "recover-queued-jobs": {"task": "app.collectors.tasks.dispatch_pending", "schedule": 30.0},
+    "backfill-global-map": {"task": "app.collectors.tasks.backfill_clusters", "schedule": 60.0},
 }
