@@ -6,6 +6,7 @@ import { api, ApiError } from "@/lib/api";
 import type {
   ClusterDetail,
   ClusterMap,
+  ClusterMembers,
   ClusterSummary,
   GraphNode,
   GraphView,
@@ -42,14 +43,14 @@ const cluster = (
 const top: ClusterMap = {
   revision: "rev-1",
   clusters: [
-    cluster("ca", 1200, { child_count: 2, member_count: 0 }),
+    cluster("ca", 12000, { child_count: 2, member_count: 0 }),
     cluster("cb", 40),
   ],
   edges: [{ source: "ca", target: "cb", weight: 7 }],
   warnings: [],
   view: {
     level: 0,
-    total_nodes: 1240,
+    total_nodes: 12040,
     total_edges: 5000,
     total_clusters: 5,
     clusters: 2,
@@ -79,9 +80,9 @@ const member = (id: string): GraphNode => ({
 const children: ClusterDetail = {
   revision: "rev-1",
   cluster: top.clusters[0],
-  path: [{ id: "ca", label: "Group ca", size: 1200 }],
+  path: [{ id: "ca", label: "Group ca", size: 12000 }],
   children: [
-    cluster("cc", 700, { parent_id: "ca", depth: 1 }),
+    cluster("cc", 7000, { parent_id: "ca", depth: 1 }),
     cluster("cd", 500, { parent_id: "ca", depth: 1 }),
   ],
   edges: [],
@@ -107,10 +108,10 @@ const children: ClusterDetail = {
 };
 const leaf: ClusterDetail = {
   ...children,
-  cluster: cluster("cd", 500, { parent_id: "ca", depth: 1 }),
+  cluster: cluster("cc", 7000, { parent_id: "ca", depth: 1 }),
   path: [
-    { id: "ca", label: "Group ca", size: 1200 },
-    { id: "cd", label: "Group cd", size: 500 },
+    { id: "ca", label: "Group ca", size: 12000 },
+    { id: "cc", label: "Group cc", size: 7000 },
   ],
   children: [],
   nodes: [member("role:a"), member("role:b")],
@@ -121,7 +122,7 @@ const leaf: ClusterDetail = {
     mode: "members",
     total_children: 0,
     shown_children: 0,
-    total_members: 500,
+    total_members: 7000,
     shown_members: 2,
     member_limit: 2,
     total_member_edges: 900,
@@ -129,17 +130,54 @@ const leaf: ClusterDetail = {
     truncated: true,
   },
 };
+const inPlace = (
+  id: string,
+  size: number,
+  names: string[],
+): ClusterMembers => ({
+  revision: "rev-1",
+  cluster: cluster(id, size, { parent_id: "ca", depth: 1 }),
+  nodes: names.map(member),
+  edges: [
+    {
+      id: `${names[0]}->${names[1]}`,
+      source: names[0],
+      target: names[1],
+      type: "CAN_ASSUME",
+      actions: [],
+      certainty: "confirmed",
+      evidence: [],
+    },
+  ],
+  degrees: Object.fromEntries(names.map((n, i) => [n, 9 - i])),
+  warnings: [],
+  view: {
+    total_members: size,
+    shown_members: names.length,
+    member_limit: 5000,
+    visible_members: names.length,
+    visible_limit: 5000,
+    shown_edges: 1,
+    edge_limit: 20000,
+    truncated: false,
+    notice: NOTICE,
+  },
+});
 let handler: (p: string) => unknown;
 beforeEach(() => {
   vi.clearAllMocks();
   handler = (p) =>
     p.startsWith("graph/clusters?")
       ? top
-      : p.startsWith("graph/clusters/ca")
-        ? children
-        : p.startsWith("graph/clusters/cd")
-          ? leaf
-          : [];
+      : p.startsWith("graph/clusters/cd/members")
+        ? inPlace("cd", 500, ["role:x", "role:y"])
+        : p.startsWith("graph/clusters/cb/members")
+          ? inPlace("cb", 40, ["role:p", "role:q"])
+          : p.startsWith("graph/clusters/ca")
+            ? children
+            : p.startsWith("graph/clusters/cc")
+              ? leaf
+              : [];
   vi.mocked(api).mockImplementation(async (p) => handler(p) as never);
 });
 
@@ -155,7 +193,7 @@ describe("global map", () => {
       />,
     );
     const status = await screen.findByText(/2 \/ 2 top-level clusters/);
-    expect(status).toHaveTextContent("1,240 entities");
+    expect(status).toHaveTextContent("12,040 entities");
     expect(status).toHaveTextContent("5,000 relationships");
     expect(status).toHaveTextContent("1 / 1 cluster links");
     expect(status).toHaveTextContent("Complete map");
@@ -163,14 +201,39 @@ describe("global map", () => {
     expect(
       screen.getByText("Clusters are structural, not permission boundaries"),
     ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Group ca · 1,200" }));
+    // Larger than the on-screen budget: opens its sub-groups as a new level.
+    fireEvent.click(screen.getByRole("button", { name: "Group ca · 12,000" }));
     await screen.findByText(/2 \/ 2 child clusters/);
     expect(api).toHaveBeenCalledWith(
       "graph/clusters/ca?revision=rev-1",
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
+    // Within the budget: its members appear in place, on the same level.
     fireEvent.click(screen.getByRole("button", { name: "Group cd · 500" }));
-    const members = await screen.findByText(/2 \/ 500 members/);
+    await screen.findByText(/2 \/ 5,000 members shown in place/);
+    expect(api).toHaveBeenCalledWith(
+      "graph/clusters/cd/members?revision=rev-1",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(screen.getByText(/2 \/ 2 child clusters/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Group cd · 500" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "role:y" }));
+    expect(screen.getByText("Relationships").nextSibling).toHaveTextContent(
+      "8",
+    );
+    expect(screen.getByText("Shown here").nextSibling).toHaveTextContent("1");
+    fireEvent.click(screen.getByRole("button", { name: "Open neighborhood" }));
+    expect(open).toHaveBeenLastCalledWith("role:y", "rev-1");
+    fireEvent.click(screen.getByRole("button", { name: "Collapse cluster" }));
+    expect(screen.queryByRole("button", { name: "role:y" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Group cd · 500" }),
+    ).toHaveAttribute("aria-pressed", "false");
+    // A leaf larger than the budget opens as a member level (canvas renderer, at most 500 shown).
+    fireEvent.click(screen.getByRole("button", { name: "Group cc · 7,000" }));
+    const members = await screen.findByText(/2 \/ 7,000 members/);
     expect(members).toHaveTextContent("0 / 900 relationships inside");
     expect(members).toHaveTextContent("Partial cluster");
     // Breadcrumb: back to the parent, or to the top level.
@@ -291,5 +354,58 @@ describe("global map", () => {
     expect(
       screen.getByRole("heading", { name: "Global map" }),
     ).toBeInTheDocument();
+  });
+  it("expands several clusters within the budget and explains refusals", async () => {
+    const fallback = handler;
+    let refuse = true;
+    handler = (p) => {
+      if (p.startsWith("graph/clusters/ce/members")) {
+        if (refuse)
+          throw new ApiError(
+            "Expanding this cluster would show 5,030 entities; at most 5,000 can be shown at once.",
+            422,
+          );
+        return inPlace("ce", 30, ["role:m", "role:n"]);
+      }
+      return p.startsWith("graph/clusters/ca")
+        ? {
+            ...children,
+            children: [
+              ...children.children,
+              cluster("ce", 30, { parent_id: "ca", depth: 1 }),
+            ],
+          }
+        : fallback(p);
+    };
+    const onError = vi.fn();
+    render(
+      <GlobalMap
+        reloadKey={0}
+        stale={false}
+        onError={onError}
+        onOpenNeighborhood={vi.fn()}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Group ca · 12,000" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Group cd · 500" }),
+    );
+    await screen.findByText(/2 \/ 5,000 members shown in place/);
+    // A refusal is explained on the map, not raised as an error.
+    fireEvent.click(screen.getByRole("button", { name: "Group ce · 30" }));
+    await screen.findByText(/at most 5,000 can be shown at once/);
+    expect(onError).not.toHaveBeenCalled();
+    // The next expansion names the clusters already on screen.
+    refuse = false;
+    fireEvent.click(screen.getByRole("button", { name: "Group ce · 30" }));
+    await screen.findByText(/4 \/ 5,000 members shown in place/);
+    expect(api).toHaveBeenCalledWith(
+      "graph/clusters/ce/members?revision=rev-1&expanded=cd",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Collapse all" }));
+    expect(screen.queryByText(/members shown in place/)).toBeNull();
   });
 });

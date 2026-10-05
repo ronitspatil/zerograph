@@ -47,9 +47,15 @@ export function createGraph(
     try {
       // WebGL blends arrow heads against this colour; use the canvas's own background.
       if (container && !container.style.backgroundColor) {
-        const background = getComputedStyle(container).backgroundColor;
-        if (background && background !== "rgba(0, 0, 0, 0)")
-          container.style.backgroundColor = background;
+        let element: HTMLElement | null = container;
+        while (element) {
+          const background = getComputedStyle(element).backgroundColor;
+          if (background && background !== "rgba(0, 0, 0, 0)") {
+            container.style.backgroundColor = background;
+            break;
+          }
+          element = element.parentElement;
+        }
       }
       const cy = cytoscape({
         ...options,
