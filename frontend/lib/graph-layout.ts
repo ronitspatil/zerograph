@@ -8,9 +8,26 @@ export interface LayoutInput {
   nodes: string[];
   edges: { id: string; source: string; target: string }[];
   attributes?: Record<string, { type: string; account: string }>;
+  /** "packed" fills a disc for in-place cluster expansion; default: role constellations. */
+  mode?: "constellations" | "packed";
 }
-export function layoutInput(graph: GraphData): LayoutInput | null {
-  if (graph.nodes.length > 500 || graph.edges.length > 2000) return null;
+export interface LayoutLimits {
+  nodes: number;
+  edges: number;
+}
+/** Explorer and detail views (canvas renderer, readable labels). */
+export const EXPLORE_LIMITS: LayoutLimits = { nodes: 500, edges: 2000 };
+/** Global-map members shown in place (WebGL renderer). */
+export const MEMBER_LIMITS: LayoutLimits = { nodes: 5000, edges: 20000 };
+export function layoutLimits(input: Pick<LayoutInput, "mode">): LayoutLimits {
+  return input.mode === "packed" ? MEMBER_LIMITS : EXPLORE_LIMITS;
+}
+export function layoutInput(
+  graph: GraphData,
+  limits: LayoutLimits = EXPLORE_LIMITS,
+): LayoutInput | null {
+  if (graph.nodes.length > limits.nodes || graph.edges.length > limits.edges)
+    return null;
   const ids = new Set(graph.nodes.map((n) => n.id));
   if (
     ids.size !== graph.nodes.length ||
@@ -50,7 +67,9 @@ export function startLayout(
       new URL("./graph-layout.worker.ts", import.meta.url),
     ) as unknown as LayoutWorker,
 ): () => void {
-  if (input.nodes.length > 500 || input.edges.length > 2000) return () => {};
+  const limits = layoutLimits(input);
+  if (input.nodes.length > limits.nodes || input.edges.length > limits.edges)
+    return () => {};
   let active = true;
   let worker: LayoutWorker;
   try {

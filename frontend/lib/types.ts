@@ -216,3 +216,25 @@ export interface ClusterDetail {
     notice: string;
   };
 }
+/** Every member of one cluster, shown in place on the global map. */
+export interface ClusterMembers {
+  revision: string;
+  cluster: ClusterSummary;
+  nodes: GraphNode[];
+  /** Relationships among these members and to members already on screen. */
+  edges: GraphEdge[];
+  /** Each member's relationship count in the whole revision. */
+  degrees: Record<string, number>;
+  warnings: string[];
+  view: {
+    total_members: number;
+    shown_members: number;
+    member_limit: number;
+    visible_members: number;
+    visible_limit: number;
+    shown_edges: number;
+    edge_limit: number;
+    truncated: boolean;
+    notice: string;
+  };
+}
