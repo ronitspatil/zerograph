@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -6,14 +7,16 @@ from celery import Celery
 from loguru import logger
 from sqlalchemy import or_, select, update
 
+from app.collectors import staging
 from app.collectors.aws_collector import AWSCollector
-from app.collectors.data_classifier import classification_edges
 from app.collectors.mcp_agent_collector import MCPInventory, collect_mcp
+from app.collectors.publication import publish_sets
 from app.core.auth import Actor
 from app.core.config import get_settings
-from app.db.models import IngestionJob, SourceSnapshot, TenantState, now
+from app.db.locks import acquire_publication_lock
+from app.db.models import IngestionJob, SourceSnapshot, TenantState, UploadSession, now
 from app.db.session import audit, session_factory
-from app.graph.analysis import compute_analysis, store_analysis
+from app.graph.analysis import store_analysis
 from app.graph.demo import demo_snapshot
 from app.graph.repository import get_graph_store
 from app.graph.schema import GraphSnapshot
@@ -37,8 +40,17 @@ celery_app.conf.update(
 )
 
 
-def collect(source: str, payload: dict, tenant: str) -> GraphSnapshot:
+@dataclass(frozen=True)
+class StagedUpload:
+    """A committed upload session; its rows are already validated and staged in SQL."""
+
+    session_id: str
+
+
+def collect(source: str, payload: dict, tenant: str) -> GraphSnapshot | StagedUpload:
     if source == "snapshot":
+        if set(payload) == {"upload_session"}:
+            return StagedUpload(str(payload["upload_session"]))
         return GraphSnapshot.model_validate(payload)
     if source == "mcp":
         return collect_mcp(MCPInventory.model_validate(payload))
@@ -140,7 +152,48 @@ def process_job(job_id: str) -> None:
         raise
 
 
-def _publish_job(job_id: str, token: str, tenant: str, snapshot: GraphSnapshot) -> None:
+def _complete(db, job: IngestionJob) -> None:
+    job.status = "completed"
+    job.payload = {}
+    job.error = None
+    job.lease_token = None
+    job.lease_expires_at = None
+    job.updated_at = now()
+
+
+def _entity_set(db, job: IngestionJob, tenant: str, collected: GraphSnapshot | StagedUpload) -> str:
+    """This job's validated rows as an entity set (staged now, or by an upload session)."""
+    if isinstance(collected, GraphSnapshot):
+        return staging.stage_snapshot(db, tenant, job.actor, job.source, collected).id
+    upload = db.get(UploadSession, collected.session_id)
+    if (
+        upload is None
+        or upload.tenant_id != tenant
+        or upload.status != "committed"
+        or upload.job_id != job.id
+    ):
+        raise ValueError("Upload session is not committed for this job")
+    return upload.id
+
+
+def _source_sets(db, tenant: str) -> list[tuple[SourceSnapshot, str]]:
+    """Active entity set per source, in source-name order; legacy JSON blobs are staged."""
+    result = []
+    for row in db.scalars(
+        select(SourceSnapshot).where(SourceSnapshot.tenant_id == tenant).order_by(SourceSnapshot.source)
+    ):
+        set_id = (row.payload or {}).get("entity_set")
+        if not set_id:
+            # Release upgrade: a pre-staging source still holds one snapshot document.
+            legacy = GraphSnapshot.model_validate(row.payload)
+            set_id = staging.stage_snapshot(db, tenant, "migration:source-snapshot", row.source, legacy).id
+            db.get(UploadSession, set_id).status = "active"
+            row.payload = {"entity_set": set_id}
+        result.append((row, set_id))
+    return result
+
+
+def _publish_job(job_id: str, token: str, tenant: str, collected: GraphSnapshot | StagedUpload) -> None:
     with session_factory()() as db:
         # Fence old owners before any source or graph writes. Hold this row lock
         # through publication: recovery cannot revoke ownership mid-commit.
@@ -157,10 +210,9 @@ def _publish_job(job_id: str, token: str, tenant: str, snapshot: GraphSnapshot) 
         ).scalar_one_or_none()
         if job is None:
             return
-        # Serialize publishers for a tenant before reading all source snapshots.
-        state = db.execute(
-            select(TenantState).where(TenantState.tenant_id == tenant).with_for_update()
-        ).scalar_one()
+        # Serialize publishers (and retention/backfill) for a tenant for the whole
+        # build. Readers are not blocked: TenantState is locked only for the swap.
+        acquire_publication_lock(db, tenant)
         source_row = db.get(SourceSnapshot, (tenant, job.source))
         # Collection can finish out of order. Never overwrite a newer submitted
         # snapshot of the same source. UUID breaks equal timestamp ties stably.
@@ -169,65 +221,45 @@ def _publish_job(job_id: str, token: str, tenant: str, snapshot: GraphSnapshot) 
             and source_row.job_created_at
             and (_utc(source_row.job_created_at), source_row.job_id or "") > (_utc(job.created_at), job.id)
         ):
-            job.status = "completed"
-            job.payload = {}
-            job.error = None
-            job.lease_token = None
-            job.lease_expires_at = None
-            job.updated_at = now()
+            if isinstance(collected, StagedUpload):
+                staging.delete_set(db, collected.session_id)
+            _complete(db, job)
             audit(db, Actor(job.actor, tenant, frozenset()), "ingestion.superseded", {"job_id": job_id})
             db.commit()
             return
+        set_id = _entity_set(db, job, tenant, collected)
+        db.get(UploadSession, set_id).status = "active"
+        previous = None
         if source_row is None:
             source_row = SourceSnapshot(tenant_id=tenant, source=job.source)
             db.add(source_row)
-        source_row.payload = snapshot.model_dump(mode="json")
+        else:
+            # A legacy (pre-staging) document of this source is simply replaced.
+            previous = (source_row.payload or {}).get("entity_set")
+        source_row.payload = {"entity_set": set_id}
         source_row.job_created_at = job.created_at
         source_row.job_id = job.id
         db.flush()
-        nodes, edges, warnings = {}, {}, []
-        for row in db.scalars(
-            select(SourceSnapshot).where(SourceSnapshot.tenant_id == tenant).order_by(SourceSnapshot.source)
-        ):
-            part = GraphSnapshot.model_validate(row.payload)
-            for node in part.nodes:
-                if node.id in nodes and nodes[node.id] != node:
-                    raise ValueError(
-                        "Conflicting node definitions across sources; reconcile IDs before publishing"
-                    )
-                nodes[node.id] = node
-            for edge in part.edges:
-                if edge.id in edges and edges[edge.id] != edge:
-                    raise ValueError(
-                        "Conflicting edge definitions across sources; reconcile IDs before publishing"
-                    )
-                edges[edge.id] = edge
-            warnings.extend(part.warnings)
-        combined = GraphSnapshot(
-            nodes=list(nodes.values()),
-            edges=list(edges.values()),
-            warnings=warnings[:1000],
-            source="combined",
-        )
-        combined = GraphSnapshot.model_validate(classification_edges(combined).model_dump())
-        # Whole-revision analysis runs once here, not on every dashboard read. A
-        # failure fails the attempt before any graph write.
-        analysis = compute_analysis(combined)
+        set_ids = [set_id_ for _, set_id_ in _source_sets(db, tenant)]
         revision = str(uuid4())
-        # If SQL commit fails after graph commit, the immutable revision is an
-        # orphan, never visible via TenantState. A retry publishes a new revision.
-        get_graph_store().publish(tenant, revision, combined)
-        # Analysis rows commit atomically with the pointer swap below.
-        store_analysis(db, tenant, revision, analysis)
+        # Graph rows go into an invisible revision in bounded transactions; its
+        # Snapshot node is "building" until finished. If anything below fails, the
+        # SQL transaction rolls back (sources unchanged) and the abandoned revision
+        # is never referenced; retention removes it once stale. A retry publishes
+        # a new revision.
+        published = publish_sets(db, get_graph_store(), tenant, revision, set_ids)
+        # Analysis rows reference only the new, not yet visible revision.
+        store_analysis(db, tenant, revision, published.analysis)
+        if previous and previous != set_id:
+            staging.delete_set(db, previous)
+        # Short pointer lock: waits only for readers' shared pins, then commits.
+        state = db.execute(
+            select(TenantState).where(TenantState.tenant_id == tenant).with_for_update()
+        ).scalar_one()
         state.revision = revision
         state.updated_at = now()
-        job.status = "completed"
-        job.error = None
-        job.node_count = len(combined.nodes)
-        job.payload = {}
-        job.lease_token = None
-        job.lease_expires_at = None
-        job.updated_at = now()
+        _complete(db, job)
+        job.node_count = published.nodes
         audit(
             db,
             Actor(job.actor, tenant, frozenset()),

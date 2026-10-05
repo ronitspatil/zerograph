@@ -268,7 +268,7 @@ def test_retention_protects_publication_pointer_with_real_tenant_lock(postgres_e
     monkeypatch.setattr(retention, "get_graph_store", lambda: graph)
     deleting, release, published = Event(), Event(), Event()
     original_delete = graph.delete_revision
-    original_publish = graph.publish
+    original_begin = graph.begin_revision
 
     def paused_delete(*args):
         deleting.set()
@@ -277,12 +277,12 @@ def test_retention_protects_publication_pointer_with_real_tenant_lock(postgres_e
 
     def observed_publish(*args):
         published.set()
-        return original_publish(*args)
+        return original_begin(*args)
 
     job_id = enqueue(factory)
     with (
         patch.object(graph, "delete_revision", side_effect=paused_delete),
-        patch.object(graph, "publish", side_effect=observed_publish),
+        patch.object(graph, "begin_revision", side_effect=observed_publish),
     ):
         with ThreadPoolExecutor(max_workers=2) as pool:
             cleanup = pool.submit(
@@ -294,8 +294,8 @@ def test_retention_protects_publication_pointer_with_real_tenant_lock(postgres_e
             )
             assert deleting.wait(timeout=10)
             ingestion = pool.submit(tasks.process_job, job_id)
-            # Worker can claim/collect, but cannot publish while retention owns
-            # the tenant row lock. This bounded wait tests exclusion, not speed.
+            # Worker can claim/collect, but cannot start building while retention
+            # owns the tenant publication lock. This bounded wait tests exclusion.
             assert not published.wait(timeout=0.2)
             release.set()
             result = cleanup.result(timeout=10)
@@ -395,7 +395,10 @@ def test_retention_refuses_deletion_when_durable_intent_commit_fails(postgres_en
         assert db.scalar(select(AuditEvent)) is None
 
 
-def test_api_reader_pin_blocks_publication_and_cleanup_through_paths(postgres_environment, monkeypatch):
+def test_api_reader_pin_blocks_only_the_pointer_swap_and_never_its_revision(postgres_environment, monkeypatch):
+    """Short-lock contract: a reader's shared pin delays only a publisher's pointer
+    swap. The new revision is built while the reader runs, and retention proceeds
+    without waiting, but never deletes the pinned (current) revision."""
     from app.api.routes import load_snapshot
     from app.graph import retention
 
@@ -414,6 +417,8 @@ def test_api_reader_pin_blocks_publication_and_cleanup_through_paths(postgres_en
         db.commit()
     snapshot_started, paths_started, release_snapshot, release_paths = Event(), Event(), Event(), Event()
     original_snapshot, original_paths = graph.snapshot, graph.shortest_paths
+    original_finish = graph.finish_revision
+    built = Event()
 
     def paused_snapshot(tenant, revision):
         if revision == "old-0":
@@ -426,6 +431,10 @@ def test_api_reader_pin_blocks_publication_and_cleanup_through_paths(postgres_en
         assert release_paths.wait(timeout=10)
         return original_paths(*args)
 
+    def observed_finish(*args):
+        original_finish(*args)
+        built.set()
+
     def reader():
         with factory() as db:
             snapshot, revision = load_snapshot(db, graph, "tenant")
@@ -434,41 +443,34 @@ def test_api_reader_pin_blocks_publication_and_cleanup_through_paths(postgres_en
             graph.shortest_paths("tenant", revision, "asset", 1, False)
         return revision
 
-    collected = Event()
-    original_collect = tasks.collect
-
-    def observed_collect(*args):
-        snapshot = original_collect(*args)
-        collected.set()
-        return snapshot
-
     job_id = enqueue(factory)
     with (
         patch.object(graph, "snapshot", side_effect=paused_snapshot),
         patch.object(graph, "shortest_paths", side_effect=paused_paths),
-        patch.object(tasks, "collect", side_effect=observed_collect),
+        patch.object(graph, "finish_revision", side_effect=observed_finish),
     ):
         with ThreadPoolExecutor(max_workers=3) as pool:
             read = pool.submit(reader)
             assert snapshot_started.wait(timeout=10)
-            publish = pool.submit(tasks.process_job, job_id)
+            # Retention does not wait for the reader and spares its revision.
             cleanup = pool.submit(
                 retention.prune_revisions, "tenant", retention.RetentionPolicy(1, 2, 3), apply=True
-            )
-            assert collected.wait(timeout=10)
-            assert not publish.done()
-            assert not cleanup.done()
+            ).result(timeout=10)
+            assert "old-0" not in cleanup.deleted and cleanup.deleted
+            assert ("tenant", "old-0") in graph.snapshots
+            publish = pool.submit(tasks.process_job, job_id)
+            # The whole revision is built while the reader holds its pin ...
+            assert built.wait(timeout=10)
             release_snapshot.set()
             assert paths_started.wait(timeout=10)
+            # ... but the pointer swap waits for the reader's shared lock.
             with pytest.raises(TimeoutError):
-                publish.result(timeout=0.1)
-            with pytest.raises(TimeoutError):
-                cleanup.result(timeout=0.1)
-            assert ("tenant", "old-0") in graph.snapshots
+                publish.result(timeout=0.2)
+            with factory() as db:
+                assert db.get(TenantState, "tenant").revision == "old-0"
             release_paths.set()
             assert read.result(timeout=10) == "old-0"
             publish.result(timeout=10)
-            cleanup.result(timeout=10)
     with factory() as db:
         snapshot, revision = load_snapshot(db, graph, "tenant")
         assert revision != "old-0"

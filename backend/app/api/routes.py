@@ -1,22 +1,23 @@
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated, Literal
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
+from app.collectors import staging
 from app.collectors.execution_audit import AuditNormalization, normalize_cloudtrail
 from app.collectors.mcp_agent_collector import MCPInventory
 from app.collectors.tasks import ingest
 from app.core.auth import Actor, require_role
 from app.core.config import get_settings
-from app.db.models import AuditEvent, IngestionJob, Remediation, TenantState
+from app.db.models import AuditEvent, IngestionJob, Remediation, StagedEntity, TenantState, UploadSession, now
 from app.db.session import audit, get_db
 from app.engine.blast_radius import BlastRadius, calculate
 from app.engine.toxic_combos import Finding
@@ -56,10 +57,12 @@ def tenant_state(db: Session, tenant: str) -> TenantState | None:
 
 
 def pin_revision(db: Session, tenant: str) -> str:
-    # Pin the authoritative pointer for this request transaction. Publishers and
-    # retention use FOR UPDATE, so the graph cannot disappear or advance while
-    # snapshot and subsequent shortest-path queries materialize. Refresh any
-    # identity-map entry loaded before the lock was acquired.
+    # Pin the authoritative pointer for this request transaction. Publishers lock
+    # the row FOR UPDATE only for the final pointer swap (they build the new
+    # revision without blocking readers), and retention never deletes the pointer's
+    # revision, so the graph cannot disappear or advance while snapshot and
+    # subsequent shortest-path queries materialize. Refresh any identity-map entry
+    # loaded before the lock was acquired.
     if db.get_bind().dialect.name == "postgresql":
         db.execute(
             text("SELECT set_config('lock_timeout', :timeout, true)"),
@@ -315,13 +318,44 @@ class JobResponse(BaseModel):
     updated_at: datetime
 
 
+def ensure_tenant_state(db: Session, tenant: str) -> None:
+    if tenant_state(db, tenant) is None:
+        db.add(TenantState(tenant_id=tenant))
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+
+
+def enqueue_job(db: Session, actor: Actor, source: str, payload: dict, detail: dict) -> IngestionJob:
+    job = IngestionJob(
+        id=str(uuid4()),
+        tenant_id=actor.tenant_id,
+        actor=actor.subject,
+        source=source,
+        payload=payload,
+    )
+    db.add(job)
+    audit(db, actor, "ingestion.requested", {"job_id": job.id, "source": source, **detail})
+    db.commit()
+    try:
+        ingest.delay(job.id)
+    except Exception:
+        # Beat recovers the committed outbox row after broker availability returns.
+        pass
+    return job
+
+
 @router.post("/ingestions", response_model=JobResponse, status_code=202)
 def start_ingestion(request: IngestionRequest, db: DB, actor: Admin):
     settings = get_settings()
     payload = request.payload
     try:
         if request.source == "snapshot":
-            payload = GraphSnapshot.model_validate(payload).model_dump(mode="json")
+            snapshot = GraphSnapshot.model_validate(payload)
+            if len(snapshot.nodes) > settings.max_nodes or len(snapshot.edges) > settings.max_edges:
+                raise HTTPException(413, "Snapshot exceeds the configured node or edge limit")
+            payload = snapshot.model_dump(mode="json")
         elif request.source == "mcp":
             payload = MCPInventory.model_validate(payload).model_dump(mode="json")
             # MCP definitions may contain credentials. Persist transport only; the collector never executes them.
@@ -337,27 +371,198 @@ def start_ingestion(request: IngestionRequest, db: DB, actor: Admin):
         raise HTTPException(403, "Demo fixtures are disabled")
     if request.source == "aws" and (not settings.aws_role_arn or settings.aws_tenant_id != actor.tenant_id):
         raise HTTPException(409, "AWS connector is not configured for this tenant")
-    if tenant_state(db, actor.tenant_id) is None:
-        db.add(TenantState(tenant_id=actor.tenant_id))
-        try:
-            db.commit()
-        except IntegrityError:
-            db.rollback()
+    ensure_tenant_state(db, actor.tenant_id)
+    return enqueue_job(db, actor, request.source, payload, {})
+
+
+class UploadRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source: Literal["snapshot"] = "snapshot"
+
+
+class UploadResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    status: str
+    source: str
+    node_count: int
+    edge_count: int
+    warning_count: int
+    expires_at: datetime
+    max_chunk_bytes: int
+    max_nodes: int
+    max_edges: int
+
+
+def upload_response(upload: UploadSession) -> UploadResponse:
+    settings = get_settings()
+    return UploadResponse(
+        id=upload.id,
+        status=upload.status,
+        source=upload.source,
+        node_count=upload.node_count,
+        edge_count=upload.edge_count,
+        warning_count=upload.warning_count,
+        expires_at=upload.expires_at,
+        max_chunk_bytes=settings.max_body_bytes,
+        max_nodes=settings.max_nodes,
+        max_edges=settings.max_edges,
+    )
+
+
+async def raw_body(request: Request) -> bytes:
+    return await request.body()
+
+
+UploadId = Annotated[str, Path(min_length=1, max_length=64)]
+ChunkBody = Annotated[bytes, Depends(raw_body)]
+
+
+def _utc_aware(timestamp: datetime) -> datetime:
+    return timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=now().tzinfo)
+
+
+def open_upload(db: Session, actor: Actor, upload_id: str) -> UploadSession:
+    """Lock the caller's open upload session; chunk writes and commit are serialized."""
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(text("SELECT set_config('lock_timeout', '5000ms', true)"))
+    try:
+        upload = db.execute(
+            select(UploadSession)
+            .where(
+                UploadSession.id == upload_id,
+                UploadSession.tenant_id == actor.tenant_id,
+                UploadSession.origin == "upload",
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+    except DBAPIError as exc:
+        if getattr(exc.orig, "sqlstate", None) != "55P03":
+            raise
+        db.rollback()
+        raise HTTPException(
+            409, "Upload session is busy; retry the chunk", headers={"Retry-After": "1"}
+        ) from None
+    if upload is None:
+        raise HTTPException(404, "Upload session not found")
+    if upload.status != "open":
+        raise HTTPException(409, "Upload session is no longer open")
+    if _utc_aware(upload.expires_at) < now():
+        raise HTTPException(410, "Upload session expired; start a new upload")
+    return upload
+
+
+@router.post("/ingestions/uploads", response_model=UploadResponse, status_code=201)
+def create_upload(request: UploadRequest, db: DB, actor: Admin):
+    """Start a chunked snapshot upload for graphs above the single-body limit."""
+    settings = get_settings()
+    timestamp = now()
+    staging.purge_expired(db, actor.tenant_id, timestamp)
+    active = db.scalar(
+        select(func.count())
+        .select_from(UploadSession)
+        .where(
+            UploadSession.tenant_id == actor.tenant_id,
+            UploadSession.origin == "upload",
+            UploadSession.status == "open",
+            UploadSession.expires_at >= timestamp,
+        )
+    )
+    if active >= settings.max_open_uploads:
+        db.rollback()
+        raise HTTPException(
+            429, "Too many open uploads; commit one or let it expire", headers={"Retry-After": "60"}
+        )
+
+    upload = staging.new_session(
+        db,
+        actor.tenant_id,
+        actor.subject,
+        request.source,
+        "upload",
+        timedelta(seconds=settings.upload_session_ttl_seconds),
+    )
+    audit(db, actor, "ingestion.upload_started", {"upload_id": upload.id, "source": request.source})
+    db.commit()
+    return upload_response(upload)
+
+
+@router.put("/ingestions/uploads/{upload_id}/chunks/{chunk}", response_model=UploadResponse)
+def upload_chunk(
+    upload_id: UploadId,
+    chunk: Annotated[int, Path(ge=0, lt=staging.MAX_CHUNKS)],
+    body: ChunkBody,
+    db: DB,
+    actor: Admin,
+):
+    """Stage one NDJSON chunk (``{"node":…}``/``{"edge":…}``/``{"warning":…}`` lines).
+
+    Re-sending a chunk number replaces that chunk, so a client may retry safely.
+    """
+    settings = get_settings()
+    upload = open_upload(db, actor, upload_id)
+    try:
+        rows = staging.parse_chunk(body, chunk)
+    except staging.ChunkError as exc:
+        db.rollback()
+        raise HTTPException(422, str(exc)) from None
+    db.execute(delete(StagedEntity).where(StagedEntity.session_id == upload.id, StagedEntity.chunk == chunk))
+    try:
+        staging.insert_rows(db, upload.id, rows)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(422, "Node or edge ID already staged by another chunk of this upload") from None
+    totals = staging.counts(db, upload.id)
+    if (
+        totals["node"] > settings.max_nodes
+        or totals["edge"] > settings.max_edges
+        or totals["warning"] > staging.MAX_WARNINGS
+    ):
+        db.rollback()
+        raise HTTPException(413, "Upload exceeds the configured node, edge or warning limit")
+    upload.node_count, upload.edge_count, upload.warning_count = (
+        totals["node"],
+        totals["edge"],
+        totals["warning"],
+    )
+    upload.updated_at = now()
+    db.commit()
+    return upload_response(upload)
+
+
+@router.post("/ingestions/uploads/{upload_id}/commit", response_model=JobResponse, status_code=202)
+def commit_upload(upload_id: UploadId, db: DB, actor: Admin):
+    """Validate the staged graph as a whole (endpoints) and queue its publication."""
+    ensure_tenant_state(db, actor.tenant_id)
+    upload = open_upload(db, actor, upload_id)
+    if staging.missing_endpoints(db, upload.id):
+        db.rollback()
+        raise HTTPException(422, "Every edge endpoint must exist in this snapshot")
+    upload.status = "committed"
+    upload.updated_at = now()
+    job_id = str(uuid4())
+    upload.job_id = job_id
     job = IngestionJob(
-        id=str(uuid4()),
+        id=job_id,
         tenant_id=actor.tenant_id,
         actor=actor.subject,
-        source=request.source,
-        payload=payload,
+        source=upload.source,
+        payload={"upload_session": upload.id},
+        node_count=upload.node_count,
     )
     db.add(job)
-    audit(db, actor, "ingestion.requested", {"job_id": job.id, "source": request.source})
+    audit(
+        db,
+        actor,
+        "ingestion.requested",
+        {"job_id": job.id, "source": upload.source, "upload_id": upload.id, "nodes": upload.node_count},
+    )
     db.commit()
     try:
         ingest.delay(job.id)
     except Exception:
-        # Beat recovers the committed outbox row after broker availability returns.
-        pass
+        pass  # Beat recovers the committed outbox row.
     return job
 
 

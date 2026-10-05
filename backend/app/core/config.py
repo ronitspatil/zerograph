@@ -27,7 +27,14 @@ class Settings(BaseSettings):
     metrics_token: SecretStr = SecretStr("")
     body_timeout_seconds: int = Field(default=30, ge=1, le=120)
     max_body_bytes: int = Field(default=4_000_000, ge=1024)
-    max_nodes: int = Field(default=5000, ge=1, le=10000)
+    # Per-revision publication caps (the captain's capacity target), enforced on upload
+    # sessions, inline snapshots and the merged revision at publication time.
+    max_nodes: int = Field(default=100_000, ge=1, le=1_000_000)
+    max_edges: int = Field(default=500_000, ge=1, le=5_000_000)
+    # Rows per graph write/delete transaction during publication and retention.
+    graph_batch_size: int = Field(default=5000, ge=100, le=50_000)
+    upload_session_ttl_seconds: int = Field(default=86_400, ge=300, le=7 * 86_400)
+    max_open_uploads: int = Field(default=4, ge=1, le=100)
     aws_tenant_id: str = ""
     aws_role_arn: str = ""
     aws_external_id: SecretStr = SecretStr("")

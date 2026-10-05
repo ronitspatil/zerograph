@@ -68,8 +68,10 @@ class Edge(BaseModel):
 
 class GraphSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    nodes: list[Node] = Field(default_factory=list, max_length=5000)
-    edges: list[Edge] = Field(default_factory=list, max_length=20000)
+    # Size caps are Settings.max_nodes/max_edges, enforced where snapshots enter the
+    # system (inline ingestion, upload sessions) and on the merged published revision.
+    nodes: list[Node] = Field(default_factory=list)
+    edges: list[Edge] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list, max_length=1000)
     source: str = Field(default="snapshot", min_length=1, max_length=128)
 

@@ -1,7 +1,11 @@
 """Explicit, tenant-scoped immutable graph revision maintenance.
 
-Deletion is opt-in and requires PostgreSQL's publication row lock. This module is
-not scheduled automatically and never treats legacy undated revisions as old.
+Deletion is opt-in and requires PostgreSQL's tenant publication lock (advisory, the
+same one publishers hold while building). Readers are not blocked: they only ever
+pin the current pointer, which is protected and cannot move while the lock is held.
+This module is not scheduled automatically and never treats legacy undated
+revisions as old. Abandoned "building" revisions (a publisher died) become
+candidates once older than ``STALE_BUILDING_AGE``; a young one is never selected.
 """
 
 import argparse
@@ -11,12 +15,18 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from sqlalchemy import select, text
+from sqlalchemy.exc import DBAPIError
 
 from app.core.auth import Actor
+from app.db.locks import acquire_publication_lock
 from app.db.models import TenantState
 from app.db.session import audit, session_factory
 from app.graph.analysis import delete_analysis
 from app.graph.repository import RevisionMetadata, _validate_retention_bounds, get_graph_store
+
+# Longer than the ingestion lease (21 minutes) and hard task limit: an older
+# "building" revision has no live publisher (and the publication lock proves it).
+STALE_BUILDING_AGE = timedelta(hours=1)
 
 
 @dataclass(frozen=True)
@@ -55,16 +65,29 @@ def prune_revisions(
     if timestamp.tzinfo is None:
         raise ValueError("Retention timestamp must include a timezone")
     cutoff = int((timestamp - timedelta(days=policy.older_than_days)).timestamp() * 1000)
+    stale_cutoff = int((timestamp - STALE_BUILDING_AGE).timestamp() * 1000)
+    now_ms = int(timestamp.timestamp() * 1000)
     graph = get_graph_store()
     with session_factory()() as db:
         if apply and db.get_bind().dialect.name != "postgresql":
             raise ValueError("Applied retention requires PostgreSQL publication locks")
         if db.get_bind().dialect.name == "postgresql":
             db.execute(text("SET LOCAL lock_timeout = '5s'"))
-        # Ingestion takes this same lock before graph publication and pointer
-        # advancement. Missing SQL state must never imply an orphan tenant.
+        # Publishers hold this lock for a whole build, so no revision is under
+        # construction and the pointer cannot advance until this transaction ends.
+        # The shared row lock also excludes any writer that predates the advisory
+        # lock. Missing SQL state must never imply an orphan tenant.
+        try:
+            acquire_publication_lock(db, tenant)
+        except DBAPIError as exc:
+            if getattr(exc.orig, "sqlstate", None) != "55P03":
+                raise
+            raise ValueError("Tenant publication or maintenance is in progress; retry later") from None
         state = db.execute(
-            select(TenantState).where(TenantState.tenant_id == tenant).with_for_update()
+            select(TenantState)
+            .where(TenantState.tenant_id == tenant)
+            .with_for_update(read=True)
+            .execution_options(populate_existing=True)
         ).scalar_one_or_none()
         if state is None:
             raise ValueError("Tenant has no authoritative SQL state; cleanup refused")
@@ -74,7 +97,7 @@ def prune_revisions(
             state.revision,
             cutoff,
             graph.retention_candidates(
-                tenant, state.revision, cutoff, policy.keep_revisions, policy.batch_size
+                tenant, state.revision, cutoff, policy.keep_revisions, policy.batch_size, stale_cutoff
             ),
             [],
         )
@@ -88,18 +111,24 @@ def prune_revisions(
                 "revision": revision.revision,
                 "created_at_ms": revision.created_at_ms,
                 "cutoff_ms": cutoff,
+                "state": revision.state,
                 "protected_revision": state.revision,
             }
+            # Each state is re-checked against its own age bound by the adapter.
+            bound = {"ready": cutoff, "building": stale_cutoff}.get(revision.state, now_ms)
             # The separate session commits durable intent before irreversible
             # graph I/O. AuditEvent has no tenant-state FK, so this does not
             # release or contend with the outer publication row lock.
             with session_factory()() as intent_db:
                 audit(intent_db, Actor(actor, tenant, frozenset()), "graph.revision_delete_requested", detail)
                 intent_db.commit()
-            if graph.delete_revision(tenant, revision.revision, revision.created_at_ms, cutoff):
+            if graph.delete_revision(
+                tenant, revision.revision, revision.created_at_ms, bound, revision.state
+            ):
                 result.deleted.append(revision.revision)
                 # Stored analysis goes in the same transaction that still holds
-                # the tenant publication lock and records the deletion.
+                # the tenant publication lock and records the deletion. A
+                # building revision never had analysis rows; the delete is a no-op.
                 delete_analysis(db, tenant, revision.revision)
                 audit(db, Actor(actor, tenant, frozenset()), "graph.revision_deleted", detail)
             else:

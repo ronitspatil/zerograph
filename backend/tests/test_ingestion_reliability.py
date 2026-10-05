@@ -179,7 +179,7 @@ def test_older_source_collection_cannot_overwrite_newer_snapshot(environment):
 def test_graph_failure_rolls_back_sources_but_records_retry(environment):
     factory, graph = environment
     job_id = enqueue(factory, snapshot=asset("new"))
-    with patch.object(graph, "publish", side_effect=RuntimeError("unavailable")):
+    with patch.object(graph, "write_nodes", side_effect=RuntimeError("unavailable")):
         with pytest.raises(RuntimeError):
             tasks.process_job(job_id)
     with factory() as db:

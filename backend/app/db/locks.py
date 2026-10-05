@@ -1,0 +1,21 @@
+"""Tenant publication lock: serializes publishers, retention and analysis backfill.
+
+PostgreSQL holds a transaction-scoped advisory lock keyed by tenant for the whole
+build of a revision. Readers never take it: they pin ``TenantState`` FOR SHARE, and
+publishers lock that row FOR UPDATE only for the final pointer swap. SQLite (tests,
+local development) serializes writers itself, so the call is a no-op there.
+"""
+
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+# Arbitrary fixed namespace ("ZG") for the two-key advisory lock form.
+PUBLICATION_LOCK_NAMESPACE = 0x5A47
+
+
+def acquire_publication_lock(db: Session, tenant: str) -> None:
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(
+            text("SELECT pg_advisory_xact_lock(:namespace, hashtext(:tenant))"),
+            {"namespace": PUBLICATION_LOCK_NAMESPACE, "tenant": tenant},
+        )

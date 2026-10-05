@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from sqlalchemy import delete, insert, select, text
 from sqlalchemy.orm import Session
 
+from app.db.locks import acquire_publication_lock
 from app.db.models import RevisionAnalysis, RevisionFinding, TenantState
 from app.db.session import session_factory
 from app.engine.analysis_index import AnalysisIndex
@@ -172,12 +173,17 @@ def computed_findings_page(
 
 
 def backfill(tenant: str) -> dict:
-    """Compute and store analysis for a tenant's current revision under the publication lock."""
+    """Compute and store analysis for a tenant's current revision under the publication lock.
+
+    The advisory publication lock keeps the pointer fixed; readers are not blocked
+    (the shared pin) and see the rows atomically once this transaction commits.
+    """
     with session_factory()() as db:
         if db.get_bind().dialect.name == "postgresql":
             db.execute(text("SET LOCAL lock_timeout = '5s'"))
+        acquire_publication_lock(db, tenant)
         state = db.execute(
-            select(TenantState).where(TenantState.tenant_id == tenant).with_for_update()
+            select(TenantState).where(TenantState.tenant_id == tenant).with_for_update(read=True)
         ).scalar_one_or_none()
         if state is None or not state.revision:
             raise ValueError("Tenant has no published revision")
