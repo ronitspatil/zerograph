@@ -30,6 +30,14 @@ from app.graph.analysis import (
     stored_findings_page,
     stored_totals,
 )
+from app.graph.clusters import (
+    ClusterDetailResponse,
+    ClusterMapResponse,
+    ClusterNotFound,
+    cluster_detail,
+    cluster_map,
+    stored_summary,
+)
 from app.graph.exploration import (
     ExplorationResponse,
     ExplorationView,
@@ -170,6 +178,77 @@ def explore_graph(
             total_edges=result.total_edges,
         ),
     )
+
+
+CLUSTER_ID = r"^c[0-9a-f]{15}$|^[A-Za-z0-9_-]{1,32}$"
+CLUSTERS_UNAVAILABLE = (
+    "The global map is not computed for this revision yet; it is built at the next publication "
+    "(or by an operator backfill)"
+)
+
+
+def _cluster_summary(db: Session, tenant: str, revision: str):
+    summary = stored_summary(db, tenant, revision)
+    if summary is None:
+        raise HTTPException(404, CLUSTERS_UNAVAILABLE)
+    return summary
+
+
+def _unavailable() -> HTTPException:
+    return HTTPException(
+        503, "Published graph revision unavailable; retry shortly", headers={"Retry-After": "5"}
+    )
+
+
+@router.get("/graph/clusters", response_model=ClusterMapResponse)
+def graph_clusters(
+    db: DB,
+    graph: Graph,
+    actor: Viewer,
+    level: Annotated[int, Query(ge=0, le=0)] = 0,
+    edge_limit: Annotated[int, Query(ge=1, le=2000)] = 1000,
+    revision: str | None = None,
+):
+    """Top-level structural clusters of the pinned revision (at most 300) and their link weights.
+
+    Clusters group entities by graph structure only; they are not permission boundaries.
+    """
+    current = expected_revision(db, actor.tenant_id, revision)
+    if not current:
+        raise HTTPException(404, CLUSTERS_UNAVAILABLE)
+    summary = _cluster_summary(db, actor.tenant_id, current)
+    try:
+        # Confirms the revision's graph metadata, as explore does, and carries its warnings.
+        warnings = graph.cluster_members(actor.tenant_id, current, [], 1).warnings
+    except RevisionUnavailable:
+        raise _unavailable() from None
+    return cluster_map(db, summary, warnings, edge_limit)
+
+
+@router.get("/graph/clusters/{cluster_id}", response_model=ClusterDetailResponse)
+def graph_cluster(
+    db: DB,
+    graph: Graph,
+    actor: Viewer,
+    cluster_id: Annotated[str, Path(pattern=CLUSTER_ID)],
+    member_limit: Annotated[int, Query(ge=1, le=500)] = 500,
+    edge_limit: Annotated[int, Query(ge=1, le=2000)] = 2000,
+    revision: str | None = None,
+):
+    """Child clusters of one cluster, or a leaf's members (at most 500) and their relationships.
+
+    Clusters group entities by graph structure only; they are not permission boundaries.
+    """
+    current = expected_revision(db, actor.tenant_id, revision)
+    if not current:
+        raise HTTPException(404, CLUSTERS_UNAVAILABLE)
+    _cluster_summary(db, actor.tenant_id, current)
+    try:
+        return cluster_detail(db, graph, actor.tenant_id, current, cluster_id, member_limit, edge_limit)
+    except ClusterNotFound:
+        raise HTTPException(404, "Cluster not found in this revision") from None
+    except RevisionUnavailable:
+        raise _unavailable() from None
 
 
 @router.get("/graph/search", response_model=SearchResponse)

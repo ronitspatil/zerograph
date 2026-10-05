@@ -22,6 +22,7 @@ from app.db.locks import acquire_publication_lock
 from app.db.models import TenantState
 from app.db.session import audit, session_factory
 from app.graph.analysis import delete_analysis
+from app.graph.clusters import delete_clusters
 from app.graph.repository import RevisionMetadata, _validate_retention_bounds, get_graph_store
 
 # Longer than the ingestion lease (21 minutes) and hard task limit: an older
@@ -130,8 +131,9 @@ def prune_revisions(
                 result.deleted.append(revision.revision)
                 # Stored analysis goes in the same transaction that still holds
                 # the tenant publication lock and records the deletion. A
-                # building revision never had analysis rows; the delete is a no-op.
+                # building revision never had analysis or cluster rows; the delete is a no-op.
                 delete_analysis(db, tenant, revision.revision)
+                delete_clusters(db, tenant, revision.revision)
                 audit(db, Actor(actor, tenant, frozenset()), "graph.revision_deleted", detail)
             else:
                 audit(db, Actor(actor, tenant, frozenset()), "graph.revision_delete_skipped", detail)

@@ -17,6 +17,7 @@ from app.db.locks import acquire_pointer_gate, acquire_publication_lock
 from app.db.models import IngestionJob, SourceSnapshot, TenantState, UploadSession, now
 from app.db.session import audit, session_factory
 from app.graph.analysis import store_analysis
+from app.graph.clusters import compute_clusters, load_previous, store_clusters
 from app.graph.demo import demo_snapshot
 from app.graph.repository import get_graph_store
 from app.graph.schema import GraphSnapshot
@@ -241,6 +242,8 @@ def _publish_job(job_id: str, token: str, tenant: str, collected: GraphSnapshot 
         source_row.job_id = job.id
         db.flush()
         set_ids = [set_id_ for _, set_id_ in _source_sets(db, tenant)]
+        # The publication lock keeps the pointer fixed: this is the revision being replaced.
+        current = db.scalar(select(TenantState.revision).where(TenantState.tenant_id == tenant)) or ""
         revision = str(uuid4())
         # Graph rows go into an invisible revision in bounded transactions; its
         # Snapshot node is "building" until finished. If anything below fails, the
@@ -250,6 +253,11 @@ def _publish_job(job_id: str, token: str, tenant: str, collected: GraphSnapshot 
         published = publish_sets(db, get_graph_store(), tenant, revision, set_ids)
         # Analysis rows reference only the new, not yet visible revision.
         store_analysis(db, tenant, revision, published.analysis)
+        # Global-map clusters, warm-started from and ID-matched to the current revision.
+        clusters = compute_clusters(published.graph, revision, load_previous(db, tenant, current))
+        published.graph = None
+        store_clusters(db, tenant, revision, clusters)
+        del clusters
         if previous and previous != set_id:
             staging.delete_set(db, previous)
         # Short pointer lock: waits only for readers' shared pins, then commits.
