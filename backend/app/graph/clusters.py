@@ -866,7 +866,7 @@ def _link_count(db: Session, tenant: str, revision: str, parent: str) -> int:
 
 
 def validate_cluster_bounds(member_limit: int, edge_limit: int) -> None:
-    if not 1 <= member_limit <= MAX_MEMBERS or not 1 <= edge_limit <= 2000:
+    if not 1 <= member_limit <= 500 or not 1 <= edge_limit <= 2000:
         raise ValueError("Cluster limits outside supported bounds")
 
 

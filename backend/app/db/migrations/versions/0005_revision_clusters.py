@@ -8,14 +8,12 @@ down_revision = "0004"
 branch_labels = None
 depends_on = None
 
-SCOPE = [
-    sa.Column("tenant_id", sa.String(128), primary_key=True),
-    sa.Column("revision", sa.String(64), primary_key=True),
-]
-
 
 def scope():
-    return [column.copy() for column in SCOPE]
+    return [
+        sa.Column("tenant_id", sa.String(128), primary_key=True),
+        sa.Column("revision", sa.String(64), primary_key=True),
+    ]
 
 
 def upgrade() -> None:
