@@ -18,9 +18,20 @@ from app.collectors.tasks import ingest
 from app.core.auth import Actor, require_role
 from app.core.config import get_settings
 from app.db.locks import pin_pointer_gate
-from app.db.models import AuditEvent, IngestionJob, Remediation, StagedEntity, TenantState, UploadSession, now
+from app.db.models import (
+    AuditEvent,
+    IngestionJob,
+    Remediation,
+    RevisionAnalysis,
+    StagedEntity,
+    TenantState,
+    UploadSession,
+    now,
+)
 from app.db.session import audit, get_db
-from app.engine.blast_radius import BlastRadius, calculate
+from app.engine.analysis_index import WEIGHTS
+from app.engine.blast_radius import BlastRadius
+from app.engine.blast_radius import simulate as simulate_reach
 from app.engine.toxic_combos import Finding
 from app.graph.analysis import (
     UnknownCursor,
@@ -47,7 +58,7 @@ from app.graph.exploration import (
 )
 from app.graph.repository import GraphStore, get_graph_store
 from app.graph.role_map import RoleMapResponse, RoleMapView
-from app.graph.schema import IDENTITY_TYPES, GraphSnapshot, Node, NodeType
+from app.graph.schema import DATA_TYPES, IDENTITY_TYPES, GraphSnapshot, Node, NodeType
 from app.remediation.gitops_sync import GitOpsClient, GitOpsConflict, GitOpsError
 from app.remediation.policy_optimizer import Optimization, UsageEvidence, optimize, terraform_policy
 
@@ -114,9 +125,36 @@ def me(actor: Viewer):
 
 @router.get("/graph", response_model=GraphResponse)
 def graph_view(
-    db: DB, graph: Graph, actor: Viewer, account: str | None = None, identity_type: NodeType | None = None
+    response: Response,
+    db: DB,
+    graph: Graph,
+    actor: Viewer,
+    account: str | None = None,
+    identity_type: NodeType | None = None,
 ):
-    snapshot, revision = load_snapshot(db, graph, actor.tenant_id)
+    """Deprecated whole-revision view, kept for small revisions only.
+
+    Revisions above ``legacy_graph_max_nodes``/``legacy_graph_max_edges`` get 413
+    before anything is loaded; bounded views are ``/graph/explore``, ``/graph/roles``
+    and ``/graph/clusters``. Revisions without stored totals predate publish-time
+    analysis and therefore the scale work (published under the former 5k/20k caps).
+    """
+    settings = get_settings()
+    revision = pin_revision(db, actor.tenant_id)
+    response.headers["Deprecation"] = "true"
+    response.headers["Link"] = '</api/v1/graph/explore>; rel="successor-version"'
+    sized = db.get(RevisionAnalysis, (actor.tenant_id, revision)) if revision else None
+    if isinstance(sized, RevisionAnalysis) and (
+        sized.total_nodes > settings.legacy_graph_max_nodes
+        or sized.total_edges > settings.legacy_graph_max_edges
+    ):
+        raise HTTPException(
+            413,
+            f"Revision has {sized.total_nodes} entities and {sized.total_edges} relationships, above the "
+            "deprecated whole-graph view limit; use /graph/explore, /graph/roles or /graph/clusters",
+            headers={"Deprecation": "true"},
+        )
+    snapshot = graph.snapshot(actor.tenant_id, revision)
     nodes = [
         n
         for n in snapshot.nodes
@@ -356,17 +394,38 @@ class SimulationRequest(BaseModel):
     node_id: str = Field(min_length=1, max_length=512)
     max_hops: int = Field(default=5, ge=1, le=5)
     include_uncertain: bool = False
+    # Optional revision the caller is viewing: a different current revision is 409.
+    revision: str | None = Field(default=None, max_length=128)
+
+
+def revision_scale(db: Session, graph: GraphStore, tenant: str, revision: str) -> tuple[int, int]:
+    """(node count, total asset weight) of a revision, from its stored analysis.
+
+    Only a legacy revision without stored analysis (published before it existed,
+    under the former 5k-node cap) is measured from its snapshot.
+    """
+    row = db.get(RevisionAnalysis, (tenant, revision))
+    if isinstance(row, RevisionAnalysis):
+        return row.total_nodes, row.total_asset_weight
+    snapshot = graph.snapshot(tenant, revision)
+    weight = sum(WEIGHTS[node.sensitivity] for node in snapshot.nodes if node.type in DATA_TYPES)
+    return len(snapshot.nodes), weight
 
 
 @router.post("/simulate", response_model=BlastRadius)
-def simulate(request: SimulationRequest, db: DB, graph: Graph, actor: Analyst):
-    snapshot, revision = load_snapshot(db, graph, actor.tenant_id)
-    if request.node_id not in {n.id for n in snapshot.nodes}:
+def simulate(request: SimulationRequest, response: Response, db: DB, graph: Graph, actor: Analyst):
+    """Blast radius from the source's bounded neighborhood; never loads the whole revision."""
+    revision = expected_revision(db, actor.tenant_id, request.revision)
+    try:
+        reach = graph.reach(
+            actor.tenant_id, revision, request.node_id, request.max_hops, request.include_uncertain
+        )
+    except RevisionUnavailable:
+        raise _unavailable() from None
+    if reach is None:
         raise HTTPException(404, "Identity not found")
-    paths = graph.shortest_paths(
-        actor.tenant_id, revision, request.node_id, request.max_hops, request.include_uncertain
-    )
-    result = calculate(snapshot, request.node_id, request.max_hops, request.include_uncertain, paths)
+    total_nodes, total_asset_weight = revision_scale(db, graph, actor.tenant_id, revision)
+    result = simulate_reach(reach, total_nodes, total_asset_weight)
     audit(
         db,
         actor,
@@ -379,6 +438,7 @@ def simulate(request: SimulationRequest, db: DB, graph: Graph, actor: Analyst):
         },
     )
     db.commit()
+    response.headers["X-Graph-Revision"] = revision
     return result
 
 

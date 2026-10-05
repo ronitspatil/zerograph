@@ -9,6 +9,7 @@ from neo4j import GraphDatabase, Query, unit_of_work
 from neo4j.exceptions import Neo4jError
 
 from app.core.config import get_settings
+from app.engine.blast_radius import Reach, snapshot_reach, validate_hops
 from app.graph.exploration import (
     GraphSlice,
     RevisionTotals,
@@ -24,7 +25,7 @@ from app.graph.exploration import (
     validate_bounds,
 )
 from app.graph.role_map import RoleMapSlice, cypher_roles, memory_roles, validate_role_bounds
-from app.graph.schema import Edge, EdgeType, GraphSnapshot, Node, NodeType
+from app.graph.schema import DATA_TYPES, TRAVERSAL_TYPES, Edge, EdgeType, GraphSnapshot, Node, NodeType
 
 
 @dataclass(frozen=True)
@@ -128,9 +129,11 @@ class GraphStore(Protocol):
     def delete_revision(
         self, tenant: str, revision: str, created_at_ms: int, cutoff_ms: int, state: str = "ready"
     ) -> bool: ...
-    def shortest_paths(
+    # Blast-radius neighborhood of one node: its traversal relationships out to ``hops``
+    # (certainty-filtered) plus the facts of every reached node; None if the node is absent.
+    def reach(
         self, tenant: str, revision: str, source: str, hops: int, include_uncertain: bool
-    ) -> dict[str, list[str]]: ...
+    ) -> Reach | None: ...
     def close(self) -> None: ...
 
 
@@ -279,12 +282,13 @@ class MemoryGraphStore:
         del self.created_at[key]
         return True
 
-    def shortest_paths(
+    def reach(
         self, tenant: str, revision: str, source: str, hops: int, include_uncertain: bool
-    ) -> dict[str, list[str]]:
-        from app.engine.blast_radius import shortest_paths
-
-        return shortest_paths(self.snapshot(tenant, revision), source, hops, include_uncertain)
+    ) -> Reach | None:
+        validate_hops(hops)
+        snapshot = self.snapshots.get((tenant, revision)) if revision else None
+        # Read-only over the stored revision: no deep copy of the whole snapshot.
+        return snapshot_reach(snapshot, source, hops, include_uncertain) if snapshot else None
 
     def close(self) -> None:
         pass
@@ -336,6 +340,71 @@ def _select_candidates(
 
 
 SCHEMA_MIGRATIONS = ("001_schema.cypher", "003_entity_scope_id.cypher")
+TRAVERSAL = "|".join(sorted(kind.value for kind in TRAVERSAL_TYPES))
+DATA_LABELS = frozenset(kind.value for kind in DATA_TYPES)
+REACH_BATCH = 2000
+# Relationships out of one frontier batch. Keys embed (tenant, revision, id) and the
+# target's scope is checked too, so no row can leave the pinned revision.
+REACH_EDGES = (
+    f"UNWIND $keys AS key MATCH (a:Entity {{key:key}})-[r:{TRAVERSAL}]->(b:Entity) "
+    "WHERE ($uncertain OR r.certainty = 'confirmed') AND b.tenant_id = $tenant AND b.revision = $revision "
+    "RETURN a.id AS source, b.id AS target, r.id AS edge"
+)
+# Type of each reached node, and the payload (for its sensitivity) of data assets only.
+REACH_NODES = (
+    "UNWIND $keys AS key MATCH (n:Entity {key:key}) "
+    "WHERE n.tenant_id = $tenant AND n.revision = $revision "
+    "RETURN n.id AS id, labels(n) AS labels, CASE WHEN "
+    + " OR ".join(f"n:{label}" for label in sorted(DATA_LABELS))
+    + " THEN n.payload END AS payload"
+)
+
+
+def cypher_reach(
+    tx, tenant: str, revision: str, source: str, hops: int, include_uncertain: bool
+) -> Reach | None:
+    """Expand one BFS level per round trip (batched); every reached node's facts once."""
+    reach = Reach(source, hops, include_uncertain)
+
+    def keys(ids: list[str], start: int) -> list[str]:
+        return [json.dumps([tenant, revision, node]) for node in ids[start : start + REACH_BATCH]]
+
+    def facts(ids: list[str]) -> None:
+        for start in range(0, len(ids), REACH_BATCH):
+            rows = tx.run(REACH_NODES, keys=keys(ids, start), tenant=tenant, revision=revision)
+            for row in rows:
+                kind = next(label for label in row["labels"] if label != "Entity")
+                reach.kinds[row["id"]] = kind
+                if kind in DATA_LABELS:
+                    reach.sensitivity[row["id"]] = json.loads(row["payload"]).get("sensitivity", "internal")
+
+    facts([source])
+    if source not in reach.kinds:
+        return None
+    frontier, seen = [source], {source}
+    for depth in range(hops):
+        for node in frontier:
+            reach.edges[node] = []
+        discovered: list[str] = []
+        for start in range(0, len(frontier), REACH_BATCH):
+            rows = tx.run(
+                REACH_EDGES,
+                keys=keys(frontier, start),
+                tenant=tenant,
+                revision=revision,
+                uncertain=include_uncertain,
+            )
+            for row in rows:
+                target = row["target"]
+                reach.edges[row["source"]].append((target, row["edge"]))
+                if target not in seen:
+                    seen.add(target)
+                    discovered.append(target)
+        facts(discovered)
+        if not discovered or depth + 1 >= hops:
+            break
+        frontier = discovered
+    return reach
 
 
 class CypherGraphStore:
@@ -670,41 +739,27 @@ class CypherGraphStore:
         self._write(remove)
         return True
 
-    def shortest_paths(
+    def reach(
         self, tenant: str, revision: str, source: str, hops: int, include_uncertain: bool
-    ) -> dict[str, list[str]]:
-        if not 1 <= hops <= 5:
-            raise ValueError("Hop count must be between 1 and 5")
-        types = "ASSUMES_ROLE|INHERITS_PERMISSIONS|INVOKES_TOOL|CAN_READ|CAN_WRITE"
-        if self.vendor == "memgraph":
-            query = (
-                "MATCH p=(s:Entity {tenant_id:$tenant, revision:$revision, id:$source})"
-                f"-[r:{types} *BFS 1..{hops} (e,n | "
-                "n.tenant_id=$tenant AND n.revision=$revision AND "
-                "($uncertain OR e.certainty='confirmed'))]->(t:Entity) "
-                "RETURN t.id AS target, [n IN nodes(p) | n.id] AS path"
-            )
-        else:
-            # Filtering inside shortestPath permits a longer confirmed route when an uncertain shortcut exists.
-            query = (
-                "MATCH (s:Entity {tenant_id:$tenant, revision:$revision, id:$source}), "
-                "(t:Entity {tenant_id:$tenant, revision:$revision}) WHERE s <> t "
-                f"MATCH p=shortestPath((s)-[:{types}*1..{hops}]->(t)) "
-                "WHERE all(n IN nodes(p) WHERE n.tenant_id=$tenant AND n.revision=$revision) "
-                "AND all(e IN relationships(p) WHERE $uncertain OR e.certainty='confirmed') "
-                "RETURN t.id AS target, [n IN nodes(p) | n.id] AS path"
-            )
-        with self.driver.session() as session:
-            return {
-                r["target"]: r["path"]
-                for r in session.run(
-                    Query(query, timeout=self.timeout),
-                    tenant=tenant,
-                    revision=revision,
-                    source=source,
-                    uncertain=include_uncertain,
+    ) -> Reach | None:
+        """Bounded neighborhood by level-synchronous expansion; identical on Memgraph and Neo4j.
+
+        Vendor shortest-path operators return an arbitrary one of several equal-length
+        paths (Memgraph ``*BFS``) or need one search per target (Neo4j ``shortestPath``
+        over a revision-wide cartesian product), so neither matches the reference
+        engine. Instead the store fetches only relationships of nodes first reached in
+        fewer than ``hops`` hops, through unique-key seeks, and the caller runs the
+        reference BFS over them (``app.engine.blast_radius.simulate``).
+        """
+        validate_hops(hops)
+        if not revision or not 1 <= len(source) <= 512:
+            return None
+        with self.driver.session(fetch_size=REACH_BATCH) as session:
+            return session.execute_read(
+                unit_of_work(timeout=self.timeout)(
+                    lambda tx: cypher_reach(tx, tenant, revision, source, hops, include_uncertain)
                 )
-            }
+            )
 
     def close(self) -> None:
         self.driver.close()
