@@ -45,6 +45,7 @@ from app.db.models import (
     TenantState,
 )
 from app.db.session import session_factory
+from app.graph import repository
 from app.graph.compact import CompactGraph
 from app.graph.repository import MAX_VISIBLE_EDGES, MAX_VISIBLE_MEMBERS, get_graph_store
 from app.graph.schema import Node
@@ -1151,7 +1152,7 @@ def cluster_expansion(
 
     The clusters shown together may hold at most ``MAX_VISIBLE_MEMBERS`` entities.
     """
-    if not 1 <= member_limit <= MAX_VISIBLE_MEMBERS or not 1 <= edge_limit <= MAX_VISIBLE_EDGES:
+    if not 1 <= member_limit <= repository.MAX_VISIBLE_MEMBERS or not 1 <= edge_limit <= MAX_VISIBLE_EDGES:
         raise ValueError("Cluster expansion limits outside supported bounds")
     others = sorted(set(expanded) - {cluster_id})
     if len(others) > MAX_EXPANDED:
@@ -1169,7 +1170,9 @@ def cluster_expansion(
         {
             entity
             for other in other_rows
-            for entity, _ in subtree_members(db, tenant, revision, subtree_leaves(db, tenant, revision, other), None)
+            for entity, _ in subtree_members(
+                db, tenant, revision, subtree_leaves(db, tenant, revision, other), None
+            )
         }
         - {entity for entity, _ in members}
     )

@@ -258,6 +258,18 @@ def test_real_bounded_exploration_search_scopes_and_dense_neighbors(monkeypatch)
                     tenant, revision, members, edge_limit
                 )
             assert store.cluster_members(tenant, revision, [], 1).nodes == []
+            # In-place expansion: new members' relationships to themselves and to shown ones.
+            for ids, known in (
+                (["root", "neighbor:001"], ["neighbor:059", "category"]),
+                (["neighbor:001", "neighbor:002", "missing"], ["root"]),
+                (["category"], []),
+            ):
+                for edge_limit in (1, 2, 50):
+                    assert store.cluster_expansion(
+                        tenant, revision, ids, known, edge_limit
+                    ) == memory.cluster_expansion(tenant, revision, ids, known, edge_limit)
+            with pytest.raises(RevisionUnavailable):
+                store.cluster_expansion(tenant, "missing", ["root"], [], 5)
             with pytest.raises(RevisionUnavailable):
                 store.cluster_members(tenant, "missing", members, 5)
     finally:

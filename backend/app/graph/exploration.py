@@ -318,7 +318,8 @@ def memory_cluster_expansion(
         edges=[edge.model_copy(deep=True) for edge in edges[:edge_limit]],
         warnings=list(snapshot.warnings),
         total_nodes=len(nodes),
-        total_edges=len(edges),
+        # Same as the Cypher query: one past the limit marks truncation.
+        total_edges=min(len(edges), edge_limit + 1),
     )
 
 
