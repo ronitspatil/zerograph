@@ -41,6 +41,8 @@ const typeNames: Record<string, string> = {
   DataCategory: "Data categories",
 };
 const noRisk = new Set<string>();
+/** A revision without clusters is backfilled by the worker; check again this often. */
+export const UNAVAILABLE_RETRY_MS = 30_000;
 
 /**
  * Obsidian-like global view: precomputed structural clusters as sized
@@ -119,6 +121,11 @@ export function GlobalMap({
     void loadTop();
     return () => request.current?.abort();
   }, [loadTop, reloadKey]);
+  useEffect(() => {
+    if (!unavailable) return;
+    const timer = setInterval(() => void loadTop(), UNAVAILABLE_RETRY_MS);
+    return () => clearInterval(timer);
+  }, [unavailable, loadTop]);
   const members: GraphData | null = useMemo(
     () =>
       detail && detail.view.mode === "members"
@@ -140,7 +147,7 @@ export function GlobalMap({
       <div className="empty-state">
         <Network size={28} aria-hidden="true" />
         <h3>Global map not available yet</h3>
-        <p>{unavailable}.</p>
+        <p>{unavailable}. This view checks again every 30 seconds.</p>
       </div>
     );
   if (!map)

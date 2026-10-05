@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Console } from "@/components/console";
-import { GlobalMap } from "@/components/global-map";
+import { GlobalMap, UNAVAILABLE_RETRY_MS } from "@/components/global-map";
 import { api, ApiError } from "@/lib/api";
 import type {
   ClusterDetail,
@@ -204,6 +204,34 @@ describe("global map", () => {
     await screen.findByText("Global map not available yet");
     expect(onError).not.toHaveBeenCalled();
     view.unmount();
+    // The worker backfills the map; the view picks it up without a reload.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let computed = false;
+      handler = (p) => {
+        if (!computed)
+          throw new ApiError(
+            "The global map is not computed for this revision yet",
+            404,
+          );
+        return p.startsWith("graph/clusters?") ? top : [];
+      };
+      const retrying = render(
+        <GlobalMap
+          reloadKey={0}
+          stale={false}
+          onError={onError}
+          onOpenNeighborhood={vi.fn()}
+        />,
+      );
+      await screen.findByText(/checks again every 30 seconds/);
+      computed = true;
+      await vi.advanceTimersByTimeAsync(UNAVAILABLE_RETRY_MS);
+      await screen.findByText(/2 \/ 2 top-level clusters/);
+      retrying.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
     handler = (p) => {
       if (p.startsWith("graph/clusters/"))
         throw new ApiError("Graph revision changed", 409);

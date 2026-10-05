@@ -3,19 +3,40 @@ import { useEffect, useRef } from "react";
 import cytoscape, { type Core, type StylesheetCSS } from "cytoscape";
 import { Maximize2, Minus, Plus } from "lucide-react";
 import {
+  circleObstacle,
   clusterDiameter,
   clusterLabelBox,
   clusterLayoutInput,
+  estimateLabelWidth,
+  fitClusters,
+  LABEL_FONT_PX,
+  LABEL_MAX_WIDTH,
   labelBudget,
   clusterPositions,
   linkWidth,
+  maxCircleDiameter,
+  placeLabels,
 } from "@/lib/cluster-layout";
-import { fitViewport, labelFontSize, spacedLabels } from "@/lib/graph-layout";
 import { nodeColors } from "@/components/graph-canvas";
 import type { ClusterLink, ClusterSummary } from "@/lib/types";
 
 const FONT =
   '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
+
+let measureContext: CanvasRenderingContext2D | null | undefined;
+/** Rendered width of a 12px label, measured once per label; estimated without a canvas. */
+function labelWidth(label: string): number {
+  if (measureContext === undefined) {
+    try {
+      measureContext = document.createElement("canvas").getContext("2d");
+      if (measureContext) measureContext.font = `${LABEL_FONT_PX}px ${FONT}`;
+    } catch {
+      measureContext = null;
+    }
+  }
+  if (!measureContext) return estimateLabelWidth(label);
+  return Math.min(LABEL_MAX_WIDTH, measureContext.measureText(label).width);
+}
 
 /** Sized super-nodes (one per cluster) with weighted links; tap opens a cluster. */
 export function ClusterCanvas({
@@ -61,6 +82,7 @@ export function ClusterCanvas({
           "text-valign": "bottom",
           "text-wrap": "ellipsis",
           "overlay-opacity": 0,
+          "z-index": 1,
         },
       },
       {
@@ -72,7 +94,13 @@ export function ClusterCanvas({
           "text-background-color": "#0d1522",
           "text-background-opacity": 0.92,
           "text-background-shape": "roundrectangle",
+          // Labeled clusters draw above unlabeled dots, so no dot crosses a label.
+          "z-index": 2,
         },
+      },
+      {
+        selector: "node.label-above",
+        css: { "text-valign": "top" },
       },
       {
         selector: "node.selected, node.hovered",
@@ -80,6 +108,7 @@ export function ClusterCanvas({
           "border-width": 2,
           "border-color": "#f5faff",
           "background-opacity": 1,
+          "z-index": 3,
         },
       },
       {
@@ -126,31 +155,65 @@ export function ClusterCanvas({
       wheelSensitivity: 0.2,
     });
     cy.current = instance;
+    // Largest clusters claim label space first.
+    const order = [...input.clusters]
+      .sort((a, b) => b.size - a.size || a.id.localeCompare(b.id))
+      .map((c) => c.id);
+    const widths = new Map(
+      input.clusters.map((c) => [
+        c.id,
+        labelWidth(instance.getElementById(c.id).data("label")),
+      ]),
+    );
+    const legend = container.current.parentElement?.querySelector(
+      ".graph-legend",
+    ) as HTMLElement | null;
     const fit = () => {
+      const width = instance.width();
+      const height = instance.height();
+      const largestModel = clusterDiameter(largest, largest);
+      // The labels shown at the fitted view (the largest clusters) must not be clipped.
+      const reserved = new Set(order.slice(0, labelBudget(1)));
+      const narrow = width < 520;
       instance.viewport(
-        fitViewport(
-          instance.nodes().boundingBox({ includeLabels: false }),
-          instance.width(),
-          instance.height(),
-          instance.minZoom(),
+        fitClusters(
+          input.clusters.map((c, i) => ({
+            x: positions[i].x,
+            y: positions[i].y,
+            r: clusterDiameter(c.size, largest) / 2,
+            label: reserved.has(c.id) ? (widths.get(c.id) ?? 0) + 6 : 0,
+          })),
+          width,
+          height,
+          {
+            top: 16,
+            left: 16,
+            // The zoom controls sit on the right; the legend along the bottom.
+            right: narrow ? 16 : 56,
+            bottom: (legend?.offsetHeight ?? 24) + 24,
+          },
+          {
+            minZoom: instance.minZoom(),
+            maxZoom: Math.min(
+              instance.maxZoom(),
+              maxCircleDiameter(input.clusters.length, width, height) /
+                largestModel,
+            ),
+          },
         ),
       );
     };
     fitView.current = fit;
     let fitted = 1;
-    // Largest clusters claim label space first.
-    const order = [...input.clusters]
-      .sort((a, b) => b.size - a.size || a.id.localeCompare(b.id))
-      .map((c) => c.id);
     let hovered: string | null = null;
     const labels = () => {
       if (instance.destroyed()) return;
       const zoom = instance.zoom();
       instance.batch(() => {
+        // Fixed screen size at every zoom.
         instance.nodes().style({
-          "font-size": labelFontSize(12, zoom),
-          "text-max-width": `${170 / zoom}px`,
-          "text-margin-y": 5 / zoom,
+          "font-size": LABEL_FONT_PX / zoom,
+          "text-max-width": `${LABEL_MAX_WIDTH / zoom}px`,
           "text-background-padding": `${2 / zoom}px`,
         });
         instance.nodes().addClass("label-on");
@@ -158,34 +221,46 @@ export function ClusterCanvas({
       const required = new Set(
         [hovered, selected].filter((id): id is string => !!id),
       );
-      // Estimated label boxes (12px text under the circle, ellipsis at 170px):
-      // independent of when the renderer measures newly styled labels.
-      const boxes = order.slice(0, labelBudget(zoom / fitted)).map((id) => {
+      const candidate = (id: string) => {
         const node = instance.getElementById(id);
         const { x, y } = node.renderedPosition();
-        return clusterLabelBox(
+        const width = widths.get(id) ?? 0;
+        const diameter = node.renderedWidth();
+        return {
           id,
-          node.data("label"),
-          x,
-          y,
-          node.renderedWidth(),
-        );
-      });
+          below: clusterLabelBox(id, width, x, y, diameter, "below"),
+          above: clusterLabelBox(id, width, x, y, diameter, "above"),
+        };
+      };
+      const candidates = order
+        .slice(0, labelBudget(zoom / fitted))
+        .map(candidate);
       for (const id of required)
-        if (!boxes.some((box) => box.id === id)) {
-          const node = instance.getElementById(id);
-          const { x, y } = node.renderedPosition();
-          boxes.push(
-            clusterLabelBox(id, node.data("label"), x, y, node.renderedWidth()),
-          );
-        }
-      const visible = spacedLabels(boxes, instance.width(), instance.height(), {
-        required,
+        if (!candidates.some((c) => c.id === id))
+          candidates.push(candidate(id));
+      // A label never covers another sizeable circle; small dots draw beneath it.
+      const obstacles = order.flatMap((id) => {
+        const node = instance.getElementById(id);
+        const { x, y } = node.renderedPosition();
+        const obstacle = circleObstacle(id, x, y, node.renderedWidth());
+        return obstacle ? [obstacle] : [];
       });
+      const placed = placeLabels(
+        candidates,
+        instance.width(),
+        instance.height(),
+        { required, obstacles },
+      );
       instance.batch(() => {
-        for (const id of order)
-          if (!visible.has(id) && !required.has(id))
-            instance.getElementById(id).removeClass("label-on");
+        for (const id of order) {
+          const node = instance.getElementById(id);
+          const side = placed.get(id);
+          if (!side) node.removeClass("label-on label-above");
+          else {
+            node.toggleClass("label-above", side === "above");
+            node.style("text-margin-y", (side === "above" ? -5 : 5) / zoom);
+          }
+        }
       });
     };
     let frame = 0;

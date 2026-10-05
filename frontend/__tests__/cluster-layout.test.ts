@@ -1,13 +1,20 @@
 import { describe, expect, it } from "vitest";
 import {
+  circleObstacle,
   clusterDiameter,
   clusterLabelBox,
   clusterLayoutInput,
+  estimateLabelWidth,
+  fitClusters,
+  LABEL_LINE,
   labelBudget,
   clusterPositions,
   linkWidth,
+  maxCircleDiameter,
+  placeLabels,
   topFacets,
 } from "@/lib/cluster-layout";
+import { spacedLabels } from "@/lib/graph-layout";
 import type { ClusterSummary } from "@/lib/types";
 
 const cluster = (id: string, size: number): ClusterSummary => ({
@@ -127,9 +134,117 @@ describe("cluster layout", () => {
     expect(labelBudget(2)).toBe(56);
     expect(labelBudget(100)).toBe(300);
     expect(labelBudget(Number.NaN)).toBe(14);
-    const box = clusterLabelBox("c", "x".repeat(100), 100, 50, 20);
-    expect(box.x2 - box.x1).toBe(170);
+    const box = clusterLabelBox(
+      "c",
+      estimateLabelWidth("x".repeat(100)),
+      100,
+      50,
+      20,
+    );
+    expect(box.x2 - box.x1).toBe(176);
     expect(box.y1).toBe(63);
     expect(box.y2 - box.y1).toBe(17);
+    expect(clusterLabelBox("c", 40, 100, 50, 20).x2 - 100).toBe(23);
+  });
+
+  it("thins labels that would cover another sizeable circle or each other, keeping the focused one", () => {
+    // Two big circles side by side; the smaller one's label would run under the larger.
+    const big = circleObstacle("big", 100, 100, 60)!;
+    const small = circleObstacle("small", 100, 160, 30)!;
+    expect(circleObstacle("dot", 0, 0, 8)).toBeNull();
+    const labels = [
+      clusterLabelBox("big", 120, 100, 100, 60), // y 133..150: crosses "small"'s circle
+      clusterLabelBox("small", 80, 100, 160, 30),
+      clusterLabelBox("other", 80, 110, 178, 4), // collides with "small"'s label
+    ];
+    const visible = spacedLabels(labels, 800, 600, { obstacles: [big, small] });
+    expect([...visible]).toEqual(["small"]);
+    const focused = spacedLabels(labels, 800, 600, {
+      obstacles: [big, small],
+      required: new Set(["big"]),
+    });
+    expect(focused.has("big")).toBe(true);
+  });
+
+  it("moves a label above its circle when the place below is taken", () => {
+    const candidate = (id: string, x: number, y: number, d: number) => ({
+      id,
+      below: clusterLabelBox(id, 80, x, y, d, "below"),
+      above: clusterLabelBox(id, 80, x, y, d, "above"),
+    });
+    // "low" sits right under "high": its own label below would cross nothing,
+    // but "high"'s label below would cross "low"'s circle.
+    const candidates = [
+      candidate("high", 200, 100, 40),
+      candidate("low", 200, 150, 40),
+    ];
+    const obstacles = [
+      circleObstacle("high", 200, 100, 40)!,
+      circleObstacle("low", 200, 150, 40)!,
+    ];
+    const placed = placeLabels(candidates, 400, 300, { obstacles });
+    expect(placed.get("high")).toBe("above");
+    expect(placed.get("low")).toBe("below");
+    expect(candidates[0].above.y2).toBeLessThanOrEqual(100 - 20);
+    // At the canvas top there is no room above: the label is dropped, unless required.
+    const top = [candidate("high", 200, 25, 40), candidate("low", 200, 75, 40)];
+    expect(
+      placeLabels(top, 400, 300, {
+        obstacles: [
+          circleObstacle("high", 200, 25, 40)!,
+          circleObstacle("low", 200, 75, 40)!,
+        ],
+      }).has("high"),
+    ).toBe(false);
+    expect(
+      placeLabels(top, 400, 300, { required: new Set(["high"]) }).get("high"),
+    ).toBe("below");
+  });
+
+  it("bounds circle size by canvas and cluster count", () => {
+    expect(maxCircleDiameter(4, 894, 540)).toBe(88);
+    expect(maxCircleDiameter(4, 310, 460)).toBeCloseTo(
+      0.3 * Math.sqrt((310 * 460) / 4),
+    );
+    expect(maxCircleDiameter(300, 894, 540)).toBe(24);
+    expect(maxCircleDiameter(1, 120, 90)).toBe(30);
+  });
+
+  it("fits circles and their reserved labels inside the padded canvas", () => {
+    const padding = { top: 16, right: 56, bottom: 60, left: 16 };
+    const nodes = [
+      { x: -80, y: 0, r: 38, label: 150 },
+      { x: 80, y: 0, r: 38, label: 0 },
+      { x: 0, y: 120, r: 7, label: 120 },
+    ];
+    const capped = fitClusters(nodes, 900, 540, padding, {
+      minZoom: 0.05,
+      maxZoom: 88 / 76,
+    });
+    // Four clusters on a large canvas: the size cap wins, not the canvas.
+    expect(capped.zoom).toBeCloseTo(88 / 76);
+    const tight = fitClusters(nodes, 300, 400, padding, {
+      minZoom: 0.05,
+      maxZoom: 3,
+    });
+    const z = tight.zoom;
+    expect(z).toBeLessThan(88 / 76);
+    const px = (x: number) => x * z + tight.pan.x;
+    const py = (y: number) => y * z + tight.pan.y;
+    for (const n of nodes) {
+      const half = Math.max(n.r * z, n.label / 2);
+      expect(px(n.x) - half).toBeGreaterThanOrEqual(padding.left - 0.5);
+      expect(px(n.x) + half).toBeLessThanOrEqual(300 - padding.right + 0.5);
+      expect(py(n.y) - n.r * z).toBeGreaterThanOrEqual(padding.top - 0.5);
+      expect(
+        py(n.y) + n.r * z + (n.label ? LABEL_LINE : 0),
+      ).toBeLessThanOrEqual(400 - padding.bottom + 0.5);
+    }
+    expect(
+      fitClusters([], 300, 200, padding, { minZoom: 0.05, maxZoom: 2 }).pan,
+    ).toEqual({
+      x: 150,
+      y: 100,
+    });
   });
 });
