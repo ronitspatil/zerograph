@@ -1267,7 +1267,8 @@
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 16px;
-    align-items: start;
+    /* Columns share the row height; the diff scrolls inside its panel. */
+    align-items: stretch;
   }
   .form-panel {
     padding: 0 16px 16px;
@@ -1310,7 +1311,12 @@
     cursor: pointer;
   }
   .diff-panel {
+    display: flex;
+    flex-direction: column;
     min-height: 400px;
+  }
+  .diff-panel > .empty-state {
+    flex: 1 1 auto;
   }
   .diff-panel details {
     margin: 12px 16px;
@@ -1332,8 +1338,9 @@
     background: var(--bg);
     border-top: 1px solid var(--border);
     border-bottom: 1px solid var(--border);
+    /* Zero basis: the diff never sets the row height, it fills what the form leaves. */
+    flex: 1 1 0;
     min-height: 200px;
-    max-height: 480px;
     overflow: auto;
   }
   .policy-diff span {
@@ -1647,6 +1654,10 @@
     }
     .remediation-grid {
       grid-template-columns: minmax(0, 1fr);
+    }
+    .policy-diff {
+      flex-basis: auto;
+      max-height: 480px;
     }
   }
   @media (max-width: 900px) {
