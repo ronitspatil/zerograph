@@ -4,6 +4,9 @@ import cytoscape, { type Core, type StylesheetCSS } from "cytoscape";
 import { Maximize2, Minus, Plus } from "lucide-react";
 import {
   circlePositions,
+  fitViewport,
+  labelCandidates,
+  labelFontSize,
   layoutInput,
   startLayout,
   overviewAnchors,
@@ -40,6 +43,7 @@ export function GraphCanvas({
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
   const applyFocus = useRef<() => void>(() => {});
+  const fitView = useRef<() => void>(() => {});
   const callback = useRef(onSelect);
   callback.current = onSelect;
   useEffect(() => {
@@ -65,17 +69,17 @@ export function GraphCanvas({
             '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
           "text-valign": "bottom",
           "text-events": "yes",
-          "text-margin-y": 9,
+          "text-margin-y": 5,
           "text-wrap": "ellipsis",
-          "text-max-width": "145px",
+          "text-max-width": "140px",
           "overlay-opacity": 0,
         },
       },
       {
         selector: "node[type='CloudRole']",
-        css: { width: 10, height: 10, "font-size": 10 },
+        css: { width: 10, height: 10 },
       },
-      { selector: "node.role-anchor", css: { label: "data(label)" } },
+      { selector: "node.label-on", css: { label: "data(label)" } },
       {
         selector: "edge",
         css: {
@@ -91,31 +95,26 @@ export function GraphCanvas({
         selector: "edge[certainty!='confirmed']",
         css: { "line-style": "dashed" },
       },
-      { selector: "node.zoom-detail", css: { label: "data(label)" } },
       { selector: ".focus-muted", css: { opacity: 0.13 } },
       {
         selector: "node.focus-neighbor",
         css: {
-          label: "",
           opacity: 1,
           "text-background-color": "#0d1522",
           "text-background-opacity": 0.85,
           "text-background-padding": "3px",
         },
       },
-      { selector: "node.role-anchor.focus-muted", css: { label: "" } },
-      {
-        selector: "node.focus-neighbor.zoom-detail",
-        css: { label: "data(label)" },
-      },
       {
         selector: "node.focus-root",
         css: {
-          label: "data(label)",
           opacity: 1,
+          color: "#f5faff",
           "border-width": 2,
           "border-color": "#f5faff",
-          "font-size": 12,
+          "text-background-color": "#0d1522",
+          "text-background-opacity": 0.85,
+          "text-background-padding": "3px",
         },
       },
       {
@@ -184,7 +183,6 @@ export function GraphCanvas({
       container: container.current,
       elements: [
         ...graph.nodes.map((n, i) => ({
-          classes: anchors.has(n.id) ? "role-anchor" : "",
           data: {
             id: n.id,
             label: n.name,
@@ -198,15 +196,29 @@ export function GraphCanvas({
         })),
       ],
       style,
-      layout: { name: "preset", fit: true, padding: 55 },
+      layout: { name: "preset", fit: false },
       minZoom: 0.05,
       maxZoom: 2.5,
       wheelSensitivity: 0.2,
     });
     const instance = cy.current;
+    let programmatic = false;
+    function fitGraph() {
+      const view = fitViewport(
+        instance.nodes().boundingBox({ includeLabels: false }),
+        instance.width(),
+        instance.height(),
+        instance.minZoom(),
+      );
+      programmatic = true;
+      instance.viewport(view);
+      programmatic = false;
+    }
+    fitView.current = fitGraph;
+    fitGraph();
     let userMoved = false;
     instance.on("pan zoom", () => {
-      userMoved = true;
+      if (!programmatic) userMoved = true;
     });
     const stopLayout = startLayout(input, (positions) => {
       if (cy.current !== instance || instance.destroyed()) return;
@@ -214,50 +226,76 @@ export function GraphCanvas({
         for (const p of positions)
           instance.getElementById(p.id).position({ x: p.x, y: p.y });
       });
-      if (!userMoved) instance.fit(undefined, 55);
+      if (!userMoved) fitGraph();
+      labelSizing();
     });
     let hovered: string | null = null;
     function labelSizing() {
-      const roleOnly = graph.view?.mode === "roles";
-      const overview =
-        !hovered && !selectedRef.current && instance.zoom() <= 1.35;
-      if (roleOnly && overview) {
-        // Restore candidates before measuring labels; never hide the focused full label.
-        instance.nodes().removeClass("role-anchor");
-        for (const id of anchors)
-          instance.getElementById(id).addClass("role-anchor");
-      }
-      instance.nodes().removeStyle("font-size text-max-width");
-      instance.nodes("[type='CloudRole']").style({
-        "font-size": Math.min(48, 10 / instance.zoom()),
-        "text-max-width": `${(instance.width() < 700 ? 82 : 110) / instance.zoom()}px`,
+      if (instance.destroyed()) return;
+      const zoom = instance.zoom();
+      const narrow = instance.width() < 700;
+      const root = hovered || selectedRef.current;
+      const rootNode = root ? instance.getElementById(root) : null;
+      const focused = rootNode && rootNode.nonempty() ? root : null;
+      const { order, required } = labelCandidates(graph, anchors, {
+        zoom,
+        focus: focused,
+        neighbors: focused
+          ? rootNode!.neighborhood("node").map((n) => n.id())
+          : [],
       });
-      if (roleOnly && overview) {
-        const labels = [...anchors].map((id) => ({
-          id,
-          ...instance.getElementById(id).renderedBoundingBox({
-            includeNodes: false,
-            includeEdges: false,
-            includeLabels: true,
-          }),
-        }));
-        const visible = spacedLabels(
-          labels,
-          instance.width(),
-          instance.height(),
-        );
-        for (const id of anchors)
+      instance.batch(() => {
+        // Labels keep one screen size at every zoom, in step with the UI type scale.
+        instance.nodes().style({
+          "font-size": labelFontSize(11, zoom),
+          "text-max-width": `${(narrow ? 110 : 140) / zoom}px`,
+          "text-margin-y": 5 / zoom,
+          "text-background-padding": `${3 / zoom}px`,
+        });
+        instance.nodes(".focus-root").style({
+          "font-size": labelFontSize(12, zoom),
+          "text-max-width": `${(narrow ? 150 : 180) / zoom}px`,
+        });
+        instance
+          .edges(".edge-detail")
+          .style({ "font-size": labelFontSize(10, zoom) });
+        instance.nodes().removeClass("label-on");
+        for (const id of order)
+          instance.getElementById(id).addClass("label-on");
+      });
+      if (!order.length) return;
+      const labels = order.map((id) => ({
+        id,
+        ...instance.getElementById(id).renderedBoundingBox({
+          includeNodes: false,
+          includeEdges: false,
+          includeLabels: true,
+        }),
+      }));
+      const obstacles = instance.nodes().map((n) => ({
+        id: n.id(),
+        ...n.renderedBoundingBox({ includeLabels: false }),
+      }));
+      const visible = spacedLabels(
+        labels,
+        instance.width(),
+        instance.height(),
+        { required, obstacles },
+      );
+      instance.batch(() => {
+        for (const id of order)
           if (!visible.has(id))
-            instance.getElementById(id).removeClass("role-anchor");
-      }
-      instance.nodes(".focus-root").style({
-        "font-size": Math.min(80, 12 / instance.zoom()),
-        "text-max-width": `${170 / instance.zoom()}px`,
+            instance.getElementById(id).removeClass("label-on");
       });
-      instance
-        .edges(".edge-detail")
-        .style({ "font-size": Math.min(64, 10 / instance.zoom()) });
     }
+    let frame = 0;
+    const scheduleLabels = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        if (cy.current === instance) labelSizing();
+      });
+    };
     const focus = () => {
       instance.elements().removeClass("focus-root focus-neighbor focus-muted");
       const id = hovered || selectedRef.current;
@@ -276,7 +314,9 @@ export function GraphCanvas({
     applyFocus.current = focus;
     instance.on("mouseover", "edge", (event) => {
       event.target.addClass("edge-detail");
-      labelSizing();
+      instance
+        .edges(".edge-detail")
+        .style({ "font-size": labelFontSize(10, instance.zoom()) });
     });
     instance.on("mouseout", "edge", (event) =>
       event.target.removeClass("edge-detail"),
@@ -289,14 +329,7 @@ export function GraphCanvas({
       hovered = null;
       focus();
     });
-    const detail = () => {
-      const instance = cy.current;
-      if (!instance) return;
-      instance.nodes().toggleClass("zoom-detail", instance.zoom() > 1.35);
-      labelSizing();
-    };
-    cy.current.on("zoom", detail);
-    detail();
+    cy.current.on("pan zoom", scheduleLabels);
     focus();
     cy.current.on("tap", "node", (event) => {
       const node = graph.nodes.find((n) => n.id === event.target.id());
@@ -305,10 +338,11 @@ export function GraphCanvas({
     const observer = new ResizeObserver(() => {
       if (cy.current !== instance || instance.destroyed()) return;
       instance.resize();
-      labelSizing();
+      scheduleLabels();
     });
     observer.observe(container.current);
     return () => {
+      cancelAnimationFrame(frame);
       stopLayout();
       observer.disconnect();
       cy.current?.destroy();
@@ -368,10 +402,7 @@ export function GraphCanvas({
         <button aria-label="Zoom out" onClick={() => zoom(0.8)}>
           <Minus size={14} />
         </button>
-        <button
-          aria-label="Fit graph"
-          onClick={() => cy.current?.fit(undefined, 55)}
-        >
+        <button aria-label="Fit graph" onClick={() => fitView.current()}>
           <Maximize2 size={13} />
         </button>
       </div>
