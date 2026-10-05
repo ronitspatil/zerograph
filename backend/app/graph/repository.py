@@ -344,16 +344,19 @@ TRAVERSAL = "|".join(sorted(kind.value for kind in TRAVERSAL_TYPES))
 DATA_LABELS = frozenset(kind.value for kind in DATA_TYPES)
 REACH_BATCH = 2000
 # Relationships out of one frontier batch. Keys embed (tenant, revision, id) and the
-# target's scope is checked too, so no row can leave the pinned revision.
+# target's scope is checked too, so no row can leave the pinned revision. Scope
+# filters sit behind WITH: a WHERE on tenant_id next to the MATCH makes Memgraph 3.2
+# plan a tenant_id index scan instead of the unique-key seek (see exploration.py).
 REACH_EDGES = (
-    f"UNWIND $keys AS key MATCH (a:Entity {{key:key}})-[r:{TRAVERSAL}]->(b:Entity) "
-    "WHERE ($uncertain OR r.certainty = 'confirmed') AND b.tenant_id = $tenant AND b.revision = $revision "
+    f"UNWIND $keys AS key MATCH (a:Entity {{key:key}}) WITH a MATCH (a)-[r:{TRAVERSAL}]->(b:Entity) "
+    "WITH a, r, b WHERE ($uncertain OR r.certainty = 'confirmed') "
+    "AND b.tenant_id = $tenant AND b.revision = $revision "
     "RETURN a.id AS source, b.id AS target, r.id AS edge"
 )
 # Type of each reached node, and the payload (for its sensitivity) of data assets only.
 REACH_NODES = (
     "UNWIND $keys AS key MATCH (n:Entity {key:key}) "
-    "WHERE n.tenant_id = $tenant AND n.revision = $revision "
+    "WITH n WHERE n.tenant_id = $tenant AND n.revision = $revision "
     "RETURN n.id AS id, labels(n) AS labels, CASE WHEN "
     + " OR ".join(f"n:{label}" for label in sorted(DATA_LABELS))
     + " THEN n.payload END AS payload"
