@@ -62,6 +62,7 @@ timed(CompactGraph, "analyze")
 timed(publication, "check_conflicts")
 timed(publication, "check_caps")
 timed(tasks, "store_analysis")
+timed(tasks, "acquire_pointer_gate")
 started = time.perf_counter()
 tasks.process_job(sys.argv[1])
 print(json.dumps({"seconds": time.perf_counter() - started,

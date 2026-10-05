@@ -40,7 +40,8 @@ export function packChunks(
   let size = 0;
   for (const line of lines) {
     const bytes = byteLength(line) + 1;
-    if (bytes > maxBytes) throw new Error("A single graph entity exceeds the chunk size");
+    if (bytes > maxBytes)
+      throw new Error("A single graph entity exceeds the chunk size");
     if (size + bytes > maxBytes && current.length) {
       chunks.push(current.join("\n") + "\n");
       current = [];

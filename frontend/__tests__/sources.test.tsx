@@ -41,7 +41,7 @@ it("uploads a large snapshot file in chunks through an upload session", async ()
   const file = new File([JSON.stringify({ nodes, edges: [] })], "graph.json", {
     type: "application/json",
   });
-  fireEvent.change(screen.getByLabelText("Snapshot file"), {
+  fireEvent.change(screen.getByLabelText(/^Snapshot file/), {
     target: { files: [file] },
   });
   await waitFor(() =>
@@ -54,9 +54,9 @@ it("uploads a large snapshot file in chunks through an upload session", async ()
   const paths = vi.mocked(api).mock.calls.map((call) => call[0]);
   expect(paths[0]).toBe("ingestions/uploads");
   expect(paths.at(-1)).toBe("ingestions/uploads/upload-1/commit");
-  const chunks = vi.mocked(api).mock.calls.filter((call) =>
-    String(call[0]).includes("/chunks/"),
-  );
+  const chunks = vi
+    .mocked(api)
+    .mock.calls.filter((call) => String(call[0]).includes("/chunks/"));
   expect(chunks.length).toBeGreaterThan(1);
   expect(chunks.map((call) => call[0])).toEqual(
     chunks.map((_, i) => `ingestions/uploads/upload-1/chunks/${i}`),

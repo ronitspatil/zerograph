@@ -1,11 +1,13 @@
 import { expect, it } from "vitest";
 import { byteLength, packChunks, snapshotLines } from "@/lib/upload";
 it("packs NDJSON lines in order without exceeding the byte limit", () => {
-  const lines = [...snapshotLines({
-    nodes: [{ id: "é".repeat(10) }, { id: "b" }],
-    edges: [{ source: "a", target: "b" }],
-    warnings: ["w"],
-  })];
+  const lines = [
+    ...snapshotLines({
+      nodes: [{ id: "é".repeat(10) }, { id: "b" }],
+      edges: [{ source: "a", target: "b" }],
+      warnings: ["w"],
+    }),
+  ];
   expect(lines.map((line) => Object.keys(JSON.parse(line))[0])).toEqual([
     "node",
     "node",

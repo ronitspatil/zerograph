@@ -5,6 +5,14 @@ import type { Job } from "@/lib/types";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { byteLength, INLINE_LIMIT_BYTES, uploadSnapshot } from "@/lib/upload";
+function readText(file: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsText(file);
+  });
+}
 export function Sources({
   jobs,
   onRefresh,
@@ -26,10 +34,13 @@ export function Sources({
     try {
       // Large graph snapshots go through a chunked upload session; the
       // single-body endpoint is limited to 4 MB by the proxy and API.
-      const text = source === "snapshot" && fileText !== null ? fileText : payload;
+      const text =
+        source === "snapshot" && fileText !== null ? fileText : payload;
       if (source === "snapshot" && byteLength(text) > INLINE_LIMIT_BYTES) {
         await uploadSnapshot(JSON.parse(text), (sent, total) =>
-          setProgress(`Uploading chunk ${Math.min(sent + 1, total)} of ${total}`),
+          setProgress(
+            `Uploading chunk ${Math.min(sent + 1, total)} of ${total}`,
+          ),
         );
       } else {
         await api("ingestions", {
@@ -51,7 +62,7 @@ export function Sources({
     }
   }
   async function loadFile(file: File | undefined) {
-    setFileText(file ? await file.text() : null);
+    setFileText(file ? await readText(file) : null);
   }
   return (
     <section>
