@@ -75,21 +75,9 @@ export function clusterPositions(
       w: 0.02 + 0.08 * (Math.log(1 + l.weight) / Math.log(1 + heaviest)),
     }))
     .filter(({ a, b }) => a !== undefined && b !== undefined);
-  const gap = 18; // Room for the label under each circle.
-  for (let step = 0; step < iterations; step++) {
-    const cool = 1 - step / iterations;
-    for (const { a, b, w } of springs) {
-      const dx = x[b] - x[a];
-      const dy = y[b] - y[a];
-      const rest = radius[a] + radius[b] + gap * 2;
-      const distance = Math.hypot(dx, dy) || 1;
-      if (distance <= rest) continue;
-      const pull = ((distance - rest) * w * cool) / distance;
-      x[a] += dx * pull;
-      y[a] += dy * pull;
-      x[b] -= dx * pull;
-      y[b] -= dy * pull;
-    }
+  const gap = 26; // Room for the label under each circle.
+  const separate = (): boolean => {
+    let moved = false;
     for (let a = 0; a < n; a++) {
       for (let b = a + 1; b < n; b++) {
         let dx = x[b] - x[a];
@@ -104,13 +92,33 @@ export function clusterPositions(
           distance = 1;
         }
         const push = (need - distance) / 2 / distance;
+        moved = true;
         x[a] -= dx * push;
         y[a] -= dy * push;
         x[b] += dx * push;
         y[b] += dy * push;
       }
     }
+    return moved;
+  };
+  for (let step = 0; step < iterations; step++) {
+    const cool = 1 - step / iterations;
+    for (const { a, b, w } of springs) {
+      const dx = x[b] - x[a];
+      const dy = y[b] - y[a];
+      const rest = radius[a] + radius[b] + gap * 2;
+      const distance = Math.hypot(dx, dy) || 1;
+      if (distance <= rest) continue;
+      const pull = ((distance - rest) * w * cool) / distance;
+      x[a] += dx * pull;
+      y[a] += dy * pull;
+      x[b] -= dx * pull;
+      y[b] -= dy * pull;
+    }
+    separate();
   }
+  // Springs can win against overlap pushes in dense levels: finish with overlap-only passes.
+  for (let pass = 0; pass < 60; pass++) if (!separate()) break;
   return clusters.map((c, i) => ({ id: c.id, x: x[i], y: y[i] }));
 }
 
@@ -137,4 +145,23 @@ export function topFacets(
   if (ranked.length <= limit) return ranked;
   const rest = ranked.slice(limit - 1).reduce((sum, f) => sum + f.count, 0);
   return [...ranked.slice(0, limit - 1), { name: "Other", count: rest }];
+}
+
+/** Screen box of a cluster label drawn under its circle (12px text, at most 170px wide). */
+export function clusterLabelBox(
+  id: string,
+  label: string,
+  x: number,
+  y: number,
+  diameter: number,
+): { id: string; x1: number; y1: number; x2: number; y2: number } {
+  const width = Math.min(170, 6.6 * label.length + 6);
+  const top = y + diameter / 2 + 3;
+  return { id, x1: x - width / 2, y1: top, x2: x + width / 2, y2: top + 17 };
+}
+
+/** Labels offered at a zoom relative to the fitted view: the largest 14, more as you zoom in. */
+export function labelBudget(relativeZoom: number): number {
+  const scale = Number.isFinite(relativeZoom) ? Math.max(1, relativeZoom) : 1;
+  return Math.min(MAX_CLUSTER_NODES, Math.round(14 * scale * scale));
 }

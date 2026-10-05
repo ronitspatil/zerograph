@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   clusterDiameter,
+  clusterLabelBox,
   clusterLayoutInput,
+  labelBudget,
   clusterPositions,
   linkWidth,
   topFacets,
@@ -91,5 +93,43 @@ describe("cluster layout", () => {
       { name: "b", count: 4 },
       { name: "Other", count: 7 },
     ]);
+  });
+
+  it("keeps densely linked levels free of overlaps", () => {
+    const clusters = Array.from({ length: 64 }, (_, i) =>
+      cluster(`d${i}`, 600 + ((i * 97) % 2500)),
+    );
+    const links = clusters.flatMap((a, i) =>
+      clusters
+        .slice(i + 1)
+        .map((b) => ({ source: a.id, target: b.id, weight: 50 })),
+    );
+    const positions = clusterPositions(clusters, links.slice(0, 1813));
+    const largest = Math.max(...clusters.map((c) => c.size));
+    for (let a = 0; a < positions.length; a++)
+      for (let b = a + 1; b < positions.length; b++) {
+        const need =
+          (clusterDiameter(clusters[a].size, largest) +
+            clusterDiameter(clusters[b].size, largest)) /
+          2;
+        expect(
+          Math.hypot(
+            positions[a].x - positions[b].x,
+            positions[a].y - positions[b].y,
+          ),
+        ).toBeGreaterThanOrEqual(need);
+      }
+  });
+
+  it("budgets labels by zoom and places their boxes under the circle", () => {
+    expect(labelBudget(1)).toBe(14);
+    expect(labelBudget(0.5)).toBe(14);
+    expect(labelBudget(2)).toBe(56);
+    expect(labelBudget(100)).toBe(300);
+    expect(labelBudget(Number.NaN)).toBe(14);
+    const box = clusterLabelBox("c", "x".repeat(100), 100, 50, 20);
+    expect(box.x2 - box.x1).toBe(170);
+    expect(box.y1).toBe(63);
+    expect(box.y2 - box.y1).toBe(17);
   });
 });

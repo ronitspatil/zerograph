@@ -4,7 +4,9 @@ import cytoscape, { type Core, type StylesheetCSS } from "cytoscape";
 import { Maximize2, Minus, Plus } from "lucide-react";
 import {
   clusterDiameter,
+  clusterLabelBox,
   clusterLayoutInput,
+  labelBudget,
   clusterPositions,
   linkWidth,
 } from "@/lib/cluster-layout";
@@ -61,7 +63,17 @@ export function ClusterCanvas({
           "overlay-opacity": 0,
         },
       },
-      { selector: "node.label-on", css: { label: "data(label)" } },
+      {
+        // Largest clusters claim label space first; labels may cross circles
+        // (on a backdrop) but never each other.
+        selector: "node.label-on",
+        css: {
+          label: "data(label)",
+          "text-background-color": "#0d1522",
+          "text-background-opacity": 0.92,
+          "text-background-shape": "roundrectangle",
+        },
+      },
       {
         selector: "node.selected, node.hovered",
         css: {
@@ -125,7 +137,8 @@ export function ClusterCanvas({
       );
     };
     fitView.current = fit;
-    // Largest clusters claim label space first; labels never cover another circle.
+    let fitted = 1;
+    // Largest clusters claim label space first.
     const order = [...input.clusters]
       .sort((a, b) => b.size - a.size || a.id.localeCompare(b.id))
       .map((c) => c.id);
@@ -138,32 +151,40 @@ export function ClusterCanvas({
           "font-size": labelFontSize(12, zoom),
           "text-max-width": `${170 / zoom}px`,
           "text-margin-y": 5 / zoom,
+          "text-background-padding": `${2 / zoom}px`,
         });
         instance.nodes().addClass("label-on");
       });
       const required = new Set(
         [hovered, selected].filter((id): id is string => !!id),
       );
-      const boxes = order.map((id) => ({
-        id,
-        ...instance.getElementById(id).renderedBoundingBox({
-          includeNodes: false,
-          includeEdges: false,
-          includeLabels: true,
-        }),
-      }));
-      const obstacles = instance.nodes().map((n) => {
-        const { x, y } = n.renderedPosition();
-        const r = n.renderedWidth() / 2.5;
-        return { id: n.id(), x1: x - r, y1: y - r, x2: x + r, y2: y + r };
+      // Estimated label boxes (12px text under the circle, ellipsis at 170px):
+      // independent of when the renderer measures newly styled labels.
+      const boxes = order.slice(0, labelBudget(zoom / fitted)).map((id) => {
+        const node = instance.getElementById(id);
+        const { x, y } = node.renderedPosition();
+        return clusterLabelBox(
+          id,
+          node.data("label"),
+          x,
+          y,
+          node.renderedWidth(),
+        );
       });
+      for (const id of required)
+        if (!boxes.some((box) => box.id === id)) {
+          const node = instance.getElementById(id);
+          const { x, y } = node.renderedPosition();
+          boxes.push(
+            clusterLabelBox(id, node.data("label"), x, y, node.renderedWidth()),
+          );
+        }
       const visible = spacedLabels(boxes, instance.width(), instance.height(), {
         required,
-        obstacles,
       });
       instance.batch(() => {
         for (const id of order)
-          if (!visible.has(id))
+          if (!visible.has(id) && !required.has(id))
             instance.getElementById(id).removeClass("label-on");
       });
     };
@@ -176,6 +197,7 @@ export function ClusterCanvas({
       });
     };
     fit();
+    fitted = instance.zoom();
     labels();
     instance.on("pan zoom", schedule);
     instance.on("mouseover", "node", (event) => {
