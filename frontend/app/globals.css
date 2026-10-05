@@ -424,18 +424,17 @@
   .wordmark {
     display: inline-flex;
     align-items: center;
-    gap: 8px;
+    gap: 9px;
     color: var(--text);
-    --logo-ink: var(--bg);
   }
-  .wordmark .logo-mark {
-    color: var(--primary);
+  .logo-mark {
+    display: block;
     flex-shrink: 0;
   }
   .wordmark-text {
     font-size: 15px;
     font-weight: 600;
-    letter-spacing: -0.1px;
+    letter-spacing: -0.2px;
   }
 
   /* Shell */
