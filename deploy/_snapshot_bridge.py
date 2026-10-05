@@ -14,6 +14,7 @@ from importlib.metadata import version
 from pathlib import Path
 
 from alembic.script import ScriptDirectory
+from app.collectors.publication import derived_bounds
 from app.core.config import get_settings
 from app.db.models import (
     AuditEvent,
@@ -41,9 +42,10 @@ STATES = {"ready", "building", "deleting"}
 
 
 def revision_bounds():
-    """Per-revision bounds of a streamed archive follow the publication caps."""
+    """Per-revision bounds of a streamed archive: the publication caps plus the
+    classification annotations publication derives on top of submitted entities."""
     settings = get_settings()
-    return settings.max_nodes, settings.max_edges
+    return derived_bounds(settings.max_nodes, settings.max_edges)
 
 
 def enforce_bounds(counts, payload_characters, tenants):

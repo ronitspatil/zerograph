@@ -35,6 +35,11 @@ class RevisionTooLarge(ValueError):
     pass
 
 
+def derived_bounds(max_nodes: int, max_edges: int) -> tuple[int, int]:
+    """Largest possible published revision for the given submitted-entity caps."""
+    return max_nodes + len(RULES), max_edges + len(RULES) * max_nodes
+
+
 @dataclass
 class PublishedRevision:
     nodes: int
@@ -60,7 +65,11 @@ def check_conflicts(db: Session, set_ids: list[str]) -> None:
 
 
 def check_caps(db: Session, set_ids: list[str], max_nodes: int, max_edges: int) -> None:
-    """Refuse before any graph write when the merged revision would exceed the caps."""
+    """Refuse before any graph write when the merged submitted entities exceed the caps.
+
+    Classification annotations are derived on top: at most one category node per
+    rule and one annotation edge per (tagged data asset, rule), see derived_bounds.
+    """
     for kind, cap in (("node", max_nodes), ("edge", max_edges)):
         scope = (StagedEntity.session_id.in_(set_ids), StagedEntity.kind == kind)
         total = db.scalar(select(func.count()).select_from(StagedEntity).where(*scope))
@@ -157,8 +166,6 @@ def publish_sets(
         graph.write_nodes(tenant, revision, batch)
         batch.clear()
     seen.clear()
-    if compact.node_count > settings.max_nodes:
-        raise RevisionTooLarge("Revision exceeds the configured node limit")
 
     # Edges: classification annotations replace an identical-ID edge in place and
     # are otherwise appended after all source edges.
@@ -198,8 +205,6 @@ def publish_sets(
     if edges:
         graph.write_edges(tenant, revision, edges)
     seen_edges.clear()
-    if compact.edge_count > settings.max_edges:
-        raise RevisionTooLarge("Revision exceeds the configured edge limit")
     analysis = compact.analyze()
     nodes, edge_count = compact.node_count, compact.edge_count
     graph.finish_revision(tenant, revision)
