@@ -4,10 +4,12 @@ import type { Core, StylesheetCSS } from "cytoscape";
 import { Maximize2, Minus, Plus } from "lucide-react";
 import {
   circlePositions,
+  coversNode,
   fitViewport,
   labelCandidates,
   labelFontSize,
   layoutInput,
+  OVERVIEW_LABELS,
   startLayout,
   overviewAnchors,
   relationshipHint,
@@ -46,6 +48,8 @@ export function GraphCanvas({
   const cy = useRef<Core | null>(null);
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
+  const riskRef = useRef(riskNodes);
+  riskRef.current = riskNodes;
   const applyFocus = useRef<() => void>(() => {});
   const fitView = useRef<() => void>(() => {});
   const callback = useRef(onSelect);
@@ -101,6 +105,15 @@ export function GraphCanvas({
         css: { "line-style": "dashed" },
       },
       { selector: ".focus-muted", css: { opacity: 0.13 } },
+      {
+        // Overview labels over a dense core: a backdrop, drawn above the dots.
+        selector: "node.label-backed",
+        css: {
+          "text-background-color": "#0d1522",
+          "text-background-opacity": 0.85,
+          "z-index": 1,
+        },
+      },
       {
         selector: "node.focus-neighbor",
         css: {
@@ -246,12 +259,16 @@ export function GraphCanvas({
       const root = hovered || selectedRef.current;
       const rootNode = root ? instance.getElementById(root) : null;
       const focused = rootNode && rootNode.nonempty() ? root : null;
-      const { order, required } = labelCandidates(graph, anchors, {
+      const { order, required, spread } = labelCandidates(graph, anchors, {
         zoom,
         focus: focused,
         neighbors: focused
           ? rootNode!.neighborhood("node").map((n) => n.id())
           : [],
+        positions: instance
+          .nodes()
+          .map((n) => ({ id: n.id(), ...n.position() })),
+        risk: riskRef.current,
       });
       instance.batch(() => {
         // Labels keep one screen size at every zoom, in step with the UI type scale.
@@ -261,7 +278,10 @@ export function GraphCanvas({
           "text-margin-y": 5 / zoom,
           "text-background-padding": "0px",
         });
-        // Only focused labels draw a backdrop, so only they need padding.
+        instance.nodes().removeClass("label-on label-backed");
+        for (const id of order)
+          instance.getElementById(id).addClass("label-on");
+        // Only focused labels draw a backdrop here, so only they need padding.
         instance
           .nodes(".focus-root, .focus-neighbor")
           .style({ "text-background-padding": `${3 / zoom}px` });
@@ -272,9 +292,6 @@ export function GraphCanvas({
         instance
           .edges(".edge-detail")
           .style({ "font-size": labelFontSize(10, zoom) });
-        instance.nodes().removeClass("label-on");
-        for (const id of order)
-          instance.getElementById(id).addClass("label-on");
       });
       if (!order.length) return;
       const labels = order.map((id) => ({
@@ -296,12 +313,24 @@ export function GraphCanvas({
         instance.width(),
         instance.height(),
         // Never under the legend or zoom controls.
-        { required, obstacles, blocked: overlayObstacles(element) },
+        {
+          required,
+          obstacles,
+          blocked: overlayObstacles(element),
+          backdropPadding: 3,
+          ...(spread && OVERVIEW_LABELS[narrow ? "narrow" : "wide"]),
+        },
       );
       instance.batch(() => {
-        for (const id of order)
-          if (!visible.has(id))
-            instance.getElementById(id).removeClass("label-on");
+        labels.forEach((box) => {
+          const node = instance.getElementById(box.id);
+          if (!visible.has(box.id)) node.removeClass("label-on");
+          // Overview labels kept over other dots draw on a backdrop, above them.
+          else if (spread && coversNode(box, obstacles))
+            node
+              .addClass("label-backed")
+              .style({ "text-background-padding": `${3 / zoom}px` });
+        });
       });
     }
     let frame = 0;

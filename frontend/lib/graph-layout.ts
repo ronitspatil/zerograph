@@ -152,39 +152,142 @@ export function overviewAnchors(graph: GraphData): Set<string> {
   );
 }
 
-/** Small slices label every node at overview zoom; larger ones label anchors only. */
+/** Small slices label every node at overview zoom; larger ones label a spread-out selection. */
 export const OVERVIEW_ALL_LABELS_MAX_NODES = 80;
 /** Above this zoom every node becomes a label candidate. */
 export const DETAIL_ZOOM = 1.35;
+/**
+ * Screen cell, in pixels, that holds at most one overview label candidate:
+ * about one label wide and a few lines tall, so candidates cover every region
+ * of the slice (the dense core and its satellites) instead of piling up on hubs.
+ */
+export const LABEL_CELL = { width: 150, height: 56 };
+/**
+ * Overview labels on wide and narrow canvases: `limit` caps how many show, and
+ * `backdrops` how many may sit over other dots (a dense core's hubs), drawn on
+ * a backdrop.
+ */
+export const OVERVIEW_LABELS = {
+  wide: { limit: 22, backdrops: 3 },
+  narrow: { limit: 8, backdrops: 4 },
+};
+
+const DATA_STORES = new Set(["Database", "VectorStore", "S3Bucket"]);
+
+/**
+ * Overview label priority within this visible slice: visible degree (the hubs
+ * of each region), boosted for what an operator scans for first: nodes on a
+ * finding path, exposed agents and MCP servers, and sensitive data stores.
+ * Never a global importance score.
+ */
+export function labelPriority(
+  graph: GraphData,
+  risk: Set<string> = new Set(),
+): Map<string, number> {
+  const degree = visibleDegree(graph);
+  return new Map(
+    graph.nodes.map((n) => {
+      let score = degree.get(n.id)!;
+      if (risk.has(n.id)) score += 3;
+      if (n.type === "AIAgent" || n.type === "MCPServer")
+        score += n.internet_exposed ? 3 : 1;
+      if (
+        DATA_STORES.has(n.type) &&
+        (n.sensitivity === "restricted" || n.sensitivity === "confidential")
+      )
+        score += 2;
+      if (n.privileged) score += 1;
+      return [n.id, score];
+    }),
+  );
+}
+
+/**
+ * One candidate per grid cell (the highest-priority node in it), ordered by
+ * priority. `cell` is in the same units as the positions; cells are anchored at
+ * the model origin, so panning never reshuffles the choice.
+ */
+export function spreadCandidates(
+  positions: Position[],
+  priority: Map<string, number>,
+  cell: { width: number; height: number },
+): string[] {
+  const rank = (id: string) => priority.get(id) ?? 0;
+  const better = (a: string, b: string) =>
+    rank(a) - rank(b) || b.localeCompare(a);
+  const best = new Map<string, string>();
+  for (const p of positions) {
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+    const key = `${Math.floor(p.x / cell.width)}:${Math.floor(p.y / cell.height)}`;
+    const current = best.get(key);
+    if (current === undefined || better(p.id, current) > 0) best.set(key, p.id);
+  }
+  return [...best.values()].sort((a, b) => better(b, a));
+}
 
 /**
  * Ordered label candidates for the current view. Earlier ids win collisions.
- * `required` labels (the focused node and its neighborhood) are always shown.
+ * `required` labels (the focused node and its neighborhood) are always shown;
+ * With `positions` (model coordinates), large overview slices pick candidates
+ * spread across the canvas (`spread`: show them with OVERVIEW_LABELS);
+ * without positions they fall back to the role anchors.
  */
 export function labelCandidates(
   graph: GraphData & { view?: { mode: "sample" | "neighborhood" | "roles" } },
   anchors: Set<string>,
-  state: { zoom: number; focus: string | null; neighbors?: Iterable<string> },
-): { order: string[]; required: Set<string> } {
+  state: {
+    zoom: number;
+    focus: string | null;
+    neighbors?: Iterable<string>;
+    positions?: Position[];
+    risk?: Set<string>;
+  },
+): {
+  order: string[];
+  required: Set<string>;
+  spread: boolean;
+} {
   if (state.focus) {
     const required = new Set([state.focus, ...(state.neighbors ?? [])]);
-    return { order: [...required], required };
+    return { order: [...required], required, spread: false };
   }
   const degree = visibleDegree(graph);
-  const rest = graph.nodes
-    .filter((n) => !anchors.has(n.id))
-    .sort(
-      (a, b) =>
-        degree.get(b.id)! - degree.get(a.id)! || a.id.localeCompare(b.id),
-    )
-    .map((n) => n.id);
   const detail = state.zoom > DETAIL_ZOOM;
   const small =
     graph.view?.mode !== "roles" &&
     graph.nodes.length <= OVERVIEW_ALL_LABELS_MAX_NODES;
+  if (detail || small) {
+    const rest = graph.nodes
+      .filter((n) => !anchors.has(n.id))
+      .sort(
+        (a, b) =>
+          degree.get(b.id)! - degree.get(a.id)! || a.id.localeCompare(b.id),
+      )
+      .map((n) => n.id);
+    return {
+      order: [...anchors, ...rest],
+      required: new Set(),
+      spread: false,
+    };
+  }
+  if (!state.positions || !(state.zoom > 0))
+    return {
+      order: [...anchors],
+      required: new Set(),
+      spread: false,
+    };
+  const order = spreadCandidates(
+    state.positions,
+    labelPriority(graph, state.risk),
+    {
+      width: LABEL_CELL.width / state.zoom,
+      height: LABEL_CELL.height / state.zoom,
+    },
+  );
   return {
-    order: detail || small ? [...anchors, ...rest] : [...anchors],
+    order,
     required: new Set(),
+    spread: true,
   };
 }
 
@@ -232,12 +335,25 @@ export function underOverlay(
   );
 }
 
+/** True when a label box covers the core of any node other than its own. */
+export function coversNode(
+  box: LabelBounds,
+  obstacles: LabelBounds[],
+): boolean {
+  return obstacles.some(
+    (node) => node.id !== box.id && validBox(node) && overlaps(box, node, 0),
+  );
+}
+
 /**
  * Greedy visible-priority labels using actual rendered bounds, with breathing room.
  * Required labels are kept unless they would sit under a screen overlay
  * (`blocked`: legend, zoom controls); optional labels must also fit inside the
  * viewport, clear every kept label, and not cover another node (`obstacles`,
- * keyed by node id).
+ * keyed by node id). The first `backdrops` optional labels that would cover a
+ * node are kept anyway, for a caller that draws them on a backdrop
+ * `backdropPadding` pixels wider on every side (see `coversNode`). At most
+ * `limit` optional labels are kept.
  */
 export function spacedLabels(
   labels: LabelBounds[],
@@ -247,30 +363,41 @@ export function spacedLabels(
     required?: Set<string>;
     obstacles?: LabelBounds[];
     blocked?: LabelBounds[];
+    backdrops?: number;
+    backdropPadding?: number;
+    limit?: number;
   } = {},
 ): Set<string> {
   const required = options.required ?? new Set<string>();
+  const pad = options.backdropPadding ?? 0;
+  let backdrops = options.backdrops ?? 0;
+  let room = options.limit ?? Infinity;
   const obstacles = (options.obstacles ?? []).filter(validBox);
   const blocked = options.blocked ?? [];
   const chosen: LabelBounds[] = labels.filter(
     (box) =>
       required.has(box.id) && validBox(box) && !underOverlay(box, blocked),
   );
-  for (const box of labels) {
-    if (
-      required.has(box.id) ||
-      !validBox(box) ||
-      box.x1 < 0 ||
-      box.y1 < 0 ||
-      box.x2 > width ||
-      box.y2 > height
-    )
-      continue;
+  for (const label of labels) {
+    if (room <= 0) break;
+    if (required.has(label.id) || !validBox(label)) continue;
+    const backdrop = coversNode(label, obstacles);
+    if (backdrop && backdrops <= 0) continue;
+    const box = backdrop
+      ? {
+          id: label.id,
+          x1: label.x1 - pad,
+          y1: label.y1 - pad,
+          x2: label.x2 + pad,
+          y2: label.y2 + pad,
+        }
+      : label;
+    if (box.x1 < 0 || box.y1 < 0 || box.x2 > width || box.y2 > height) continue;
     if (underOverlay(box, blocked)) continue;
     if (chosen.some((other) => overlaps(box, other, 6))) continue;
-    if (obstacles.some((node) => node.id !== box.id && overlaps(box, node, 0)))
-      continue;
+    if (backdrop) backdrops--;
     chosen.push(box);
+    room--;
   }
   return new Set(chosen.map((box) => box.id));
 }
