@@ -114,6 +114,11 @@ export function ClusterCanvas({
   onOpen,
   onHover,
   onSelect,
+  colorOf,
+  captionOf,
+  legend,
+  label = "Global map",
+  unit = "clusters",
 }: {
   clusters: ClusterSummary[];
   links: ClusterLink[];
@@ -122,6 +127,15 @@ export function ClusterCanvas({
   onOpen: (cluster: ClusterSummary) => void;
   onHover?: (cluster: ClusterSummary | null) => void;
   onSelect?: (member: GraphNode) => void;
+  /** Circle color; default: the color of the cluster's most common node type. */
+  colorOf?: (cluster: ClusterSummary) => string;
+  /** Label text; default: "label · size". */
+  captionOf?: (cluster: ClusterSummary) => string;
+  /** Legend entries; default: the structural map's legend. */
+  legend?: { text: string; color?: string }[];
+  /** Accessible name prefix and unit ("Topics map", "topics"). */
+  label?: string;
+  unit?: string;
 }) {
   const container = useRef<HTMLDivElement>(null);
   const cy = useRef<Core | null>(null);
@@ -248,8 +262,12 @@ export function ClusterCanvas({
           ...input.clusters.map((c, i) => ({
             data: {
               id: c.id,
-              label: `${c.label} · ${formatCount(c.size)}`,
-              color: nodeColors[c.dominant_type] ?? "#73849a",
+              label: captionOf
+                ? captionOf(c)
+                : `${c.label} · ${formatCount(c.size)}`,
+              color: colorOf
+                ? colorOf(c)
+                : (nodeColors[c.dominant_type] ?? "#73849a"),
               diameter: clusterDiameter(c.size, largest),
               size: c.size,
             },
@@ -791,7 +809,7 @@ export function ClusterCanvas({
         role="img"
         data-renderer={renderer ?? undefined}
         data-members={shownMembers}
-        aria-label={`Global map with ${formatCount(clusters.length)} clusters${shownMembers ? ` and ${formatCount(shownMembers)} members shown in place` : ""}. Use the cluster list to open one with the keyboard.`}
+        aria-label={`${label} with ${formatCount(clusters.length)} ${unit}${shownMembers ? ` and ${formatCount(shownMembers)} members shown in place` : ""}. Use the ${unit.replace(/s$/, "")} list to open one with the keyboard.`}
       />
       <div className="graph-controls">
         <button aria-label="Zoom in" onClick={() => zoom(1.2)}>
@@ -805,9 +823,22 @@ export function ClusterCanvas({
         </button>
       </div>
       <div className="graph-legend" aria-label="Legend">
-        <span>Circle area: entities</span>
-        <span>Color: most common type</span>
-        <span>Line width: relationships between clusters</span>
+        {legend ? (
+          legend.map((entry) => (
+            <span key={entry.text}>
+              {entry.color && (
+                <i style={{ background: entry.color }} aria-hidden="true" />
+              )}
+              {entry.text}
+            </span>
+          ))
+        ) : (
+          <>
+            <span>Circle area: entities</span>
+            <span>Color: most common type</span>
+            <span>Line width: relationships between clusters</span>
+          </>
+        )}
       </div>
     </div>
   );

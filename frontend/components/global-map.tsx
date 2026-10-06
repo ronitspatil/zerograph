@@ -15,6 +15,7 @@ import type {
   GraphNode,
 } from "@/lib/types";
 import { Button } from "@/components/ui/button";
+import { TopicLens } from "@/components/topic-lens";
 
 const loading = () => (
   <div className="canvas-loading">
@@ -76,6 +77,7 @@ export function GlobalMap({
   const [expansions, setExpansions] = useState<MapExpansion[]>([]);
   const [expanding, setExpanding] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
+  const [lens, setLens] = useState<"structure" | "topics">("structure");
   const request = useRef<AbortController | null>(null);
   const expandRequest = useRef<AbortController | null>(null);
   const begin = () => {
@@ -252,12 +254,51 @@ export function GlobalMap({
     return seen.size;
   };
 
+  const lensSwitch = (
+    <span className="global-map-lens" role="group" aria-label="Map lens">
+      <button
+        type="button"
+        aria-pressed={lens === "structure"}
+        onClick={() => setLens("structure")}
+      >
+        Structure
+      </button>
+      <button
+        type="button"
+        aria-pressed={lens === "topics"}
+        onClick={() => setLens("topics")}
+      >
+        Topics
+      </button>
+    </span>
+  );
+  if (lens === "topics")
+    return (
+      <div className="global-map">
+        <nav className="global-map-crumbs" aria-label="Map level">
+          <strong>Topics</strong>
+          {lensSwitch}
+        </nav>
+        <TopicLens
+          reloadKey={reloadKey}
+          stale={stale}
+          onError={onError}
+          onOpenNeighborhood={onOpenNeighborhood}
+        />
+      </div>
+    );
   if (unavailable)
     return (
-      <div className="empty-state">
-        <Network size={28} aria-hidden="true" />
-        <h3>Global map not available yet</h3>
-        <p>{unavailable}. This view checks again every 30 seconds.</p>
+      <div className="global-map">
+        <nav className="global-map-crumbs" aria-label="Map level">
+          <strong>Global map</strong>
+          {lensSwitch}
+        </nav>
+        <div className="empty-state">
+          <Network size={28} aria-hidden="true" />
+          <h3>Global map not available yet</h3>
+          <p>{unavailable}. This view checks again every 30 seconds.</p>
+        </div>
       </div>
     );
   if (!map)
@@ -293,6 +334,7 @@ export function GlobalMap({
             )}
           </span>
         ))}
+        {lensSwitch}
       </nav>
       <div className="exploration-status global-map-status" role="status">
         <span>
