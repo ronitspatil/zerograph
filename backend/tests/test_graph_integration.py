@@ -560,3 +560,46 @@ def test_real_simulation_matches_reference_engine(monkeypatch):
             session.run("MATCH (n {tenant_id:$tenant}) DETACH DELETE n", tenant=tenant).consume()
         store.close()
         get_settings.cache_clear()
+
+
+@pytest.mark.skipif(not os.getenv("ZG_INTEGRATION_GRAPH"), reason="No real graph database configured")
+def test_real_topology_matches_the_snapshot_and_feeds_the_same_sample(monkeypatch):
+    from app.graph.analysis import compute_analysis
+    from app.graph.sample import select_sample
+
+    monkeypatch.setenv("ZG_GRAPH_VENDOR", os.environ["ZG_INTEGRATION_GRAPH"])
+    get_settings.cache_clear()
+    store = CypherGraphStore()
+    store.driver.verify_connectivity()
+    store.migrate()
+    tenant = "integration-" + str(uuid4())
+    revision = str(uuid4())
+    try:
+        snapshot = demo_snapshot()
+        store.publish(tenant, revision, snapshot)
+        topology = store.topology(tenant, revision)
+        types = {node.id: node.type.value for node in snapshot.nodes}
+        assert sorted(topology.ids) == sorted(types)
+        assert dict(zip(topology.ids, topology.types, strict=True)) == types
+        pairs = sorted(
+            (topology.ids[s], topology.ids[t])
+            for s, t in zip(topology.sources, topology.targets, strict=True)
+        )
+        assert pairs == sorted((edge.source, edge.target) for edge in snapshot.edges)
+        expected = compute_analysis(snapshot)
+        sample = select_sample(
+            topology.ids,
+            topology.types,
+            topology.sources,
+            topology.targets,
+            [finding.path for finding in expected.findings],
+            expected.high_blast_ids,
+        )
+        assert sample == expected.sample_ids
+        assert store.topology("other-tenant", revision).ids == []
+        assert store.topology(tenant, "").ids == []
+    finally:
+        with store.driver.session() as session:
+            session.run("MATCH (n {tenant_id:$tenant}) DETACH DELETE n", tenant=tenant).consume()
+        store.close()
+        get_settings.cache_clear()

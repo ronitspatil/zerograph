@@ -90,7 +90,7 @@ The canvas fallback's frame rate comes from panning a cached texture (`textureOn
 
 Phase 2 measured `/graph/explore` at 0.4–0.6 s at 100k. The visible-edge query matched `a.id IN $ids AND b.id IN $ids` over the scoped pattern, so Memgraph scanned every entity of the revision and expanded its relationships; the sample sorted the whole revision by ID. Now:
 
-- the sample reads the first 500 IDs stored at publication (`revision_analysis.sample_ids`, migration `0005`) and fetches them by unique key; older rows without a sample keep the scan;
+- the sample reads the first 500 IDs stored at publication (`revision_analysis.sample_ids`, migration `0005`) and fetches them by unique key; older rows without a sample keep the scan until the worker's sample sweep stores one ([revision-analysis.md](revision-analysis.md#explore-samples-sample_version-migration-0006));
 - the root, its neighbors and the visible edges are anchored on unique entity keys and expanded from there;
 - scope filters sit behind `WITH`: given a `WHERE` on `tenant_id` or `revision`, Memgraph 3.2's planner otherwise prefers that non-unique index and scans the whole tenant or revision (3.1 s instead of 2.6 ms for 250 nodes).
 
