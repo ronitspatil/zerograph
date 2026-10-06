@@ -55,10 +55,8 @@ def current_actor(credentials: HTTPAuthorizationCredentials | None = Depends(bea
         subject = claims["sub"]
         if not isinstance(subject, str) or not subject.strip() or len(subject) > 256:
             raise ValueError("Invalid subject claim")
-        if (
-            not isinstance(roles, list)
-            or len(roles) > 64
-            or not all(isinstance(r, str) and len(r) <= 128 for r in roles)
+        if not isinstance(roles, list) or len(roles) > 64 or not all(
+            isinstance(r, str) and len(r) <= 128 for r in roles
         ):
             raise ValueError("Invalid role claim")
         enforce_rate_limit(tenant, claims["sub"])
