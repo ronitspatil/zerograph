@@ -16,7 +16,7 @@ from app.core.config import get_settings
 from app.db.locks import acquire_pointer_gate, acquire_publication_lock
 from app.db.models import IngestionJob, SourceSnapshot, TenantState, UploadSession, now
 from app.db.session import audit, session_factory
-from app.graph.analysis import store_analysis
+from app.graph.analysis import backfill_stale_samples, store_analysis
 from app.graph.clusters import backfill_missing, compute_clusters, load_previous, store_clusters
 from app.graph.demo import demo_snapshot
 from app.graph.repository import get_graph_store
@@ -388,7 +388,14 @@ def backfill_clusters() -> int:
     return sum(1 for result in backfill_missing() if result.get("backfilled"))
 
 
+@celery_app.task
+def backfill_samples() -> int:
+    """Explore samples for current revisions stored with an older SAMPLE_VERSION (pre-0006 or a bump)."""
+    return sum(1 for result in backfill_stale_samples() if result.get("backfilled"))
+
+
 celery_app.conf.beat_schedule = {
     "recover-queued-jobs": {"task": "app.collectors.tasks.dispatch_pending", "schedule": 30.0},
     "backfill-global-map": {"task": "app.collectors.tasks.backfill_clusters", "schedule": 60.0},
+    "backfill-explore-sample": {"task": "app.collectors.tasks.backfill_samples", "schedule": 60.0},
 }

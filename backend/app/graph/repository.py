@@ -1,5 +1,6 @@
 import json
 import time
+from array import array
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -40,6 +41,7 @@ class RevisionMetadata:
 
 
 REVISION_STATES = ("ready", "building", "deleting")
+NODE_TYPES = frozenset(kind.value for kind in NodeType)
 
 
 @dataclass(frozen=True)
@@ -62,6 +64,16 @@ class EdgeRow:
     type: str
     certainty: str
     payload: str
+
+
+@dataclass
+class Topology:
+    """A revision's structure without payloads: node IDs and types, edge endpoint indices."""
+
+    ids: list[str]
+    types: list[str]
+    sources: array
+    targets: array
 
 
 def node_row(node: Node) -> NodeRow:
@@ -96,6 +108,8 @@ class GraphStore(Protocol):
     def write_edges(self, tenant: str, revision: str, rows: list[EdgeRow]) -> None: ...
     def finish_revision(self, tenant: str, revision: str) -> None: ...
     def snapshot(self, tenant: str, revision: str) -> GraphSnapshot: ...
+    # Node IDs and types plus edge endpoints only (no payloads): background sweeps.
+    def topology(self, tenant: str, revision: str) -> "Topology": ...
     def node(self, tenant: str, revision: str, node_id: str) -> Node | None: ...
     def explore(
         self,
@@ -195,6 +209,17 @@ class MemoryGraphStore:
 
     def snapshot(self, tenant: str, revision: str) -> GraphSnapshot:
         return self.snapshots.get((tenant, revision), GraphSnapshot()).model_copy(deep=True)
+
+    def topology(self, tenant: str, revision: str) -> Topology:
+        snapshot = self.snapshots.get((tenant, revision), GraphSnapshot())
+        ids = [node.id for node in snapshot.nodes]
+        index = {node_id: position for position, node_id in enumerate(ids)}
+        return Topology(
+            ids,
+            [node.type.value for node in snapshot.nodes],
+            array("l", (index[edge.source] for edge in snapshot.edges)),
+            array("l", (index[edge.target] for edge in snapshot.edges)),
+        )
 
     def node(self, tenant: str, revision: str, node_id: str) -> Node | None:
         snapshot = self.snapshots.get((tenant, revision)) if revision else None
@@ -617,6 +642,40 @@ class CypherGraphStore:
             source=meta["source"] if meta else "snapshot",
             warnings=meta["warnings"] if meta else [],
         )
+
+    def topology(self, tenant: str, revision: str) -> Topology:
+        """Streams IDs, type labels and endpoint IDs; no payload is read or validated."""
+        ids: list[str] = []
+        types: list[str] = []
+        sources, targets = array("l"), array("l")
+        if not revision:
+            return Topology(ids, types, sources, targets)
+        index: dict[str, int] = {}
+        with self.driver.session() as session:
+            for row in session.run(
+                Query(
+                    "MATCH (n:Entity {tenant_id:$tenant, revision:$revision}) "
+                    "RETURN n.id AS id, labels(n) AS labels",
+                    timeout=self.timeout,
+                ),
+                tenant=tenant,
+                revision=revision,
+            ):
+                index[row["id"]] = len(ids)
+                ids.append(row["id"])
+                types.append(next(label for label in row["labels"] if label in NODE_TYPES))
+            for row in session.run(
+                Query(
+                    "MATCH (a:Entity {tenant_id:$tenant, revision:$revision})-[r]->"
+                    "(b:Entity {tenant_id:$tenant, revision:$revision}) RETURN a.id AS source, b.id AS target",
+                    timeout=self.timeout,
+                ),
+                tenant=tenant,
+                revision=revision,
+            ):
+                sources.append(index[row["source"]])
+                targets.append(index[row["target"]])
+        return Topology(ids, types, sources, targets)
 
     def node(self, tenant: str, revision: str, node_id: str) -> Node | None:
         # One indexed lookup on the unique entity key instead of a full snapshot load.
