@@ -16,6 +16,7 @@ from array import array
 from app.engine.analysis_index import WEIGHTS
 from app.engine.toxic_combos import Finding
 from app.graph.exploration import RevisionTotals
+from app.graph.sample import select_sample
 from app.graph.schema import DATA_TYPES, IDENTITY_TYPES, TRAVERSAL_TYPES, GraphSnapshot, NodeType
 
 DATA = frozenset(kind.value for kind in DATA_TYPES)
@@ -294,6 +295,12 @@ class CompactGraph:
                 and roles[self.edge_target[edge]]
             ),
         )
-        from app.graph.analysis import sample_ids
-
-        return ComputedAnalysis(overview, findings, totals, total_weight, high_blast, sample_ids(self.ids))
+        sample = select_sample(
+            self.ids,
+            self.types,
+            self.edge_source,
+            self.edge_target,
+            (finding.path for finding in findings),
+            high_blast,
+        )
+        return ComputedAnalysis(overview, findings, totals, total_weight, high_blast, sample)

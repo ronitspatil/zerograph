@@ -6,11 +6,12 @@ whole-revision totals and the total asset weight are stored in SQL, keyed by
 when present and current; a revision published before this table existed (or by
 an older analysis version) is computed on read from its snapshot instead, exactly
 as before, so legacy revisions keep working without a migration-time backfill.
-``python -m app.graph.analysis --tenant T`` backfills a tenant's current revision.
+``python -m app.graph.analysis --tenant T`` backfills a tenant's current revision,
+also when only its stored explore sample predates ``SAMPLE_VERSION`` (until then the
+older sample is still served: it is bounded and valid, just less representative).
 """
 
 import argparse
-import heapq
 import json
 from dataclasses import dataclass
 
@@ -24,6 +25,7 @@ from app.engine.analysis_index import AnalysisIndex
 from app.engine.toxic_combos import Finding, detect
 from app.graph.exploration import RevisionTotals
 from app.graph.repository import get_graph_store
+from app.graph.sample import SAMPLE_VERSION, snapshot_sample
 from app.graph.schema import DATA_TYPES, IDENTITY_TYPES, TRAVERSAL_TYPES, GraphSnapshot, NodeType
 
 # Bump when the overview, finding or totals logic changes: rows with another
@@ -40,15 +42,8 @@ class ComputedAnalysis:
     totals: RevisionTotals
     total_asset_weight: int
     high_blast_ids: list[str]
-    # The first SAMPLE_SIZE node IDs in ascending order: the explore sample without a scan.
+    # The initial explore sample in selection order (app.graph.sample): a key lookup, no scan.
     sample_ids: list[str] | None = None
-
-
-SAMPLE_SIZE = 500
-
-
-def sample_ids(ids) -> list[str]:
-    return heapq.nsmallest(SAMPLE_SIZE, ids)
 
 
 def compute_analysis(snapshot: GraphSnapshot) -> ComputedAnalysis:
@@ -90,7 +85,7 @@ def compute_analysis(snapshot: GraphSnapshot) -> ComputedAnalysis:
         totals,
         prepared.total_asset_weight,
         high_blast,
-        sample_ids(node.id for node in snapshot.nodes),
+        snapshot_sample(snapshot, findings, high_blast),
     )
 
 
@@ -110,6 +105,7 @@ def store_analysis(db: Session, tenant: str, revision: str, analysis: ComputedAn
             total_asset_weight=analysis.total_asset_weight,
             high_blast_ids=analysis.high_blast_ids,
             sample_ids=analysis.sample_ids,
+            sample_version=SAMPLE_VERSION if analysis.sample_ids is not None else None,
         )
     )
     if analysis.findings:
@@ -212,9 +208,10 @@ def backfill(tenant: str) -> dict:
         if state is None or not state.revision:
             raise ValueError("Tenant has no published revision")
         revision = state.revision
-        if stored_analysis(db, tenant, revision) is not None:
+        current = stored_analysis(db, tenant, revision)
+        if current is not None and current.sample_version == SAMPLE_VERSION:
             return {"tenant": tenant, "revision": revision, "backfilled": False}
-        # Replace rows of an older analysis version, if any.
+        # Replace rows of an older analysis or explore-sample version, if any.
         delete_analysis(db, tenant, revision)
         analysis = compute_analysis(get_graph_store().snapshot(tenant, revision))
         store_analysis(db, tenant, revision, analysis)
