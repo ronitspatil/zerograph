@@ -7,17 +7,93 @@ from pydantic import BaseModel, Field
 
 from app.remediation.policy_optimizer import UsageEvidence
 
-# API operation names are not universally IAM action names. Unsupported operations remain unresolved.
-ACTION_MAP = {
-    ("s3.amazonaws.com", "GetObject"): "s3:GetObject",
-    ("s3.amazonaws.com", "HeadObject"): "s3:GetObject",
-    ("s3.amazonaws.com", "GetObjectVersion"): "s3:GetObjectVersion",
-    ("s3.amazonaws.com", "ListObjects"): "s3:ListBucket",
-    ("s3.amazonaws.com", "ListObjectsV2"): "s3:ListBucket",
-    ("s3.amazonaws.com", "PutObject"): "s3:PutObject",
-    ("s3.amazonaws.com", "DeleteObject"): "s3:DeleteObject",
-    ("sts.amazonaws.com", "AssumeRole"): "sts:AssumeRole",
+# API operation names are not universally IAM action names. Unsupported operations remain
+# unresolved (and make the service's coverage incomplete). Each entry maps a CloudTrail
+# (eventSource, eventName) to (IAM action, action class); the class is provider-neutral:
+# "read", "write", "admin" (permissions/configuration) or "assume" (role assumption).
+EVENTS: dict[tuple[str, str], tuple[str, str]] = {
+    # S3 data events (object level) and bucket-permission management events.
+    ("s3.amazonaws.com", "GetObject"): ("s3:GetObject", "read"),
+    ("s3.amazonaws.com", "HeadObject"): ("s3:GetObject", "read"),
+    ("s3.amazonaws.com", "GetObjectAttributes"): ("s3:GetObject", "read"),
+    ("s3.amazonaws.com", "SelectObjectContent"): ("s3:GetObject", "read"),
+    ("s3.amazonaws.com", "GetObjectVersion"): ("s3:GetObjectVersion", "read"),
+    ("s3.amazonaws.com", "ListObjects"): ("s3:ListBucket", "read"),
+    ("s3.amazonaws.com", "ListObjectsV2"): ("s3:ListBucket", "read"),
+    ("s3.amazonaws.com", "ListObjectVersions"): ("s3:ListBucketVersions", "read"),
+    ("s3.amazonaws.com", "PutObject"): ("s3:PutObject", "write"),
+    ("s3.amazonaws.com", "CopyObject"): ("s3:PutObject", "write"),
+    ("s3.amazonaws.com", "CreateMultipartUpload"): ("s3:PutObject", "write"),
+    ("s3.amazonaws.com", "UploadPart"): ("s3:PutObject", "write"),
+    ("s3.amazonaws.com", "CompleteMultipartUpload"): ("s3:PutObject", "write"),
+    ("s3.amazonaws.com", "DeleteObject"): ("s3:DeleteObject", "write"),
+    ("s3.amazonaws.com", "DeleteObjects"): ("s3:DeleteObject", "write"),
+    ("s3.amazonaws.com", "PutBucketPolicy"): ("s3:PutBucketPolicy", "admin"),
+    ("s3.amazonaws.com", "DeleteBucketPolicy"): ("s3:DeleteBucketPolicy", "admin"),
+    ("s3.amazonaws.com", "PutBucketAcl"): ("s3:PutBucketAcl", "admin"),
+    ("s3.amazonaws.com", "PutObjectAcl"): ("s3:PutObjectAcl", "admin"),
+    # STS role assumption (the resource is the assumed role).
+    ("sts.amazonaws.com", "AssumeRole"): ("sts:AssumeRole", "assume"),
+    ("sts.amazonaws.com", "AssumeRoleWithWebIdentity"): ("sts:AssumeRoleWithWebIdentity", "assume"),
+    ("sts.amazonaws.com", "AssumeRoleWithSAML"): ("sts:AssumeRoleWithSAML", "assume"),
+    # Glue Data Catalog.
+    ("glue.amazonaws.com", "GetDatabase"): ("glue:GetDatabase", "read"),
+    ("glue.amazonaws.com", "GetDatabases"): ("glue:GetDatabases", "read"),
+    ("glue.amazonaws.com", "GetTable"): ("glue:GetTable", "read"),
+    ("glue.amazonaws.com", "GetTables"): ("glue:GetTables", "read"),
+    ("glue.amazonaws.com", "GetPartition"): ("glue:GetPartition", "read"),
+    ("glue.amazonaws.com", "GetPartitions"): ("glue:GetPartitions", "read"),
+    ("glue.amazonaws.com", "BatchGetPartition"): ("glue:BatchGetPartition", "read"),
+    ("glue.amazonaws.com", "SearchTables"): ("glue:SearchTables", "read"),
+    ("glue.amazonaws.com", "CreateTable"): ("glue:CreateTable", "write"),
+    ("glue.amazonaws.com", "UpdateTable"): ("glue:UpdateTable", "write"),
+    ("glue.amazonaws.com", "CreatePartition"): ("glue:CreatePartition", "write"),
+    ("glue.amazonaws.com", "BatchCreatePartition"): ("glue:BatchCreatePartition", "write"),
+    ("glue.amazonaws.com", "UpdatePartition"): ("glue:UpdatePartition", "write"),
+    ("glue.amazonaws.com", "DeletePartition"): ("glue:DeletePartition", "write"),
+    ("glue.amazonaws.com", "BatchDeletePartition"): ("glue:BatchDeletePartition", "write"),
+    ("glue.amazonaws.com", "CreateDatabase"): ("glue:CreateDatabase", "admin"),
+    ("glue.amazonaws.com", "UpdateDatabase"): ("glue:UpdateDatabase", "admin"),
+    ("glue.amazonaws.com", "DeleteDatabase"): ("glue:DeleteDatabase", "admin"),
+    ("glue.amazonaws.com", "DeleteTable"): ("glue:DeleteTable", "admin"),
+    ("glue.amazonaws.com", "PutResourcePolicy"): ("glue:PutResourcePolicy", "admin"),
+    ("glue.amazonaws.com", "DeleteResourcePolicy"): ("glue:DeleteResourcePolicy", "admin"),
+    # Athena (the resource is the workgroup).
+    ("athena.amazonaws.com", "StartQueryExecution"): ("athena:StartQueryExecution", "read"),
+    ("athena.amazonaws.com", "GetQueryExecution"): ("athena:GetQueryExecution", "read"),
+    ("athena.amazonaws.com", "GetQueryResults"): ("athena:GetQueryResults", "read"),
+    ("athena.amazonaws.com", "StopQueryExecution"): ("athena:StopQueryExecution", "read"),
+    ("athena.amazonaws.com", "CreateWorkGroup"): ("athena:CreateWorkGroup", "admin"),
+    ("athena.amazonaws.com", "UpdateWorkGroup"): ("athena:UpdateWorkGroup", "admin"),
+    ("athena.amazonaws.com", "DeleteWorkGroup"): ("athena:DeleteWorkGroup", "admin"),
+    # Lake Formation (credential vending and permission management).
+    ("lakeformation.amazonaws.com", "GetDataAccess"): ("lakeformation:GetDataAccess", "read"),
+    ("lakeformation.amazonaws.com", "GrantPermissions"): ("lakeformation:GrantPermissions", "admin"),
+    ("lakeformation.amazonaws.com", "RevokePermissions"): ("lakeformation:RevokePermissions", "admin"),
+    ("lakeformation.amazonaws.com", "BatchGrantPermissions"): (
+        "lakeformation:BatchGrantPermissions",
+        "admin",
+    ),
+    ("lakeformation.amazonaws.com", "BatchRevokePermissions"): (
+        "lakeformation:BatchRevokePermissions",
+        "admin",
+    ),
+    ("lakeformation.amazonaws.com", "PutDataLakeSettings"): ("lakeformation:PutDataLakeSettings", "admin"),
+    # RDS Data API: a statement may read or write; classed as write (never understates use).
+    ("rds-data.amazonaws.com", "ExecuteStatement"): ("rds-data:ExecuteStatement", "write"),
+    ("rds-data.amazonaws.com", "BatchExecuteStatement"): ("rds-data:BatchExecuteStatement", "write"),
+    # OpenSearch Serverless data-plane events (names unverified against a live trail).
+    ("aoss.amazonaws.com", "ReadDocument"): ("aoss:ReadDocument", "read"),
+    ("aoss.amazonaws.com", "WriteDocument"): ("aoss:WriteDocument", "write"),
 }
+ACTION_MAP = {key: action for key, (action, _) in EVENTS.items()}
+ACTION_CLASSES = ("read", "write", "admin", "assume")
+# Coverage is attested per service: the event source without ".amazonaws.com".
+SERVICES = tuple(sorted({source.removesuffix(".amazonaws.com") for source, _ in EVENTS}))
+
+
+def service_of(event_source: str) -> str:
+    return event_source.removesuffix(".amazonaws.com") if isinstance(event_source, str) else ""
 
 
 class AuditNormalization(BaseModel):

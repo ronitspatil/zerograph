@@ -19,6 +19,7 @@ from app.core.config import get_settings
 from app.db.models import (
     AuditEvent,
     IngestionJob,
+    ObservedAccess,
     Remediation,
     RevisionAnalysis,
     RevisionCluster,
@@ -36,6 +37,8 @@ from app.db.models import (
     StagedEntity,
     TenantState,
     UploadSession,
+    UsageCoverage,
+    UsageUpload,
 )
 from app.db.session import session_factory
 from app.graph.repository import EdgeRow, NodeRow, get_graph_store
@@ -171,6 +174,10 @@ def metadata():
                     RevisionTopicMember,
                     RevisionPolicyDocument,
                     RevisionPolicy,
+                    # Tenant usage evidence (observed access) carries forward across revisions.
+                    UsageUpload,
+                    ObservedAccess,
+                    UsageCoverage,
                 )
             },
         }

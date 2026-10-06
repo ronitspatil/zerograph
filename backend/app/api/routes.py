@@ -12,8 +12,8 @@ from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
-from app.collectors import staging
-from app.collectors.execution_audit import AuditNormalization, normalize_cloudtrail
+from app.collectors import cloudtrail, staging
+from app.collectors.execution_audit import SERVICES, AuditNormalization, normalize_cloudtrail
 from app.collectors.mcp_agent_collector import MCPInventory
 from app.collectors.tasks import ingest
 from app.core.auth import Actor, require_role
@@ -27,6 +27,9 @@ from app.db.models import (
     StagedEntity,
     TenantState,
     UploadSession,
+    UsageStaged,
+    UsageUpload,
+    UsageUploadChunk,
     now,
 )
 from app.db.session import audit, get_db
@@ -34,6 +37,7 @@ from app.engine.analysis_index import WEIGHTS
 from app.engine.blast_radius import BlastRadius
 from app.engine.blast_radius import simulate as simulate_reach
 from app.engine.toxic_combos import Finding
+from app.graph import usage
 from app.graph.analysis import (
     UnknownCursor,
     compute_analysis,
@@ -1045,6 +1049,200 @@ def audit_log(db: DB, actor: Admin, limit: int = Query(default=50, ge=1, le=200)
         {"id": e.id, "actor": e.actor, "action": e.action, "detail": e.detail, "created_at": e.created_at}
         for e in events
     ]
+
+
+# ---------------------------------------------------------------------------
+# Usage evidence: CloudTrail export uploads (observed-access store)
+
+
+def usage_response(db: Session, upload: UsageUpload) -> usage.UsageUploadResponse:
+    return usage.UsageUploadResponse(
+        id=upload.id,
+        status=upload.status,
+        source=upload.source,
+        revision=upload.revision,
+        window_start=usage.utc(upload.window_start),
+        window_end=usage.utc(upload.window_end),
+        attested_services=upload.attested_services,
+        progress=usage.progress(db, upload.id) if upload.status == "open" else upload.stats,
+        expires_at=usage.utc(upload.expires_at),
+        max_chunk_bytes=get_settings().max_body_bytes,
+        max_decompressed_bytes=cloudtrail.MAX_DECOMPRESSED_BYTES,
+    )
+
+
+def open_usage_upload(db: Session, actor: Actor, upload_id: str) -> UsageUpload:
+    """Lock the caller's open usage upload; file writes and commit are serialized."""
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(text("SELECT set_config('lock_timeout', '5000ms', true)"))
+    try:
+        upload = db.execute(
+            select(UsageUpload)
+            .where(UsageUpload.id == upload_id, UsageUpload.tenant_id == actor.tenant_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one_or_none()
+    except DBAPIError as exc:
+        if getattr(exc.orig, "sqlstate", None) != "55P03":
+            raise
+        db.rollback()
+        raise HTTPException(
+            409, "Usage upload is busy; retry the file", headers={"Retry-After": "1"}
+        ) from None
+    if upload is None:
+        raise HTTPException(404, "Usage upload not found")
+    if upload.status != "open":
+        raise HTTPException(409, "Usage upload is no longer open")
+    if _utc_aware(upload.expires_at) < now():
+        raise HTTPException(410, "Usage upload expired; start a new upload")
+    return upload
+
+
+@router.post("/usage/uploads", response_model=usage.UsageUploadResponse, status_code=201)
+def create_usage_upload(request: usage.UsageUploadRequest, db: DB, actor: Admin):
+    """Start an upload of CloudTrail export files covering one declared window.
+
+    ``attested_services`` are the services (``s3``, ``sts``, ``glue``...) whose events the
+    customer attests are completely captured in the files for the whole window.
+    """
+    settings = get_settings()
+    timestamp = now()
+    if request.source != usage.SOURCE:
+        raise HTTPException(422, "Unsupported usage evidence source")
+    try:
+        usage.validate_window(request.window_start, request.window_end, timestamp)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    services = sorted(set(request.attested_services))
+    if len(services) > len(SERVICES) or any(service not in SERVICES for service in services):
+        raise HTTPException(422, "Attested services must be supported CloudTrail services")
+    usage.purge_expired(db, actor.tenant_id, timestamp)
+    active = db.scalar(
+        select(func.count())
+        .select_from(UsageUpload)
+        .where(
+            UsageUpload.tenant_id == actor.tenant_id,
+            UsageUpload.status == "open",
+            UsageUpload.expires_at >= timestamp,
+        )
+    )
+    if active >= settings.max_open_uploads:
+        db.rollback()
+        raise HTTPException(
+            429, "Too many open usage uploads; commit one or let it expire", headers={"Retry-After": "60"}
+        )
+    revision = db.scalar(select(TenantState.revision).where(TenantState.tenant_id == actor.tenant_id)) or ""
+    upload = UsageUpload(
+        id=str(uuid4()),
+        tenant_id=actor.tenant_id,
+        actor=actor.subject,
+        source=usage.SOURCE,
+        status="open",
+        revision=revision,
+        window_start=request.window_start,
+        window_end=request.window_end,
+        attested_services=services,
+        stats={},
+        created_at=timestamp,
+        updated_at=timestamp,
+        expires_at=timestamp + timedelta(seconds=settings.upload_session_ttl_seconds),
+    )
+    db.add(upload)
+    db.flush()
+    audit(db, actor, "usage.upload_started", {"upload_id": upload.id, "attested_services": services})
+    db.commit()
+    return usage_response(db, upload)
+
+
+@router.put("/usage/uploads/{upload_id}/files/{chunk}", response_model=usage.UsageUploadResponse)
+def upload_usage_file(
+    upload_id: UploadId,
+    chunk: Annotated[int, Path(ge=0, lt=usage.MAX_CHUNKS)],
+    body: ChunkBody,
+    db: DB,
+    actor: Admin,
+):
+    """Normalize and stage one CloudTrail export file (JSON or gzip). Re-sending a file
+    number replaces it, so a client may retry safely."""
+    upload = open_usage_upload(db, actor, upload_id)
+    try:
+        records = cloudtrail.decode_export(body)
+    except cloudtrail.ExportError as exc:
+        db.rollback()
+        raise HTTPException(422, str(exc)) from None
+    normalized = cloudtrail.normalize_export(
+        records, usage.utc(upload.window_start), usage.utc(upload.window_end)
+    )
+    del records
+    usage.stage_chunk(db, upload, chunk, len(body), normalized)
+    staged = db.scalar(
+        select(func.count()).select_from(UsageStaged).where(UsageStaged.upload_id == upload.id)
+    )
+    if staged > usage.MAX_UPLOAD_PAIRS:
+        db.rollback()
+        raise HTTPException(413, "Usage upload exceeds the observed-access limit")
+    upload.updated_at = now()
+    db.commit()
+    return usage_response(db, upload)
+
+
+@router.post("/usage/uploads/{upload_id}/commit", response_model=usage.UsageCommitResponse)
+def commit_usage_upload(upload_id: UploadId, db: DB, actor: Admin):
+    """Store the upload's observed access and coverage. The worker then recomputes topics and
+    excess privilege for the current revision (usage carries forward to later revisions)."""
+    upload = open_usage_upload(db, actor, upload_id)
+    if not db.scalar(
+        select(func.count()).select_from(UsageUploadChunk).where(UsageUploadChunk.upload_id == upload.id)
+    ):
+        db.rollback()
+        raise HTTPException(422, "Upload at least one CloudTrail export file before committing")
+    stats = usage.commit(db, upload, now())
+    audit(
+        db,
+        actor,
+        "usage.upload_committed",
+        {
+            "upload_id": upload.id,
+            "pairs": stats["pairs"],
+            "records": stats["records"],
+            "unmapped": stats["unmapped"],
+        },
+    )
+    db.commit()
+    return usage.UsageCommitResponse(
+        id=upload.id,
+        status=upload.status,
+        revision=upload.revision,
+        stats=stats,
+        evidence=usage.evidence(db, actor.tenant_id).as_dict(),
+        notice=usage.NOTICE,
+    )
+
+
+@router.get("/usage", response_model=usage.UsageStatusResponse)
+def usage_status(db: DB, actor: Viewer):
+    """Usage evidence of the tenant: coverage per service, window, freshness and recent uploads."""
+    uploads = db.scalars(
+        select(UsageUpload)
+        .where(UsageUpload.tenant_id == actor.tenant_id)
+        .order_by(UsageUpload.created_at.desc())
+        .limit(20)
+    )
+    return usage.UsageStatusResponse(
+        evidence=usage.evidence(db, actor.tenant_id).as_dict(),
+        uploads=[usage.upload_summary(upload) for upload in uploads],
+        notice=usage.NOTICE,
+    )
+
+
+@router.delete("/usage/uploads/{upload_id}", status_code=204)
+def delete_usage_upload(upload_id: UploadId, db: DB, actor: Admin):
+    """Remove an upload and its observed access and coverage."""
+    if not usage.delete_upload(db, actor.tenant_id, upload_id):
+        raise HTTPException(404, "Usage upload not found")
+    audit(db, actor, "usage.upload_deleted", {"upload_id": upload_id})
+    db.commit()
+    return Response(status_code=204)
 
 
 class CloudTrailRequest(BaseModel):

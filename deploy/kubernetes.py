@@ -621,7 +621,7 @@ class Drill:
             "exec", "-i", "deployment/zerograph-backend", "--", "python", "-", mode, data=script
         )
         proof = json.loads(result)
-        assert proof == {"migration_head": "0008", "revision": "kubernetes-proof-v1", "nodes": 2, "edges": 1}
+        assert proof == {"migration_head": "0009", "revision": "kubernetes-proof-v1", "nodes": 2, "edges": 1}
         self.results["persistence_proof"] = proof
 
     def execute(self):
