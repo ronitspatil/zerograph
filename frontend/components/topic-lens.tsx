@@ -275,7 +275,7 @@ export function TopicLens({
             Topics are derived from tags, names and access, not policy
             boundaries
           </span>
-          <span />
+          <span>Revision …</span>
         </div>
       </>
     );
