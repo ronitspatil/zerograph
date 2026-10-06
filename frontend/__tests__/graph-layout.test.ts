@@ -4,12 +4,15 @@ import {
   DETAIL_ZOOM,
   fitViewport,
   labelCandidates,
+  LABEL_CELL,
   labelFontSize,
+  labelPriority,
   MAX_FIT_ZOOM,
   OVERVIEW_ALL_LABELS_MAX_NODES,
   overviewAnchors,
   relationshipHint,
   spacedLabels,
+  spreadCandidates,
   layoutInput,
   startLayout,
   type LayoutInput,
@@ -232,6 +235,8 @@ describe("graph label legibility", () => {
     expect(labelCandidates(graph, anchors, { zoom: 1, focus: null })).toEqual({
       order: ["role", "hub", "leaf"],
       required: new Set(),
+      backed: new Set(),
+      spread: false,
     });
     const focused = labelCandidates(graph, anchors, {
       zoom: 1,
@@ -271,6 +276,141 @@ describe("graph label legibility", () => {
       labelCandidates(roles, overviewAnchors(roles), { zoom: 1, focus: null })
         .order,
     ).toEqual(["role"]);
+  });
+
+  it("spreads overview candidates across the canvas, one per cell, by priority", () => {
+    const priority = new Map([
+      ["core-hub", 40],
+      ["core-2", 30],
+      ["east", 2],
+      ["east-quiet", 1],
+      ["south", 1],
+    ]);
+    const positions = [
+      { id: "core-2", x: 10, y: 10 },
+      { id: "core-hub", x: 20, y: 12 },
+      { id: "east", x: 400, y: 0 },
+      { id: "east-quiet", x: 410, y: 5 },
+      { id: "south", x: 0, y: 300 },
+      { id: "nowhere", x: NaN, y: 0 },
+    ];
+    const cell = { width: 150, height: 56 };
+    expect(spreadCandidates(positions, priority, cell)).toEqual([
+      "core-hub",
+      "east",
+      "south",
+    ]);
+    // Deterministic: input order and panning (same cells) never change the result.
+    expect(spreadCandidates([...positions].reverse(), priority, cell)).toEqual([
+      "core-hub",
+      "east",
+      "south",
+    ]);
+    // Ties break by id.
+    expect(
+      spreadCandidates(
+        [
+          { id: "b", x: 0, y: 0 },
+          { id: "a", x: 1, y: 1 },
+        ],
+        new Map(),
+        cell,
+      ),
+    ).toEqual(["a"]);
+  });
+
+  it("boosts finding paths, exposed agents and sensitive stores over plain leaves", () => {
+    const graph = {
+      revision: "r",
+      nodes: [
+        node("plain-role", "CloudRole"),
+        { ...node("agent"), internet_exposed: true },
+        {
+          ...node("store", "CloudRole"),
+          type: "Database" as const,
+          sensitivity: "restricted" as const,
+        },
+        node("risky", "CloudRole"),
+      ],
+      edges: [],
+      warnings: [],
+    };
+    const priority = labelPriority(graph, new Set(["risky"]));
+    expect(priority.get("plain-role")).toBe(0);
+    expect(priority.get("agent")).toBeGreaterThan(priority.get("store")!);
+    expect(priority.get("store")).toBeGreaterThan(0);
+    expect(priority.get("risky")).toBeGreaterThan(0);
+  });
+
+  it("labels a spread of large overview slices with the top hubs backed, and falls back to anchors", () => {
+    const nodes = [
+      node("hub", "CloudRole"),
+      ...Array.from({ length: OVERVIEW_ALL_LABELS_MAX_NODES }, (_, i) =>
+        node(`n${i}`),
+      ),
+    ];
+    const big = {
+      revision: "r",
+      nodes,
+      edges: nodes.slice(1, 6).map((n) => edge("hub", n.id)),
+      warnings: [],
+    };
+    // Everything piled in one cell except one far satellite.
+    const positions = nodes.map((n, i) => ({
+      id: n.id,
+      x: i === 7 ? 1000 : i % 3,
+      y: 0,
+    }));
+    const zoom = 1;
+    const spread = labelCandidates(big, overviewAnchors(big), {
+      zoom,
+      focus: null,
+      positions,
+    });
+    expect(spread.order).toEqual(["hub", "n6"]);
+    expect(spread.spread).toBe(true);
+    expect(spread.backed).toEqual(new Set(["hub", "n6"]));
+    // Zoomed out, a cell covers more of the model.
+    expect(
+      labelCandidates(big, overviewAnchors(big), {
+        zoom: LABEL_CELL.width / 2000,
+        focus: null,
+        positions,
+      }).order,
+    ).toEqual(["hub"]);
+    // Focus still wins over spread.
+    expect(
+      labelCandidates(big, overviewAnchors(big), {
+        zoom,
+        focus: "n6",
+        neighbors: [],
+        positions,
+      }).order,
+    ).toEqual(["n6"]);
+  });
+
+  it("lets backed labels cover dots and caps optional labels", () => {
+    const boxes = [
+      { id: "hub", x1: 0, y1: 0, x2: 60, y2: 10 },
+      { id: "leaf", x1: 100, y1: 0, x2: 160, y2: 10 },
+      { id: "far", x1: 200, y1: 0, x2: 260, y2: 10 },
+    ];
+    const obstacles = [
+      { id: "dot1", x1: 20, y1: 2, x2: 24, y2: 6 },
+      { id: "dot2", x1: 120, y1: 2, x2: 124, y2: 6 },
+    ];
+    expect([
+      ...spacedLabels(boxes, 400, 100, {
+        obstacles,
+        backed: new Set(["hub"]),
+      }),
+    ]).toEqual(["hub", "far"]);
+    expect([
+      ...spacedLabels(boxes, 400, 100, {
+        required: new Set(["leaf"]),
+        limit: 1,
+      }),
+    ]).toEqual(["leaf", "hub"]);
   });
 
   it("always keeps required labels and keeps optional labels off them and off other nodes", () => {
