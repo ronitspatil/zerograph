@@ -238,3 +238,102 @@ export interface ClusterMembers {
     notice: string;
   };
 }
+
+/** Hub-decomposed flag counts of one topic (granted, structural access). */
+export interface TopicFlagCounts {
+  hub_roles: number;
+  privileged_roles: number;
+  cross_topic_roles: number;
+  restricted_outside_roles: number;
+  via_hub_identities: number;
+  privileged_identities: number;
+  cross_topic_identities: number;
+  restricted_outside_identities: number;
+}
+
+export interface TopicSummary {
+  id: string;
+  name: string;
+  label: string;
+  /** "anchored": named from tags, names and access; "fallback": grouped by type. */
+  kind: "anchored" | "fallback";
+  reason: string;
+  resources: number;
+  resource_weight: number;
+  roles: number;
+  identities: number;
+  cross_grants_out: number;
+  cross_grants_in: number;
+  hub_grants_in: number;
+  overprivileged_roles: number;
+  overprivileged_share: number;
+  cross_weight_share: number;
+  flags: TopicFlagCounts;
+  seeds: Record<string, number>;
+  sensitivity: Record<string, number>;
+  types: Record<string, number>;
+}
+
+export interface TopicMap {
+  revision: string;
+  topics: TopicSummary[];
+  edges: ClusterLink[];
+  summary: Record<string, unknown> & {
+    basis?: string;
+    resources?: number;
+    topics?: number;
+    hub_roles?: number;
+    cross_topic_grants?: number;
+    cross_topic_roles?: number;
+    roles?: number;
+  };
+  warnings: string[];
+  view: {
+    total_topics: number;
+    shown_topics: number;
+    links: number;
+    shown_links: number;
+    edge_limit: number;
+    truncated: boolean;
+    basis: string;
+    notice: string;
+  };
+}
+
+export type TopicMemberKind = "resource" | "role" | "identity";
+
+export interface TopicMember {
+  id: string;
+  name: string;
+  type: string;
+  kind: TopicMemberKind;
+  sensitivity: string;
+  seed: string;
+  reason: string;
+  flags: string[];
+  direct_grants: number;
+  reach_resources: number;
+  reach_weight: number;
+  reach_weight_excl_hubs: number;
+  cross_topic_grants: number;
+  restricted_outside: number;
+  profile: { topic_id: string; share: number; resources: number }[];
+}
+
+export interface TopicDetail {
+  revision: string;
+  topic: TopicSummary;
+  members: TopicMember[];
+  top_roles: TopicMember[];
+  view: {
+    kind: TopicMemberKind;
+    total: number;
+    offset: number;
+    limit: number;
+    shown: number;
+    next_offset: number | null;
+    truncated: boolean;
+    basis: string;
+    notice: string;
+  };
+}

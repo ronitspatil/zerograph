@@ -26,6 +26,9 @@ from app.db.models import (
     RevisionClusterMember,
     RevisionClusterSummary,
     RevisionFinding,
+    RevisionTopic,
+    RevisionTopicMember,
+    RevisionTopicSummary,
     SourceSnapshot,
     TenantState,
     now,
@@ -35,6 +38,7 @@ from app.graph.clusters import compute_clusters, store_clusters, stored_summary
 from app.graph.compact import CompactGraph
 from app.graph.repository import MemoryGraphStore
 from app.graph.schema import GraphSnapshot, Node, NodeType
+from app.graph.topics import compute_topics, store_topics, stored_topic_summary
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("ZG_INGESTION_POSTGRES_URL"), reason="No dedicated ingestion PostgreSQL test URL configured"
@@ -270,8 +274,10 @@ def test_retention_protects_publication_pointer_with_real_tenant_lock(postgres_e
             store_analysis(db, "tenant", f"old-{index}", compute_analysis(exposed()))
             clustered = compute_clusters(CompactGraph.from_snapshot(exposed()), f"old-{index}")
             store_clusters(db, "tenant", f"old-{index}", clustered)
+            store_topics(db, "tenant", f"old-{index}", compute_topics(CompactGraph.from_snapshot(exposed())))
         store_analysis(db, "other", "old-5", compute_analysis(exposed()))
         store_clusters(db, "other", "old-5", compute_clusters(CompactGraph.from_snapshot(exposed()), "old-5"))
+        store_topics(db, "other", "old-5", compute_topics(CompactGraph.from_snapshot(exposed())))
         db.get(TenantState, "tenant").revision = "old-0"
         db.commit()
     monkeypatch.setattr(retention, "session_factory", lambda: factory)
@@ -330,6 +336,11 @@ def test_retention_protects_publication_pointer_with_real_tenant_lock(postgres_e
             assert ("tenant", "old-5") not in scopes
             if model is not RevisionClusterLink:  # One-cluster revisions have no links.
                 assert {("other", "old-5"), ("tenant", "old-0"), ("tenant", state.revision)} <= scopes
+        # Topic rows too.
+        for model in (RevisionTopicSummary, RevisionTopic, RevisionTopicMember):
+            scopes = {(row.tenant_id, row.revision) for row in db.scalars(select(model))}
+            assert ("tenant", "old-5") not in scopes
+            assert {("other", "old-5"), ("tenant", "old-0"), ("tenant", state.revision)} <= scopes
 
 
 def test_retention_missing_or_recent_revisions_are_not_deleted(postgres_environment, monkeypatch):
@@ -797,6 +808,72 @@ def test_publication_copies_cluster_rows_and_warm_starts_from_the_previous_revis
             for r in revisions
         ]
         assert ids[0] == ids[1]
+
+
+def test_publication_copies_topic_rows_on_postgres(postgres_environment):
+    """COPY carries JSON list and dict columns; the stored rows equal the computed ones."""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from qualify_scale import generate_topics
+
+    from app.graph import topics
+
+    factory, graph = postgres_environment
+    snapshot, _, _ = generate_topics(3000, seed=5)
+    job_id = str(uuid4())
+    with factory() as db:
+        db.add(
+            IngestionJob(
+                id=job_id,
+                tenant_id="tenant",
+                actor="a",
+                source="snapshot",
+                payload=snapshot.model_dump(mode="json"),
+            )
+        )
+        db.commit()
+    tasks.process_job(job_id)
+    with factory() as db:
+        revision = db.get(TenantState, "tenant").revision
+        summary = stored_topic_summary(db, "tenant", revision)
+        assert summary is not None and summary.totals["anchored_topics"] == 12
+        computed = topics.compute_topics(CompactGraph.from_snapshot(graph.snapshot("tenant", revision)))
+        expected = sorted(topics.member_rows(computed, "tenant", revision), key=lambda row: row[2])
+        stored = [
+            tuple(getattr(row, column) for column in topics.MEMBER_COLUMNS)
+            for row in db.scalars(
+                select(RevisionTopicMember)
+                .where(RevisionTopicMember.revision == revision)
+                .order_by(RevisionTopicMember.entity_id)
+            )
+        ]
+        assert stored == [tuple(row) for row in expected]
+        rows = db.scalars(select(RevisionTopic).where(RevisionTopic.revision == revision)).all()
+        assert len(rows) == summary.total_topics and all(isinstance(row.stats, dict) for row in rows)
+
+
+def test_worker_topic_backfill_skips_a_publishing_tenant_then_fills_it(postgres_environment, monkeypatch):
+    factory, graph = postgres_environment
+    from app.db.locks import acquire_publication_lock
+    from app.graph import topics
+
+    graph.publish("tenant", "initial", exposed())
+    monkeypatch.setattr(topics, "session_factory", lambda: factory)
+    monkeypatch.setattr(topics, "get_graph_store", lambda: graph)
+    monkeypatch.setattr(topics, "_failed", {})
+    with factory() as publisher:
+        acquire_publication_lock(publisher, "tenant")
+        started = time.perf_counter()
+        assert topics.backfill_missing() == [{"tenant": "tenant", "backfilled": False, "busy": True}]
+        assert time.perf_counter() - started < 2
+        publisher.rollback()
+    with factory() as db:
+        assert stored_topic_summary(db, "tenant", "initial") is None
+    assert [r["backfilled"] for r in topics.backfill_missing()] == [True]
+    with factory() as db:
+        assert stored_topic_summary(db, "tenant", "initial") is not None
 
 
 def test_worker_cluster_backfill_skips_a_publishing_tenant_then_fills_it(postgres_environment, monkeypatch):

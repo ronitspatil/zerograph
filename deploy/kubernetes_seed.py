@@ -29,7 +29,7 @@ def main():
     assert redis.get("kubernetes-qualification:proof") == b"synthetic-v1"
     with session_factory()() as db:
         head = db.scalar(text("SELECT version_num FROM alembic_version"))
-        assert head == "0006"
+        assert head == "0007"
         if sys.argv[1] == "seed":
             assert db.get(TenantState, TENANT) is None
             snapshot = GraphSnapshot(

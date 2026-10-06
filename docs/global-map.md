@@ -2,6 +2,8 @@
 
 The console's **Global map** view shows a whole revision at once, the way an Obsidian-style graph overview does, without sending 100,000 entities to the browser. Each revision is clustered once, at publication, into a bounded hierarchy; the browser loads one level at a time.
 
+A second lens, **Topics**, groups data assets by their tags, names and shared access instead, with granted (structural) privilege counts per topic; see [topics.md](topics.md).
+
 **Clusters are structural, not permissions.** A cluster is a group of entities that are densely connected to each other in the graph. It is not a permission, trust or account boundary, and membership implies no access. The API returns this notice with every response and the console shows it on every level.
 
 ## How clusters are built

@@ -274,3 +274,11 @@ def test_backup_metadata_counts_cluster_and_analysis_rows(environment, monkeypat
     assert after["revision_cluster_summary"] == 1 and after["revision_clusters"] >= 1
     assert after["revision_cluster_members"] == 12  # Every demo entity has a leaf.
     assert {"revision_analysis", "revision_findings", "revision_cluster_links"} <= set(after)
+    # Topic rows travel the same way.
+    from app.graph.topics import backfill as backfill_topics
+
+    assert after["revision_topic_summary"] == after["revision_topic_members"] == 0
+    backfill_topics("tenant-a")
+    after = bridge.metadata()["row_counts"]
+    assert after["revision_topic_summary"] == 1 and after["revision_topics"] >= 1
+    assert after["revision_topic_members"] >= 1 and "revision_topic_links" in after

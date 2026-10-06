@@ -227,3 +227,85 @@ class RevisionClusterMember(Base):
     ordinal: Mapped[int] = mapped_column(Integer)
     degree: Mapped[int] = mapped_column(Integer)
     internal_degree: Mapped[int] = mapped_column(Integer)
+
+
+class RevisionTopicSummary(Base):
+    """Relationship topics of a revision: graph-wide granted (structural) privilege counts."""
+
+    __tablename__ = "revision_topic_summary"
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    revision: Mapped[str] = mapped_column(String(64), primary_key=True)
+    topic_version: Mapped[int] = mapped_column(Integer)
+    total_topics: Mapped[int] = mapped_column(Integer)
+    total_links: Mapped[int] = mapped_column(Integer)
+    totals: Mapped[dict[str, Any]] = mapped_column(JSON)
+    compute_ms: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class RevisionTopic(Base):
+    """One topic (a named group of data assets) with its hub-decomposed privilege counts."""
+
+    __tablename__ = "revision_topics"
+    __table_args__ = (Index("ix_revision_topics_order", "tenant_id", "revision", "ordinal"),)
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    revision: Mapped[str] = mapped_column(String(64), primary_key=True)
+    topic_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    ordinal: Mapped[int] = mapped_column(Integer)
+    name: Mapped[str] = mapped_column(String(128))
+    label: Mapped[str] = mapped_column(String(256))
+    kind: Mapped[str] = mapped_column(String(16))
+    reason: Mapped[str] = mapped_column(String(512))
+    resources: Mapped[int] = mapped_column(Integer)
+    resource_weight: Mapped[int] = mapped_column(Integer)
+    roles: Mapped[int] = mapped_column(Integer)
+    identities: Mapped[int] = mapped_column(Integer)
+    cross_grants_out: Mapped[int] = mapped_column(Integer)
+    cross_grants_in: Mapped[int] = mapped_column(Integer)
+    hub_grants_in: Mapped[int] = mapped_column(Integer)
+    overprivileged_roles: Mapped[int] = mapped_column(Integer)
+    stats: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class RevisionTopicLink(Base):
+    """Cross-topic grants between two topics (undirected, ``source_id < target_id``; hubs excluded)."""
+
+    __tablename__ = "revision_topic_links"
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    revision: Mapped[str] = mapped_column(String(64), primary_key=True)
+    source_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    target_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    weight: Mapped[int] = mapped_column(Integer)
+
+
+class RevisionTopicMember(Base):
+    """A data asset's topic, or a role's or identity's primary topic, profile and flags.
+
+    ``topic_id`` is "" for a role or identity with no granted data. ``ordinal`` ranks
+    members within (topic, kind): assets by sensitivity weight, roles by flags and
+    cross-topic weight, identities by granted reach.
+    """
+
+    __tablename__ = "revision_topic_members"
+    __table_args__ = (
+        Index("ix_revision_topic_members_page", "tenant_id", "revision", "topic_id", "kind", "ordinal"),
+    )
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    revision: Mapped[str] = mapped_column(String(64), primary_key=True)
+    entity_id: Mapped[str] = mapped_column(String(512), primary_key=True)
+    topic_id: Mapped[str] = mapped_column(String(32))
+    kind: Mapped[str] = mapped_column(String(16))
+    ordinal: Mapped[int] = mapped_column(Integer)
+    name: Mapped[str] = mapped_column(String(256))
+    entity_type: Mapped[str] = mapped_column(String(32))
+    sensitivity: Mapped[str] = mapped_column(String(16))
+    seed: Mapped[str] = mapped_column(String(16))
+    reason: Mapped[str] = mapped_column(String(256))
+    flags: Mapped[int] = mapped_column(Integer)
+    direct_grants: Mapped[int] = mapped_column(Integer)
+    reach_resources: Mapped[int] = mapped_column(Integer)
+    reach_weight: Mapped[int] = mapped_column(Integer)
+    reach_weight_excl_hubs: Mapped[int] = mapped_column(Integer)
+    cross_topic_grants: Mapped[int] = mapped_column(Integer)
+    restricted_outside: Mapped[int] = mapped_column(Integer)
+    profile: Mapped[list[Any]] = mapped_column(JSON)

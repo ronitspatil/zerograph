@@ -64,6 +64,15 @@ from app.graph.exploration import (
 from app.graph.repository import MAX_VISIBLE_EDGES, MAX_VISIBLE_MEMBERS, GraphStore, get_graph_store
 from app.graph.role_map import RoleMapResponse, RoleMapView
 from app.graph.schema import DATA_TYPES, IDENTITY_TYPES, GraphSnapshot, Node, NodeType
+from app.graph.topics import (
+    MAX_PAGE,
+    TopicDetailResponse,
+    TopicMapResponse,
+    TopicNotFound,
+    stored_topic_summary,
+    topic_detail,
+    topic_map,
+)
 from app.remediation.gitops_sync import GitOpsClient, GitOpsConflict, GitOpsError
 from app.remediation.policy_optimizer import Optimization, UsageEvidence, optimize, terraform_policy
 
@@ -332,6 +341,72 @@ def graph_cluster_members(
         raise HTTPException(422, str(error)) from None
     except RevisionUnavailable:
         raise _unavailable() from None
+
+
+TOPIC_ID = r"^t[0-9a-f]{15}$"
+TOPICS_UNAVAILABLE = (
+    "Topics are not computed for this revision yet; the worker builds them within a few minutes"
+)
+
+
+def _topics_missing() -> HTTPException:
+    return HTTPException(404, TOPICS_UNAVAILABLE, headers={"Retry-After": CLUSTERS_RETRY_AFTER})
+
+
+def _topic_summary(db: Session, tenant: str, revision: str):
+    if not revision:
+        raise _topics_missing()
+    summary = stored_topic_summary(db, tenant, revision)
+    if summary is None:
+        raise _topics_missing()
+    return summary
+
+
+@router.get("/graph/topics", response_model=TopicMapResponse)
+def graph_topics(
+    db: DB,
+    graph: Graph,
+    actor: Viewer,
+    edge_limit: Annotated[int, Query(ge=1, le=2000)] = 1000,
+    revision: str | None = None,
+):
+    """Relationship topics of the pinned revision (at most 300) and their cross-topic grant counts.
+
+    Topics are derived from resource tags, names and access; they are not policy boundaries.
+    Counts describe granted (structural) access, not needed access.
+    """
+    current = expected_revision(db, actor.tenant_id, revision)
+    summary = _topic_summary(db, actor.tenant_id, current)
+    try:
+        warnings = graph.cluster_members(actor.tenant_id, current, [], 1).warnings
+    except RevisionUnavailable:
+        raise _unavailable() from None
+    return topic_map(db, summary, warnings, edge_limit)
+
+
+@router.get("/graph/topics/{topic_id}", response_model=TopicDetailResponse)
+def graph_topic(
+    db: DB,
+    graph: Graph,
+    actor: Viewer,
+    topic_id: Annotated[str, Path(pattern=TOPIC_ID)],
+    kind: Literal["resource", "role", "identity"] = "resource",
+    offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
+    limit: Annotated[int, Query(ge=1, le=MAX_PAGE)] = 50,
+    revision: str | None = None,
+):
+    """One topic with a page of its data assets, roles or identities (profiles and flags) and
+    its most over-privileged roles. Granted (structural) access, not needed access."""
+    current = expected_revision(db, actor.tenant_id, revision)
+    _topic_summary(db, actor.tenant_id, current)
+    try:
+        graph.cluster_members(actor.tenant_id, current, [], 1)
+    except RevisionUnavailable:
+        raise _unavailable() from None
+    try:
+        return topic_detail(db, actor.tenant_id, current, topic_id, kind, offset, limit)
+    except TopicNotFound:
+        raise HTTPException(404, "Topic not found in this revision") from None
 
 
 @router.get("/graph/search", response_model=SearchResponse)

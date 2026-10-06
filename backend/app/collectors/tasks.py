@@ -21,6 +21,8 @@ from app.graph.clusters import backfill_missing, compute_clusters, load_previous
 from app.graph.demo import demo_snapshot
 from app.graph.repository import get_graph_store
 from app.graph.schema import GraphSnapshot
+from app.graph.topics import backfill_missing as backfill_missing_topics
+from app.graph.topics import compute_topics, store_topics
 
 settings = get_settings()
 celery_app = Celery("zerograph", broker=settings.redis_url, backend=settings.redis_url)
@@ -255,9 +257,13 @@ def _publish_job(job_id: str, token: str, tenant: str, collected: GraphSnapshot 
         store_analysis(db, tenant, revision, published.analysis)
         # Global-map clusters, warm-started from and ID-matched to the current revision.
         clusters = compute_clusters(published.graph, revision, load_previous(db, tenant, current))
-        published.graph = None
         store_clusters(db, tenant, revision, clusters)
         del clusters
+        # Relationship topics and granted (structural) privilege analysis, same transaction.
+        topics = compute_topics(published.graph)
+        published.graph = None
+        store_topics(db, tenant, revision, topics)
+        del topics
         if previous and previous != set_id:
             staging.delete_set(db, previous)
         # Short pointer lock: waits only for readers' shared pins, then commits.
@@ -389,6 +395,12 @@ def backfill_clusters() -> int:
 
 
 @celery_app.task
+def backfill_topics() -> int:
+    """Relationship topics for current revisions that lack them (pre-0007 or an older version)."""
+    return sum(1 for result in backfill_missing_topics() if result.get("backfilled"))
+
+
+@celery_app.task
 def backfill_samples() -> int:
     """Explore samples for current revisions stored with an older SAMPLE_VERSION (pre-0006 or a bump)."""
     return sum(1 for result in backfill_stale_samples() if result.get("backfilled"))
@@ -398,4 +410,5 @@ celery_app.conf.beat_schedule = {
     "recover-queued-jobs": {"task": "app.collectors.tasks.dispatch_pending", "schedule": 30.0},
     "backfill-global-map": {"task": "app.collectors.tasks.backfill_clusters", "schedule": 60.0},
     "backfill-explore-sample": {"task": "app.collectors.tasks.backfill_samples", "schedule": 60.0},
+    "backfill-topics": {"task": "app.collectors.tasks.backfill_topics", "schedule": 60.0},
 }
