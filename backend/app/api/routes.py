@@ -61,6 +61,7 @@ from app.graph.exploration import (
     RootNotFound,
     SearchResponse,
 )
+from app.graph.policies import PrincipalPoliciesResponse, principal_policies
 from app.graph.repository import MAX_VISIBLE_EDGES, MAX_VISIBLE_MEMBERS, GraphStore, get_graph_store
 from app.graph.role_map import RoleMapResponse, RoleMapView
 from app.graph.schema import DATA_TYPES, IDENTITY_TYPES, GraphSnapshot, Node, NodeType
@@ -407,6 +408,19 @@ def graph_topic(
         return topic_detail(db, actor.tenant_id, current, topic_id, kind, offset, limit)
     except TopicNotFound:
         raise HTTPException(404, "Topic not found in this revision") from None
+
+
+@router.get("/graph/policies", response_model=PrincipalPoliciesResponse)
+def graph_policies(
+    db: DB,
+    actor: Analyst,
+    principal: Annotated[str, Query(min_length=1, max_length=512)],
+    revision: str | None = None,
+):
+    """Policy documents attached to one principal of the pinned revision (inline, managed,
+    boundary, trust and group-inherited), each with its content hash."""
+    current = expected_revision(db, actor.tenant_id, revision)
+    return principal_policies(db, actor.tenant_id, current, principal)
 
 
 @router.get("/graph/search", response_model=SearchResponse)
@@ -757,7 +771,7 @@ def upload_chunk(
     db: DB,
     actor: Admin,
 ):
-    """Stage one NDJSON chunk (``{"node":…}``/``{"edge":…}``/``{"warning":…}`` lines).
+    """Stage one NDJSON chunk (``{"node":…}``/``{"edge":…}``/``{"policy":…}``/``{"warning":…}`` lines).
 
     Re-sending a chunk number replaces that chunk, so a client may retry safely.
     """
@@ -779,9 +793,10 @@ def upload_chunk(
         totals["node"] > settings.max_nodes
         or totals["edge"] > settings.max_edges
         or totals["warning"] > staging.MAX_WARNINGS
+        or totals["policy"] > staging.MAX_POLICIES
     ):
         db.rollback()
-        raise HTTPException(413, "Upload exceeds the configured node, edge or warning limit")
+        raise HTTPException(413, "Upload exceeds the configured node, edge, policy or warning limit")
     upload.node_count, upload.edge_count, upload.warning_count = (
         totals["node"],
         totals["edge"],
@@ -799,7 +814,7 @@ def commit_upload(upload_id: UploadId, db: DB, actor: Admin):
     upload = open_upload(db, actor, upload_id)
     if staging.missing_endpoints(db, upload.id):
         db.rollback()
-        raise HTTPException(422, "Every edge endpoint must exist in this snapshot")
+        raise HTTPException(422, "Every edge endpoint and policy principal must exist in this snapshot")
     upload.status = "committed"
     upload.updated_at = now()
     job_id = str(uuid4())
@@ -860,12 +875,25 @@ class PreviewResponse(BaseModel):
     optimization: Optimization
 
 
+BREAK_GLASS = re.compile(r"break[-_ ]?glass|emergency", re.IGNORECASE)
+
+
+def manual_only(identity: Node) -> bool:
+    """Human identities marked break-glass or emergency (by name or tag) are never trimmed
+    automatically: their access is reserved for rare events a usage window cannot show."""
+    return identity.type == NodeType.HUMAN and any(
+        BREAK_GLASS.search(value) for value in (identity.name, identity.id, *identity.tags)
+    )
+
+
 @router.post("/remediations/preview", response_model=PreviewResponse)
 def preview(request: PreviewRequest, db: DB, graph: Graph, actor: Analyst):
     revision = pin_revision(db, actor.tenant_id)
     identity = graph.node(actor.tenant_id, revision, request.identity_id)
     if identity is None or identity.type not in IDENTITY_TYPES:
         raise HTTPException(404, "Identity not found")
+    if manual_only(identity):
+        raise HTTPException(409, "Break-glass or emergency human identities require manual review")
     try:
         result = optimize(request.policy, request.usage)
     except ValueError as exc:

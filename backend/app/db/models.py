@@ -309,3 +309,30 @@ class RevisionTopicMember(Base):
     cross_topic_grants: Mapped[int] = mapped_column(Integer)
     restricted_outside: Mapped[int] = mapped_column(Integer)
     profile: Mapped[list[Any]] = mapped_column(JSON)
+
+
+class RevisionPolicyDocument(Base):
+    """A policy document of a revision, stored once per content hash (canonical JSON SHA-256)."""
+
+    __tablename__ = "revision_policy_documents"
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    revision: Mapped[str] = mapped_column(String(64), primary_key=True)
+    digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    document: Mapped[str] = mapped_column(Text)
+
+
+class RevisionPolicy(Base):
+    """A policy document attached to a principal of a revision (inline, managed, boundary,
+    trust or inherited from a group), referencing the document by digest."""
+
+    __tablename__ = "revision_policies"
+    __table_args__ = (Index("ix_revision_policies_principal", "tenant_id", "revision", "principal_id"),)
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    revision: Mapped[str] = mapped_column(String(64), primary_key=True)
+    attachment_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    principal_id: Mapped[str] = mapped_column(String(512))
+    kind: Mapped[str] = mapped_column(String(16))
+    name: Mapped[str] = mapped_column(String(256))
+    arn: Mapped[str] = mapped_column(Text)
+    digest: Mapped[str] = mapped_column(String(64))

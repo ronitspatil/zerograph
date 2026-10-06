@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     aws_role_arn: str = ""
     aws_external_id: SecretStr = SecretStr("")
     aws_region: str = "us-east-1"
+    # Optional IAM Access Advisor last-accessed hints (needs the Access Advisor permissions).
+    aws_access_advisor: bool = False
     git_provider: Literal["github", "gitlab"] = "github"
     git_repository: str = ""
     git_tenant_id: str = ""

@@ -28,7 +28,7 @@ from app.engine.toxic_combos import Finding, detect
 from app.graph.exploration import RevisionTotals
 from app.graph.repository import get_graph_store
 from app.graph.sample import IMPORTANT_FINDINGS, SAMPLE_VERSION, select_sample, snapshot_sample
-from app.graph.schema import DATA_TYPES, IDENTITY_TYPES, TRAVERSAL_TYPES, GraphSnapshot, NodeType
+from app.graph.schema import DATA_TYPES, NHI_TYPES, TRAVERSAL_TYPES, GraphSnapshot, NodeType
 from app.graph.sweep import SWEEP_TENANTS, run_sweep
 
 # Bump when the overview, finding or totals logic changes: rows with another
@@ -53,7 +53,7 @@ def compute_analysis(snapshot: GraphSnapshot) -> ComputedAnalysis:
     """Whole-revision analysis with the exact semantics of the former request-time overview."""
     prepared = AnalysisIndex.build(snapshot, include_uncertain=True)
     findings = detect(snapshot, index=prepared)
-    identities = [n for n in snapshot.nodes if n.type in IDENTITY_TYPES]
+    identities = [n for n in snapshot.nodes if n.type in NHI_TYPES]
     # Identities whose 5-hop reach (uncertain edges included) scores as high blast radius.
     high_blast = sorted(
         n.id for n in identities if prepared.score(n.id, prepared.paths(n.id))[0] >= HIGH_BLAST_THRESHOLD

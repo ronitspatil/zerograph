@@ -73,7 +73,7 @@ def collect(source: str, payload: dict, tenant: str) -> GraphSnapshot | StagedUp
             aws_session_token=credentials["SessionToken"],
             region_name=settings.aws_region,
         )
-        return AWSCollector(session).collect()
+        return AWSCollector(session, access_advisor=settings.aws_access_advisor).collect()
     raise ValueError("Unsupported ingestion source")
 
 

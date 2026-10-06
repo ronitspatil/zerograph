@@ -20,10 +20,10 @@ from app.engine.analysis_index import WEIGHTS
 from app.engine.toxic_combos import Finding
 from app.graph.exploration import RevisionTotals
 from app.graph.sample import select_sample
-from app.graph.schema import DATA_TYPES, IDENTITY_TYPES, TRAVERSAL_TYPES, EdgeType, GraphSnapshot, NodeType
+from app.graph.schema import DATA_TYPES, NHI_TYPES, TRAVERSAL_TYPES, EdgeType, GraphSnapshot, NodeType
 
 DATA = frozenset(kind.value for kind in DATA_TYPES)
-IDENTITY = frozenset(kind.value for kind in IDENTITY_TYPES)
+IDENTITY = frozenset(kind.value for kind in NHI_TYPES)
 TRAVERSAL = frozenset(kind.value for kind in TRAVERSAL_TYPES)
 WEIGHT = {level.value: weight for level, weight in WEIGHTS.items()}
 SENSITIVE = frozenset({"confidential", "restricted"})

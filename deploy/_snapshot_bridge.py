@@ -26,6 +26,8 @@ from app.db.models import (
     RevisionClusterMember,
     RevisionClusterSummary,
     RevisionFinding,
+    RevisionPolicy,
+    RevisionPolicyDocument,
     RevisionTopic,
     RevisionTopicLink,
     RevisionTopicMember,
@@ -167,6 +169,8 @@ def metadata():
                     RevisionTopic,
                     RevisionTopicLink,
                     RevisionTopicMember,
+                    RevisionPolicyDocument,
+                    RevisionPolicy,
                 )
             },
         }

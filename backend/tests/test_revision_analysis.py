@@ -25,7 +25,7 @@ from app.graph.analysis import (
 from app.graph.demo import demo_snapshot
 from app.graph.exploration import RevisionTotals
 from app.graph.repository import CypherGraphStore
-from app.graph.schema import IDENTITY_TYPES, Edge, EdgeType, GraphSnapshot, Node, NodeType, Sensitivity
+from app.graph.schema import NHI_TYPES, Edge, EdgeType, GraphSnapshot, Node, NodeType, Sensitivity
 from app.main import create_app
 
 
@@ -33,7 +33,7 @@ def reference_overview(snapshot: GraphSnapshot) -> dict:
     """The request-time overview implementation this change replaced, kept as a golden reference."""
     prepared = AnalysisIndex.build(snapshot, include_uncertain=True)
     findings = detect(snapshot, index=prepared)
-    identities = [n for n in snapshot.nodes if n.type in IDENTITY_TYPES]
+    identities = [n for n in snapshot.nodes if n.type in NHI_TYPES]
     high_blast = sum(prepared.score(n.id, prepared.paths(n.id))[0] >= 70 for n in identities)
     return {
         "total_nhis": len(identities),
