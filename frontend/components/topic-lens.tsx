@@ -245,10 +245,39 @@ export function TopicLens({
       </div>
     );
   if (!map)
+    // Same frame as the loaded lens (status bar, canvas, list, panel, footer): no shift.
     return (
-      <div className="canvas-loading" role="status">
-        Loading topics…
-      </div>
+      <>
+        <div
+          className={`exploration-status global-map-status${statusSizer ? " stacked" : ""}`}
+        >
+          <div className="status-layer">
+            <span>Loading topics…</span>
+          </div>
+          {statusSizer && (
+            <div className="status-layer sizer" aria-hidden="true">
+              {statusSizer}
+            </div>
+          )}
+        </div>
+        <div className="graph-body">
+          <div className="graph-main">
+            <div className="canvas-loading" role="status">
+              <LoaderCircle className="spin" />
+              Loading topics…
+            </div>
+            <div className="identity-list" aria-hidden="true" />
+          </div>
+          <aside className="node-sidebar global-map-sidebar topic-sidebar" />
+        </div>
+        <div className="graph-footer">
+          <span>
+            Topics are derived from tags, names and access, not policy
+            boundaries
+          </span>
+          <span />
+        </div>
+      </>
     );
   const summary = map.summary;
   const focus = selected ? (byId.get(selected) ?? null) : null;
