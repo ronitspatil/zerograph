@@ -36,6 +36,31 @@ describe("bounded role community geometry", () => {
   }
 });
 
+describe("slices without relationships", () => {
+  it("pack into one compact disc, banded by entity type, not a sparse grid", () => {
+    const nodes = Array.from({ length: 250 }, (_, i) => `n${i}`);
+    const attributes = Object.fromEntries(
+      nodes.map((id, i) => [
+        id,
+        { type: i % 2 ? "CloudRole" : "AIAgent", account: "a" },
+      ]),
+    );
+    const positions = computePositions({ nodes, edges: [], attributes });
+    expect(new Set(positions.map((p) => p.id)).size).toBe(250);
+    const distance = (p: { x: number; y: number }) => Math.hypot(p.x, p.y);
+    expect(Math.max(...positions.map(distance))).toBeLessThan(450);
+    // Agents (ranked first) fill the centre, roles the outer band.
+    const mean = (type: string) => {
+      const ring = positions.filter((p) => attributes[p.id].type === type);
+      return ring.reduce((sum, p) => sum + distance(p), 0) / ring.length;
+    };
+    expect(mean("AIAgent")).toBeLessThan(mean("CloudRole"));
+    expect(
+      computePositions({ nodes: [...nodes].reverse(), edges: [], attributes }),
+    ).toEqual(positions);
+  });
+});
+
 describe("topology-derived role communities", () => {
   const input = {
     nodes: ["r1", "r2", "worker", "tool", "data", "foreign"],

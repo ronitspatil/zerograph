@@ -316,3 +316,22 @@ export function fitViewport(
     },
   };
 }
+
+/** Explains a visible slice with entities but no relationships among them; else null. */
+export function relationshipHint(
+  graph: Pick<GraphData, "nodes" | "edges"> & {
+    view?: { mode: "sample" | "neighborhood" | "roles" };
+  },
+): string | null {
+  const count = graph.nodes.length;
+  if (!count || graph.edges.length) return null;
+  if (graph.view?.mode === "roles")
+    return count === 1
+      ? "This role has no direct role links in this view."
+      : `These ${count} roles have no direct role links between them in this view.`;
+  const subject =
+    count === 1
+      ? "This entity has no relationships in this view."
+      : `These ${count} entities have no relationships between them in this view.`;
+  return `${subject} Search for an entity or open a neighborhood to see its connections.`;
+}

@@ -61,6 +61,8 @@ export function partitionCommunities(data: LayoutInput): string[][] {
     .map(([, nodes]) => nodes);
 }
 
+const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
+
 function noise(seed: string): number {
   let hash = 2166136261;
   for (const char of seed)
@@ -77,7 +79,6 @@ export function computePositions(data: LayoutInput): Position[] {
     data.edges.length > EXPLORE_LIMITS.edges
   )
     return [];
-  const groups = partitionCommunities(data);
   const order = [
     "AIAgent",
     "MCPServer",
@@ -89,6 +90,27 @@ export function computePositions(data: LayoutInput): Position[] {
     "VectorStore",
     "DataCategory",
   ];
+  const rank = (id: string) => {
+    const r = order.indexOf(data.attributes?.[id]?.type || "");
+    return r < 0 ? order.length : r;
+  };
+  const positions: Position[] = [];
+  if (!data.edges.length) {
+    // No relationships to arrange by: one compact disc, entity types in bands,
+    // rather than a sparse grid of singleton communities that reads as broken.
+    [...data.nodes]
+      .sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
+      .forEach((id, i) => {
+        const r = 28 * Math.sqrt(i + 0.5);
+        positions.push({
+          id,
+          x: r * Math.cos(i * GOLDEN_ANGLE),
+          y: r * Math.sin(i * GOLDEN_ANGLE),
+        });
+      });
+    return positions;
+  }
+  const groups = partitionCommunities(data);
   const radius = (count: number) =>
     count <= 1 ? 0 : 42 + 26 * Math.floor((count - 2) / 16);
   const cell = Math.max(
@@ -96,20 +118,13 @@ export function computePositions(data: LayoutInput): Position[] {
     ...groups.map((group) => radius(group.length) * 2 + 100),
   );
   const columns = Math.max(1, Math.ceil(Math.sqrt(groups.length * 1.45)));
-  const positions: Position[] = [];
   groups.forEach(([anchor, ...neighbors], index) => {
     const cx = (index % columns) * cell + noise(`${anchor}:x`) * cell * 0.065,
       cy =
         Math.floor(index / columns) * cell +
         noise(`${anchor}:y`) * cell * 0.065;
     positions.push({ id: anchor, x: cx, y: cy });
-    neighbors.sort((a, b) => {
-      const rank = (id: string) => {
-        const r = order.indexOf(data.attributes?.[id]?.type || "");
-        return r < 0 ? order.length : r;
-      };
-      return rank(a) - rank(b) || a.localeCompare(b);
-    });
+    neighbors.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
     neighbors.forEach((id, i) => {
       const ring = Math.floor(i / 16),
         offset = i % 16,
@@ -135,8 +150,6 @@ export function computePositions(data: LayoutInput): Position[] {
   );
   return positions.map((p) => ({ id: p.id, x: p.x * scale, y: p.y * scale }));
 }
-
-const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 
 /**
  * In-place expansion layout for up to 5,000 members: a filled disc of radius

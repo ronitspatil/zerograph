@@ -10,6 +10,7 @@ import {
   layoutInput,
   startLayout,
   overviewAnchors,
+  relationshipHint,
   spacedLabels,
 } from "@/lib/graph-layout";
 import { formatCount } from "@/lib/format";
@@ -402,6 +403,7 @@ export function GraphCanvas({
         Reset to a bounded view.
       </div>
     );
+  const hint = relationshipHint(graph);
   return (
     <div className="canvas-wrap">
       <div
@@ -410,6 +412,11 @@ export function GraphCanvas({
         role="img"
         aria-label={`Identity and data graph with ${formatCount(graph.nodes.length)} nodes. Use the identity list to select a node with the keyboard.`}
       />
+      {hint && (
+        <p className="graph-hint" role="note">
+          {hint}
+        </p>
+      )}
       <div className="graph-controls">
         <button aria-label="Zoom in" onClick={() => zoom(1.2)}>
           <Plus size={14} />
