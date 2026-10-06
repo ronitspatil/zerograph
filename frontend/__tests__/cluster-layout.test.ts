@@ -15,6 +15,7 @@ import {
   topFacets,
 } from "@/lib/cluster-layout";
 import { spacedLabels } from "@/lib/graph-layout";
+import { overlayBoxes, OVERLAY_GAP } from "@/lib/overlay-obstacles";
 import type { ClusterSummary } from "@/lib/types";
 
 const cluster = (id: string, size: number): ClusterSummary => ({
@@ -205,6 +206,78 @@ describe("cluster layout", () => {
         "small",
       ),
     ).toBe("below");
+  });
+
+  it("never places a label under the legend, zoom controls or status chip", () => {
+    const candidate = (id: string, x: number, y: number, d: number) => ({
+      id,
+      below: clusterLabelBox(id, 80, x, y, d, "below"),
+      above: clusterLabelBox(id, 80, x, y, d, "above"),
+    });
+    // Canvas at (100, 50) in the page, 400 x 300. Legend entry along the bottom
+    // left, zoom controls bottom right, status chip top left; one hidden overlay.
+    const blocked = overlayBoxes({ left: 100, top: 50 }, [
+      { left: 116, top: 316, right: 260, bottom: 334 },
+      { left: 468, top: 244, right: 500, bottom: 334 },
+      { left: 112, top: 62, right: 330, bottom: 86 },
+      { left: 0, top: 0, right: 0, bottom: 0 },
+    ]);
+    expect(blocked).toHaveLength(3);
+    expect(blocked[0]).toEqual({
+      id: "overlay:0",
+      x1: 16 - OVERLAY_GAP,
+      y1: 266 - OVERLAY_GAP,
+      x2: 160 + OVERLAY_GAP,
+      y2: 284 + OVERLAY_GAP,
+    });
+    const rank = new Map([
+      ["legend", 0],
+      ["chip", 1],
+      ["controls", 2],
+      ["free", 3],
+    ]);
+    // "legend" would label onto the legend text below it: it moves above its circle.
+    // "chip" sits under the chip on both sides and is dropped, even when hovered.
+    // "controls" sits beside the zoom controls; "free" is clear of every overlay.
+    const candidates = [
+      candidate("legend", 80, 250, 20),
+      candidate("chip", 120, 22, 4),
+      candidate("controls", 340, 230, 20),
+      candidate("free", 220, 150, 20),
+    ];
+    const placed = placeLabels(candidates, 400, 300, { rank, blocked });
+    expect(placed.get("legend")).toBe("above");
+    expect(placed.has("chip")).toBe(false);
+    expect(placed.has("controls")).toBe(false);
+    expect(placed.get("free")).toBe("below");
+    const required = placeLabels(candidates, 400, 300, {
+      rank,
+      blocked,
+      required: new Set(["legend", "chip"]),
+    });
+    expect(required.get("legend")).toBe("above");
+    expect(required.has("chip")).toBe(false);
+    // Without overlays the same labels sit below their circles as before.
+    const open = placeLabels(candidates, 400, 300, { rank });
+    expect(open.get("legend")).toBe("below");
+    expect(open.get("chip")).toBe("below");
+    expect(open.get("controls")).toBe("below");
+    // Every placed label is clear of every overlay.
+    for (const [id, side] of placed) {
+      const box = candidates.find((c) => c.id === id)![side];
+      for (const o of blocked)
+        expect(
+          box.x2 <= o.x1 || box.x1 >= o.x2 || box.y2 <= o.y1 || box.y1 >= o.y2,
+        ).toBe(true);
+    }
+    // The role map drops labels under overlays too, required or not.
+    const labels = [
+      { id: "a", x1: 20, y1: 268, x2: 90, y2: 282 },
+      { id: "b", x1: 200, y1: 100, x2: 260, y2: 114 },
+    ];
+    expect([
+      ...spacedLabels(labels, 400, 300, { blocked, required: new Set(["a"]) }),
+    ]).toEqual(["b"]);
   });
 
   it("bounds circle size by canvas and cluster count", () => {

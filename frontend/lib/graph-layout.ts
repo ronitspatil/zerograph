@@ -221,21 +221,39 @@ function overlaps(a: LabelBounds, b: LabelBounds, gap: number): boolean {
   );
 }
 
+/** True when a label box touches any screen overlay (legend, controls, status chips). */
+export function underOverlay(
+  box: LabelBounds,
+  blocked: LabelBounds[],
+): boolean {
+  return blocked.some(
+    (overlay) => validBox(overlay) && overlaps(box, overlay, 0),
+  );
+}
+
 /**
  * Greedy visible-priority labels using actual rendered bounds, with breathing room.
- * Required labels are always kept; optional labels must fit inside the viewport,
- * clear every kept label, and not cover another node (`obstacles`, keyed by node id).
+ * Required labels are kept unless they would sit under a screen overlay
+ * (`blocked`: legend, zoom controls); optional labels must also fit inside the
+ * viewport, clear every kept label, and not cover another node (`obstacles`,
+ * keyed by node id).
  */
 export function spacedLabels(
   labels: LabelBounds[],
   width: number,
   height: number,
-  options: { required?: Set<string>; obstacles?: LabelBounds[] } = {},
+  options: {
+    required?: Set<string>;
+    obstacles?: LabelBounds[];
+    blocked?: LabelBounds[];
+  } = {},
 ): Set<string> {
   const required = options.required ?? new Set<string>();
   const obstacles = (options.obstacles ?? []).filter(validBox);
+  const blocked = options.blocked ?? [];
   const chosen: LabelBounds[] = labels.filter(
-    (box) => required.has(box.id) && validBox(box),
+    (box) =>
+      required.has(box.id) && validBox(box) && !underOverlay(box, blocked),
   );
   for (const box of labels) {
     if (
@@ -247,6 +265,7 @@ export function spacedLabels(
       box.y2 > height
     )
       continue;
+    if (underOverlay(box, blocked)) continue;
     if (chosen.some((other) => overlaps(box, other, 6))) continue;
     if (obstacles.some((node) => node.id !== box.id && overlaps(box, node, 0)))
       continue;

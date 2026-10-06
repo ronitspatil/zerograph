@@ -12,6 +12,8 @@ import {
   overviewAnchors,
   spacedLabels,
 } from "@/lib/graph-layout";
+import { formatCount } from "@/lib/format";
+import { overlayObstacles } from "@/lib/overlay-obstacles";
 import { createGraph, WEBGL_MIN_NODES } from "@/lib/renderer";
 import type { GraphData, GraphNode, Simulation } from "@/lib/types";
 
@@ -49,6 +51,7 @@ export function GraphCanvas({
   callback.current = onSelect;
   useEffect(() => {
     if (!container.current) return;
+    const element = container.current;
     const input = layoutInput(graph);
     if (!input) return;
     const positions = circlePositions(input.nodes);
@@ -291,7 +294,8 @@ export function GraphCanvas({
         labels,
         instance.width(),
         instance.height(),
-        { required, obstacles },
+        // Never under the legend or zoom controls.
+        { required, obstacles, blocked: overlayObstacles(element) },
       );
       instance.batch(() => {
         for (const id of order)
@@ -404,7 +408,7 @@ export function GraphCanvas({
         ref={container}
         className="graph-canvas"
         role="img"
-        aria-label={`Identity and data graph with ${graph.nodes.length} nodes. Use the identity list to select a node with the keyboard.`}
+        aria-label={`Identity and data graph with ${formatCount(graph.nodes.length)} nodes. Use the identity list to select a node with the keyboard.`}
       />
       <div className="graph-controls">
         <button aria-label="Zoom in" onClick={() => zoom(1.2)}>

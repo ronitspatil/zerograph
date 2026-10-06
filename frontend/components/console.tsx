@@ -19,6 +19,7 @@ import {
   X,
 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
+import { formatCount } from "@/lib/format";
 import type {
   Actor,
   AuditEvent,
@@ -591,7 +592,7 @@ export function Console({ demo }: { demo: boolean }) {
               <n.icon size={16} aria-hidden="true" />
               <span className="nav-text">{n.label}</span>
               {n.id === "remediation" && records.length > 0 && (
-                <span className="nav-count">{records.length}</span>
+                <span className="nav-count">{formatCount(records.length)}</span>
               )}
             </button>
           ))}
@@ -694,7 +695,7 @@ export function Console({ demo }: { demo: boolean }) {
                       key={m.label}
                     >
                       <span>{m.label}</span>
-                      <strong>{overview ? (m.value ?? 0) : "—"}</strong>
+                      <strong>{overview ? formatCount(m.value) : "—"}</strong>
                       <small>{m.caption}</small>
                     </div>
                   ))}
@@ -774,27 +775,31 @@ export function Console({ demo }: { demo: boolean }) {
                         <span className="muted">
                           {roles ? (
                             <>
-                              {filtered.nodes.length} / {roles.view.total_roles}{" "}
-                              roles · {filtered.edges.length} /{" "}
-                              {roles.view.total_role_edges} direct role links
-                              visible
+                              {formatCount(filtered.nodes.length)} /{" "}
+                              {formatCount(roles.view.total_roles)} roles ·{" "}
+                              {formatCount(filtered.edges.length)} /{" "}
+                              {formatCount(roles.view.total_role_edges)} direct
+                              role links visible
                               {roles.view.role_map_truncated ||
                               filtered.nodes.length < roles.nodes.length ||
                               filtered.edges.length < roles.edges.length
                                 ? " · Partial role map"
                                 : " · Complete role map"}
                               . Other identities and data assets excluded.
-                              Workspace: {roles.view.total_nodes} nodes ·{" "}
-                              {roles.view.total_edges} relationships
+                              Workspace: {formatCount(roles.view.total_nodes)}{" "}
+                              nodes · {formatCount(roles.view.total_edges)}{" "}
+                              relationships
                               {roles.view.truncated
                                 ? " · Partial workspace"
                                 : " · Complete workspace"}
                             </>
                           ) : (
                             <>
-                              {filtered.nodes.length} / {graph.view.total_nodes}{" "}
-                              nodes · {filtered.edges.length} /{" "}
-                              {graph.view.total_edges} relationships visible
+                              {formatCount(filtered.nodes.length)} /{" "}
+                              {formatCount(graph.view.total_nodes)} nodes ·{" "}
+                              {formatCount(filtered.edges.length)} /{" "}
+                              {formatCount(graph.view.total_edges)}{" "}
+                              relationships visible
                               {graph.view.truncated ||
                               filtered.nodes.length < graph.nodes.length ||
                               filtered.edges.length < graph.edges.length
@@ -1058,13 +1063,17 @@ export function Console({ demo }: { demo: boolean }) {
                                   .map((s) => (
                                     <dl key={s.role_id}>
                                       <dt>Distinct direct neighbors</dt>
-                                      <dd>{s.direct_neighbors}</dd>
+                                      <dd>{formatCount(s.direct_neighbors)}</dd>
                                       <dt>
                                         Linked identities (including roles)
                                       </dt>
-                                      <dd>{s.linked_identities}</dd>
+                                      <dd>
+                                        {formatCount(s.linked_identities)}
+                                      </dd>
                                       <dt>Linked data assets</dt>
-                                      <dd>{s.linked_data_assets}</dd>
+                                      <dd>
+                                        {formatCount(s.linked_data_assets)}
+                                      </dd>
                                     </dl>
                                   ))}
                               </div>
@@ -1101,11 +1110,11 @@ export function Console({ demo }: { demo: boolean }) {
                           </p>
                           <div className="sidebar-stat">
                             <span>Confirmed edges</span>
-                            <b>{overview?.confirmed_edges || 0}</b>
+                            <b>{formatCount(overview?.confirmed_edges)}</b>
                           </div>
                           <div className="sidebar-stat">
                             <span>Conditional / declared</span>
-                            <b>{overview?.uncertain_edges || 0}</b>
+                            <b>{formatCount(overview?.uncertain_edges)}</b>
                           </div>
                           <small>
                             Dashed edges represent access that still requires
@@ -1129,7 +1138,8 @@ export function Console({ demo }: { demo: boolean }) {
                   {graph.warnings.length > 0 && (
                     <details className="coverage-notice">
                       <summary>
-                        Collection coverage & evidence ({graph.warnings.length})
+                        Collection coverage & evidence (
+                        {formatCount(graph.warnings.length)})
                       </summary>
                       {graph.warnings.map((w, i) => (
                         <p key={i}>{w}</p>
@@ -1162,16 +1172,16 @@ export function Console({ demo }: { demo: boolean }) {
                     <div className="panel summary-panel">
                       <h3>Access evidence</h3>
                       <div className="summary-number">
-                        <b>{overview?.data_assets || 0}</b>
+                        <b>{formatCount(overview?.data_assets)}</b>
                         <span>connected data assets</span>
                       </div>
                       <div className="sidebar-stat">
                         <span>Confirmed relationships</span>
-                        <b>{overview?.confirmed_edges || 0}</b>
+                        <b>{formatCount(overview?.confirmed_edges)}</b>
                       </div>
                       <div className="sidebar-stat">
                         <span>Awaiting verification</span>
-                        <b>{overview?.uncertain_edges || 0}</b>
+                        <b>{formatCount(overview?.uncertain_edges)}</b>
                       </div>
                       <p>
                         Scores prioritize review using sensitivity-weighted
@@ -1218,7 +1228,9 @@ export function Console({ demo }: { demo: boolean }) {
                 <div className="panel history-panel">
                   <div className="panel-heading">
                     <h3>Workspace audit trail</h3>
-                    <span className="muted">Latest {events.length} events</span>
+                    <span className="muted">
+                      Latest {formatCount(events.length)} events
+                    </span>
                   </div>
                   {!canAdmin ? (
                     <p className="empty-line">
@@ -1341,8 +1353,8 @@ function Findings({
 }) {
   const count =
     hasMore && total !== undefined
-      ? `${findings.length} of ${total}`
-      : `${findings.length}${hasMore ? "+" : ""}`;
+      ? `${formatCount(findings.length)} of ${formatCount(total)}`
+      : `${formatCount(findings.length)}${hasMore ? "+" : ""}`;
   const name = (id: string) => graph.nodes.find((n) => n.id === id)?.name || id;
   return (
     <section className="panel findings-panel">

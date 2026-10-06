@@ -76,7 +76,7 @@ describe("bounded graph exploration", () => {
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(vi.mocked(api).mock.calls.some(([p]) => p === "graph")).toBe(false);
-    expect(screen.getByText(/1 \/ 5000 nodes/)).toHaveTextContent(
+    expect(screen.getByText(/1 \/ 5,000 nodes/)).toHaveTextContent(
       "Partial view",
     );
     expect(
