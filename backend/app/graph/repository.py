@@ -661,9 +661,12 @@ class CypherGraphStore:
                 tenant=tenant,
                 revision=revision,
             ):
+                kind = next((label for label in row["labels"] if label in NODE_TYPES), None)
+                if kind is None:
+                    raise ValueError("Entity without a node type label")
                 index[row["id"]] = len(ids)
                 ids.append(row["id"])
-                types.append(next(label for label in row["labels"] if label in NODE_TYPES))
+                types.append(kind)
             for row in session.run(
                 Query(
                     "MATCH (a:Entity {tenant_id:$tenant, revision:$revision})-[r]->"
