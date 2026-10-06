@@ -207,7 +207,7 @@ export function Console({ demo }: { demo: boolean }) {
       const g = await api<GraphView | RoleMap>(
         graphModeRef.current === "roles"
           ? "graph/roles?role_limit=50&edge_limit=1000"
-          : "graph/explore?node_limit=250&edge_limit=1000",
+          : "graph/explore?node_limit=250&edge_limit=2000",
         {
           signal: controller.signal,
         },
