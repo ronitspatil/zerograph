@@ -265,3 +265,20 @@
   line-height: 20px;
   color: #f2a7ab;
 }
+/* Topics lens status: its line and an invisible copy of the structural line share one
+   grid cell, so the bar keeps the structural height and switching lenses never shifts. */
+.global-map-status.stacked {
+  display: grid;
+}
+.global-map-status .status-layer {
+  grid-area: 1 / 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+}
+.global-map-status .status-layer.sizer {
+  visibility: hidden;
+}

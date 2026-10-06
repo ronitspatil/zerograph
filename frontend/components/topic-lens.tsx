@@ -1,5 +1,12 @@
 "use client";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import dynamic from "next/dynamic";
 import { LoaderCircle, Tags } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
@@ -105,11 +112,14 @@ export function TopicLens({
   stale,
   onError,
   onOpenNeighborhood,
+  statusSizer,
 }: {
   reloadKey: number;
   stale: boolean;
   onError: (e: unknown) => void;
   onOpenNeighborhood: (nodeId: string, revision: string) => void;
+  /** The structural status line, laid invisibly under this one to keep the bar height. */
+  statusSizer?: ReactNode;
 }) {
   const [map, setMap] = useState<TopicMap | null>(null);
   const [unavailable, setUnavailable] = useState("");
@@ -244,20 +254,37 @@ export function TopicLens({
   const focus = selected ? (byId.get(selected) ?? null) : null;
   const shown = hovered ?? focus;
   const notice = map.view.notice || TOPICS_NOTICE_FALLBACK;
+  const statusSpans = (
+    <>
+      <span>
+        {count(map.view.shown_topics)} / {count(map.view.total_topics)} topics ·{" "}
+        {count(summary.resources as number)} data assets ·{" "}
+        {count(summary.cross_topic_grants as number)} cross-topic grants ·{" "}
+        {count(summary.hub_roles as number)} hub roles ·{" "}
+        {count(map.view.shown_links)} / {count(map.view.links)} topic links
+        {map.view.truncated ? " · Partial map" : " · Complete map"}
+      </span>
+      <span className="global-map-notice">
+        Granted (structural) access, not usage
+      </span>
+    </>
+  );
   return (
     <>
-      <div className="exploration-status global-map-status" role="status">
-        <span>
-          {count(map.view.shown_topics)} / {count(map.view.total_topics)} topics
-          · {count(summary.resources as number)} data assets ·{" "}
-          {count(summary.cross_topic_grants as number)} cross-topic grants ·{" "}
-          {count(summary.hub_roles as number)} hub roles ·{" "}
-          {count(map.view.shown_links)} / {count(map.view.links)} topic links
-          {map.view.truncated ? " · Partial map" : " · Complete map"}
-        </span>
-        <span className="global-map-notice">
-          Granted (structural) access, not usage
-        </span>
+      <div
+        className={`exploration-status global-map-status${statusSizer ? " stacked" : ""}`}
+        role="status"
+      >
+        {statusSizer ? (
+          <>
+            <div className="status-layer">{statusSpans}</div>
+            <div className="status-layer sizer" aria-hidden="true">
+              {statusSizer}
+            </div>
+          </>
+        ) : (
+          statusSpans
+        )}
       </div>
       <div className="graph-body">
         <div className="graph-main">

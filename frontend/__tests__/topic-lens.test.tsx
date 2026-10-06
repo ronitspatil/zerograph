@@ -220,7 +220,12 @@ describe("topics lens", () => {
       screen.getByText("Granted (structural) access, not usage"),
     ).toBeInTheDocument();
     expect(screen.getByText(TOPICS)).toBeInTheDocument();
-    expect(screen.queryByText(STRUCTURAL)).toBeNull();
+    // Only the invisible bar sizer holds the structural notice in the Topics lens.
+    expect(
+      screen.queryByText(STRUCTURAL, {
+        ignore: "script, style, [aria-hidden=true] *",
+      }),
+    ).toBeNull();
     expect(
       screen.getByText(
         "Topics are derived from tags, names and access, not policy boundaries",
