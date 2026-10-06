@@ -448,8 +448,8 @@ def main() -> None:
         }
         print(json.dumps(report["endpoints"]), flush=True)
 
-        # Retention removes the first revision's topic rows (it had none: the "without" arm),
-        # so delete the oldest "with" revision when there are two.
+        # Retention (keep 2) deletes the older revisions; with two runs per arm that
+        # includes the first "with" revision, whose topic rows must go with it.
         from sqlalchemy import func, select
 
         from app.db.models import RevisionTopicMember
@@ -458,7 +458,7 @@ def main() -> None:
         doomed = enabled[0]["revision"] if len(enabled) > 1 else None
         later = datetime.now(UTC) + timedelta(days=2)
         result = retention.prune_revisions(
-            "demo", retention.RetentionPolicy(1, 1, 10), apply=True, timestamp=later
+            "demo", retention.RetentionPolicy(1, 2, 10), apply=True, timestamp=later
         )
         with session_factory()() as db:
             left = (
