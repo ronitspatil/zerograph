@@ -26,6 +26,10 @@ from app.db.models import (
     RevisionClusterMember,
     RevisionClusterSummary,
     RevisionFinding,
+    RevisionTopic,
+    RevisionTopicLink,
+    RevisionTopicMember,
+    RevisionTopicSummary,
     SourceSnapshot,
     StagedEntity,
     TenantState,
@@ -151,14 +155,18 @@ def metadata():
                     TenantState,
                     UploadSession,
                     StagedEntity,
-                    # Per-revision analysis and global-map clusters travel in the
-                    # PostgreSQL dump with their revisions (and are recomputable).
+                    # Per-revision analysis, global-map clusters and topics travel in
+                    # the PostgreSQL dump with their revisions (and are recomputable).
                     RevisionAnalysis,
                     RevisionFinding,
                     RevisionClusterSummary,
                     RevisionCluster,
                     RevisionClusterLink,
                     RevisionClusterMember,
+                    RevisionTopicSummary,
+                    RevisionTopic,
+                    RevisionTopicLink,
+                    RevisionTopicMember,
                 )
             },
         }

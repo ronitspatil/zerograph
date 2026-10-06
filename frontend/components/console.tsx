@@ -736,9 +736,9 @@ export function Console({ demo }: { demo: boolean }) {
                         <div>
                           <h2>Global map</h2>
                           <span className="muted">
-                            The whole revision, grouped by graph structure. Open
-                            a cluster to drill down; open a member to explore
-                            its neighborhood.
+                            The whole revision, grouped by graph structure or by
+                            topic. Open a cluster or topic to drill down; open a
+                            member to explore its neighborhood.
                           </span>
                         </div>
                         {revisionStale && (

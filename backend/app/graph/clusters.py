@@ -637,7 +637,7 @@ def _bulk_insert(db: Session, model, columns: list[str], rows) -> None:
         with raw.cursor() as cursor:
             with cursor.copy(f"COPY {model.__tablename__} ({', '.join(columns)}) FROM STDIN") as copy:
                 for row in rows:
-                    copy.write_row([json.dumps(v) if isinstance(v, dict) else v for v in row])
+                    copy.write_row([json.dumps(v) if isinstance(v, (dict, list)) else v for v in row])
         return
     batch = []
     for row in rows:

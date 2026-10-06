@@ -7,7 +7,10 @@ worker never materializes a Pydantic ``GraphSnapshot`` of a large revision. Its
 overview, findings in API order, totals, asset weight and high-blast IDs); parity
 is asserted by tests on generated and edge-case graphs. Traversal adjacency is one
 CSR (``csr()``), built once and shared by every BFS of the analysis; publish-time
-clustering reads the same edge arrays.
+clustering reads the same edge arrays. Publish-time topic analysis
+(``app.graph.topics``) also reads each node's raw tags, provider and topic hints
+from metadata, and each edge's type and actions; repeated tuples are interned so
+a 100k revision adds only a few MB.
 """
 
 import hashlib
@@ -17,7 +20,7 @@ from app.engine.analysis_index import WEIGHTS
 from app.engine.toxic_combos import Finding
 from app.graph.exploration import RevisionTotals
 from app.graph.sample import select_sample
-from app.graph.schema import DATA_TYPES, IDENTITY_TYPES, TRAVERSAL_TYPES, GraphSnapshot, NodeType
+from app.graph.schema import DATA_TYPES, IDENTITY_TYPES, TRAVERSAL_TYPES, EdgeType, GraphSnapshot, NodeType
 
 DATA = frozenset(kind.value for kind in DATA_TYPES)
 IDENTITY = frozenset(kind.value for kind in IDENTITY_TYPES)
@@ -27,6 +30,12 @@ SENSITIVE = frozenset({"confidential", "restricted"})
 MAX_HOPS = 5
 HIGH_BLAST_THRESHOLD = 70
 SENSITIVITY_LEVELS = ["public", "internal", "confidential", "restricted"]
+# Edge types by code (``CompactGraph.edge_kind``); new types append.
+EDGE_KINDS = [kind.value for kind in EdgeType]
+EDGE_CODE = {kind: code for code, kind in enumerate(EDGE_KINDS)}
+# Metadata keys kept as topic hints (string values only), in priority order.
+HINT_KEYS = ("topic", "app", "application", "project", "workload", "team", "service", "data_category")
+NO_STRINGS: tuple[str, ...] = ()
 RECOMMENDATION = (
     "Authenticate the entry point, restrict role trust and tool scope, and review data access permissions."
 )
@@ -91,11 +100,19 @@ class CompactGraph:
         self.names: list[str] = []
         self.account: list[str] = []
         self._interned: dict[str, str] = {}
+        # Topic analysis inputs: raw tags (``key=value`` strings kept verbatim), provider,
+        # and string metadata hints under HINT_KEYS as ``key=value`` (sparse).
+        self.tags: list[tuple[str, ...]] = []
+        self.provider: list[str] = []
+        self.hints: dict[int, tuple[str, ...]] = {}
+        self._tuples: dict[tuple[str, ...], tuple[str, ...]] = {}
         self.edge_source = array("l")
         self.edge_target = array("l")
         self.edge_traversal = bytearray()
         self.edge_confirmed = bytearray()
         self.edge_evidence: list[tuple[str, ...]] = []
+        self.edge_kind = bytearray()  # EDGE_CODE of the edge type
+        self.edge_actions: list[tuple[str, ...]] = []
         self._csr: Csr | None = None
         self._csr_edges = -1
 
@@ -124,6 +141,25 @@ class CompactGraph:
             self.accounts.add(account)
         self.account.append(self._interned.setdefault(account, account))
         self.names.append(node.get("name") or node_id)
+        self.tags.append(self._tuple(node.get("tags") or ()))
+        provider = node.get("provider") or ""
+        self.provider.append(self._interned.setdefault(provider, provider))
+        metadata = node.get("metadata") or {}
+        if metadata:
+            hints = tuple(
+                f"{key}={metadata[key]}"
+                for key in HINT_KEYS
+                if isinstance(metadata.get(key), str) and metadata[key].strip()
+            )
+            if hints:
+                self.hints[len(self.ids) - 1] = self._tuple(hints)
+
+    def _tuple(self, values) -> tuple[str, ...]:
+        """One shared tuple per distinct value list (tags and actions repeat heavily)."""
+        if not values:
+            return NO_STRINGS
+        key = tuple(values)
+        return self._tuples.setdefault(key, key)
 
     def add_edge(self, edge: dict) -> None:
         try:
@@ -137,6 +173,8 @@ class CompactGraph:
         self.edge_confirmed.append(edge.get("certainty", "confirmed") == "confirmed")
         # Evidence is only ever quoted from traversal edges on finding paths.
         self.edge_evidence.append(tuple(edge.get("evidence", ())) if traversal else ())
+        self.edge_kind.append(EDGE_CODE.get(edge["type"], 255))
+        self.edge_actions.append(self._tuple(edge.get("actions") or ()))
 
     @property
     def node_count(self) -> int:
