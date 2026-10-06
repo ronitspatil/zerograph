@@ -8,12 +8,14 @@ import {
   MAX_FIT_ZOOM,
   OVERVIEW_ALL_LABELS_MAX_NODES,
   overviewAnchors,
+  relationshipHint,
   spacedLabels,
   layoutInput,
   startLayout,
   type LayoutInput,
   type LayoutWorker,
 } from "@/lib/graph-layout";
+import type { GraphNode } from "@/lib/types";
 const input: LayoutInput = {
   nodes: ["a", "b"],
   edges: [{ id: "e", source: "a", target: "b" }],
@@ -316,5 +318,52 @@ describe("graph label legibility", () => {
     expect(
       fitViewport({ x1: 0, y1: 0, x2: 1e9, y2: 1 }, 1000, 500, 0.05).zoom,
     ).toBe(0.05);
+  });
+});
+
+describe("relationship hint", () => {
+  const entity = (id: string): GraphNode => ({
+    id,
+    name: id,
+    type: "AIAgent",
+    account_id: "a",
+    provider: "test",
+    sensitivity: "internal",
+    tags: [],
+    internet_exposed: false,
+    authenticated: true,
+    encrypted: true,
+    privileged: false,
+    metadata: {},
+  });
+  it("explains a slice whose entities share no relationships", () => {
+    const nodes = ["a", "b", "c"].map(entity);
+    expect(relationshipHint({ nodes, edges: [] })).toBe(
+      "These 3 entities have no relationships between them in this view. Search for an entity or open a neighborhood to see its connections.",
+    );
+    expect(relationshipHint({ nodes: [nodes[0]], edges: [] })).toMatch(
+      /^This entity has no relationships in this view\./,
+    );
+    expect(
+      relationshipHint({ nodes, edges: [], view: { mode: "roles" } }),
+    ).toBe(
+      "These 3 roles have no direct role links between them in this view.",
+    );
+  });
+  it("stays silent when relationships are visible or nothing is shown", () => {
+    const nodes = ["a", "b"].map(entity);
+    const edges = [
+      {
+        id: "e",
+        source: "a",
+        target: "b",
+        type: "ASSUMES_ROLE",
+        actions: [],
+        certainty: "confirmed" as const,
+        evidence: [],
+      },
+    ];
+    expect(relationshipHint({ nodes, edges })).toBeNull();
+    expect(relationshipHint({ nodes: [], edges: [] })).toBeNull();
   });
 });

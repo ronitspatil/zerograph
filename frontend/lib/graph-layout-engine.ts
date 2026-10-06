@@ -5,8 +5,18 @@ import {
   type Position,
 } from "./graph-layout";
 
-/** Nearest role over real edges; account boundaries and other role seeds stay separate. */
-export function partitionCommunities(data: LayoutInput): string[][] {
+/**
+ * Nearest role over real edges. With `strictAccounts` (the default, used by the
+ * global map's packed members) account boundaries are hard: a member never joins
+ * a role of another account. The explorer passes `strictAccounts: false`: roles
+ * first claim their own account's members, then members that would otherwise be
+ * left alone join the nearest role across accounts, and the rest group by
+ * connected component regardless of account. Account becomes a preference.
+ */
+export function partitionCommunities(
+  data: LayoutInput,
+  { strictAccounts = true }: { strictAccounts?: boolean } = {},
+): string[][] {
   const ids = [...data.nodes].sort();
   const present = new Set(ids);
   const adjacent = new Map(ids.map((id) => [id, new Set<string>()]));
@@ -26,15 +36,21 @@ export function partitionCommunities(data: LayoutInput): string[][] {
     queue.push(id);
   }
   // Multi-source BFS: roles sorted once gives deterministic ties, O(nodes + edges).
-  for (let cursor = 0; cursor < queue.length; cursor++) {
-    const id = queue[cursor],
-      anchor = owners.get(id)!;
-    for (const neighbor of [...adjacent.get(id)!].sort()) {
-      if (owners.has(neighbor) || !compatible(anchor, neighbor)) continue;
-      owners.set(neighbor, anchor);
-      queue.push(neighbor);
+  const claim = (strict: boolean) => {
+    for (let cursor = 0; cursor < queue.length; cursor++) {
+      const id = queue[cursor],
+        anchor = owners.get(id)!;
+      for (const neighbor of [...adjacent.get(id)!].sort()) {
+        if (owners.has(neighbor) || (strict && !compatible(anchor, neighbor)))
+          continue;
+        owners.set(neighbor, anchor);
+        queue.push(neighbor);
+      }
     }
-  }
+  };
+  claim(true);
+  // Same-account members are claimed first; the rest may then cross accounts.
+  if (!strictAccounts) claim(false);
   // Remaining connected components are real topology, never name/ID-derived clusters.
   for (const seed of ids) {
     if (owners.has(seed)) continue;
@@ -42,7 +58,11 @@ export function partitionCommunities(data: LayoutInput): string[][] {
     owners.set(seed, seed);
     for (let cursor = 0; cursor < pending.length; cursor++) {
       for (const neighbor of [...adjacent.get(pending[cursor])!].sort()) {
-        if (owners.has(neighbor) || !compatible(seed, neighbor)) continue;
+        if (
+          owners.has(neighbor) ||
+          (strictAccounts && !compatible(seed, neighbor))
+        )
+          continue;
         owners.set(neighbor, seed);
         pending.push(neighbor);
       }
@@ -61,6 +81,8 @@ export function partitionCommunities(data: LayoutInput): string[][] {
     .map(([, nodes]) => nodes);
 }
 
+const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
+
 function noise(seed: string): number {
   let hash = 2166136261;
   for (const char of seed)
@@ -70,14 +92,169 @@ function noise(seed: string): number {
   return (((hash ^ (hash >>> 16)) >>> 0) / 0xffffffff) * 2 - 1;
 }
 
-/** Spacious role-centered constellations on the worker, not a global permission analysis. */
+/** Force refinement caps: about 200 ms for 500 nodes / 2,000 edges in a worker. */
+export const REFINE_ITERATIONS = 240;
+export const REFINE_BUDGET_MS = 600;
+const SPRING = 46; // Ideal relationship length (layout units).
+
+/**
+ * Bounded Fruchterman-Reingold refinement, in place. Repulsion acts within
+ * 3 x SPRING through a spatial hash (no all-pairs pass), relationships are
+ * springs, members are tethered (reciprocally) to their community's role,
+ * community centres repel each other by size so roles stay visible centres,
+ * and a light pull toward the centroid keeps components together. Iterates over sorted IDs with a fixed cooling schedule, so the same
+ * input always gives the same positions; the time cap only cuts a run short on
+ * a device far slower than the measured one.
+ */
+function refine(
+  positions: Position[],
+  edges: LayoutInput["edges"],
+  anchorOf: Map<string, string>,
+): void {
+  const order = [...positions].sort((a, b) => a.id.localeCompare(b.id));
+  const count = order.length;
+  if (count < 2) return;
+  const index = new Map(order.map((p, i) => [p.id, i]));
+  const x = Float64Array.from(order, (p) => p.x),
+    y = Float64Array.from(order, (p) => p.y);
+  const pairs = new Set<string>();
+  const links: number[] = [];
+  for (const edge of [...edges].sort((a, b) => a.id.localeCompare(b.id))) {
+    const a = index.get(edge.source),
+      b = index.get(edge.target);
+    if (a === undefined || b === undefined || a === b) continue;
+    const key = a < b ? `${a}:${b}` : `${b}:${a}`;
+    if (pairs.has(key)) continue;
+    pairs.add(key);
+    links.push(a, b);
+  }
+  const tether = Int32Array.from(order, (p) => {
+    const anchor = anchorOf.get(p.id);
+    return anchor === undefined ? -1 : index.get(anchor)!;
+  });
+  // Community centres (three or more members) repel each other at any range,
+  // in proportion to their size, so hubs stand apart with members around them.
+  const members = new Int32Array(count);
+  for (const anchor of tether) if (anchor >= 0) members[anchor]++;
+  const centres: number[] = [];
+  for (let i = 0; i < count; i++) if (members[i] >= 3) centres.push(i);
+  const dx = new Float64Array(count),
+    dy = new Float64Array(count);
+  const k = SPRING,
+    k2 = k * k,
+    cutoff = 3 * k,
+    cutoff2 = cutoff * cutoff;
+  const started = Date.now();
+  let temperature = 4 * k;
+  for (let iteration = 0; iteration < REFINE_ITERATIONS; iteration++) {
+    if (Date.now() - started > REFINE_BUDGET_MS) break;
+    dx.fill(0);
+    dy.fill(0);
+    const grid = new Map<string, number[]>();
+    for (let i = 0; i < count; i++) {
+      const key = `${Math.floor(x[i] / cutoff)}:${Math.floor(y[i] / cutoff)}`;
+      const cell = grid.get(key);
+      if (cell) cell.push(i);
+      else grid.set(key, [i]);
+    }
+    for (let i = 0; i < count; i++) {
+      const gx = Math.floor(x[i] / cutoff),
+        gy = Math.floor(y[i] / cutoff);
+      for (let ox = -1; ox <= 1; ox++)
+        for (let oy = -1; oy <= 1; oy++) {
+          const cell = grid.get(`${gx + ox}:${gy + oy}`);
+          if (!cell) continue;
+          for (const j of cell) {
+            if (j <= i) continue;
+            let ex = x[i] - x[j],
+              ey = y[i] - y[j];
+            let d2 = ex * ex + ey * ey;
+            if (d2 > cutoff2) continue;
+            if (d2 < 0.01) {
+              // Coincident: separate along a fixed, index-derived direction.
+              ex = Math.cos(i + j);
+              ey = Math.sin(i + j);
+              d2 = 1;
+            }
+            const force = k2 / d2;
+            dx[i] += ex * force;
+            dy[i] += ey * force;
+            dx[j] -= ex * force;
+            dy[j] -= ey * force;
+          }
+        }
+    }
+    for (let c = 0; c < centres.length; c++)
+      for (let e = c + 1; e < centres.length; e++) {
+        const i = centres[c],
+          j = centres[e];
+        const ex = x[i] - x[j],
+          ey = y[i] - y[j];
+        const d2 = Math.max(ex * ex + ey * ey, 1);
+        const force = (k2 * Math.sqrt(members[i] * members[j])) / d2;
+        dx[i] += ex * force;
+        dy[i] += ey * force;
+        dx[j] -= ex * force;
+        dy[j] -= ey * force;
+      }
+    for (let l = 0; l < links.length; l += 2) {
+      const a = links[l],
+        b = links[l + 1];
+      const ex = x[a] - x[b],
+        ey = y[a] - y[b];
+      const d = Math.sqrt(ex * ex + ey * ey) || 1;
+      const force = d / k;
+      dx[a] -= ex * force;
+      dy[a] -= ey * force;
+      dx[b] += ex * force;
+      dy[b] += ey * force;
+    }
+    let mx = 0,
+      my = 0;
+    for (let i = 0; i < count; i++) {
+      mx += x[i];
+      my += y[i];
+    }
+    mx /= count;
+    my /= count;
+    for (let i = 0; i < count; i++) {
+      const anchor = tether[i];
+      if (anchor >= 0) {
+        // Reciprocal, so a community moves as one and never drifts on its own.
+        const tx = (x[i] - x[anchor]) * 0.35,
+          ty = (y[i] - y[anchor]) * 0.35;
+        dx[i] -= tx;
+        dy[i] -= ty;
+        dx[anchor] += tx;
+        dy[anchor] += ty;
+      }
+    }
+    for (let i = 0; i < count; i++) {
+      dx[i] -= (x[i] - mx) * 0.02;
+      dy[i] -= (y[i] - my) * 0.02;
+      const length = Math.sqrt(dx[i] * dx[i] + dy[i] * dy[i]);
+      if (length > 0) {
+        const step = Math.min(length, temperature) / length;
+        x[i] += dx[i] * step;
+        y[i] += dy[i] * step;
+      }
+    }
+    temperature = Math.max(0.5, temperature * 0.975);
+  }
+  for (const p of positions) {
+    const i = index.get(p.id)!;
+    p.x = x[i];
+    p.y = y[i];
+  }
+}
+
+/** Role-centred constellations refined into a graph, on the worker; not a permission analysis. */
 export function computePositions(data: LayoutInput): Position[] {
   if (
     data.nodes.length > EXPLORE_LIMITS.nodes ||
     data.edges.length > EXPLORE_LIMITS.edges
   )
     return [];
-  const groups = partitionCommunities(data);
   const order = [
     "AIAgent",
     "MCPServer",
@@ -89,33 +266,46 @@ export function computePositions(data: LayoutInput): Position[] {
     "VectorStore",
     "DataCategory",
   ];
-  const radius = (count: number) =>
-    count <= 1 ? 0 : 42 + 26 * Math.floor((count - 2) / 16);
-  const cell = Math.max(
-    150,
-    ...groups.map((group) => radius(group.length) * 2 + 100),
-  );
-  const columns = Math.max(1, Math.ceil(Math.sqrt(groups.length * 1.45)));
+  const rank = (id: string) => {
+    const r = order.indexOf(data.attributes?.[id]?.type || "");
+    return r < 0 ? order.length : r;
+  };
   const positions: Position[] = [];
+  if (!data.edges.length) {
+    // No relationships to arrange by: one compact disc, entity types in bands,
+    // rather than a sparse grid of singleton communities that reads as broken.
+    [...data.nodes]
+      .sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
+      .forEach((id, i) => {
+        const r = 28 * Math.sqrt(i + 0.5);
+        positions.push({
+          id,
+          x: r * Math.cos(i * GOLDEN_ANGLE),
+          y: r * Math.sin(i * GOLDEN_ANGLE),
+        });
+      });
+    return positions;
+  }
+  const groups = partitionCommunities(data, { strictAccounts: false });
+  // Seed: communities largest first on a golden-angle spiral, members in rings
+  // around their role; then a bounded force refinement pulls linked nodes together.
+  groups.sort((a, b) => b.length - a.length || a[0].localeCompare(b[0]));
+  const ringRadius = (ring: number) => 42 + ring * 26;
+  let area = 0;
   groups.forEach(([anchor, ...neighbors], index) => {
-    const cx = (index % columns) * cell + noise(`${anchor}:x`) * cell * 0.065,
-      cy =
-        Math.floor(index / columns) * cell +
-        noise(`${anchor}:y`) * cell * 0.065;
+    const span = ringRadius(Math.floor(Math.max(0, neighbors.length - 1) / 16));
+    const reach = 1.15 * Math.sqrt(area + (span + 40) ** 2 / 2);
+    const cx = index === 0 ? 0 : reach * Math.cos(index * GOLDEN_ANGLE),
+      cy = index === 0 ? 0 : reach * Math.sin(index * GOLDEN_ANGLE);
+    area += (span + 40) ** 2;
     positions.push({ id: anchor, x: cx, y: cy });
-    neighbors.sort((a, b) => {
-      const rank = (id: string) => {
-        const r = order.indexOf(data.attributes?.[id]?.type || "");
-        return r < 0 ? order.length : r;
-      };
-      return rank(a) - rank(b) || a.localeCompare(b);
-    });
+    neighbors.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
     neighbors.forEach((id, i) => {
       const ring = Math.floor(i / 16),
         offset = i % 16,
         size = Math.min(16, neighbors.length - ring * 16);
       const angle = -Math.PI / 2 + (offset * 2 * Math.PI) / size + ring * 0.17;
-      const r = (42 + ring * 26) * (1 + noise(`${id}:radius`) * 0.07);
+      const r = ringRadius(ring) * (1 + noise(`${id}:radius`) * 0.07);
       positions.push({
         id,
         x: cx + r * Math.cos(angle),
@@ -123,6 +313,10 @@ export function computePositions(data: LayoutInput): Position[] {
       });
     });
   });
+  const anchorOf = new Map<string, string>();
+  for (const [anchor, ...members] of groups)
+    for (const id of members) anchorOf.set(id, anchor);
+  refine(positions, data.edges, anchorOf);
   // Bound even pathological singleton-heavy views without collapsing either dimension.
   const xs = positions.map((p) => p.x),
     ys = positions.map((p) => p.y);
@@ -135,8 +329,6 @@ export function computePositions(data: LayoutInput): Position[] {
   );
   return positions.map((p) => ({ id: p.id, x: p.x * scale, y: p.y * scale }));
 }
-
-const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 
 /**
  * In-place expansion layout for up to 5,000 members: a filled disc of radius

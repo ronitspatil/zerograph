@@ -957,6 +957,24 @@
     background: var(--hover);
     color: var(--text);
   }
+  .graph-hint {
+    position: absolute;
+    top: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: max-content;
+    max-width: calc(100% - 32px);
+    margin: 0;
+    padding: 8px 12px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    background: var(--surface-raised);
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.4;
+    text-align: center;
+    pointer-events: none;
+  }
   /* Legend entries sit on a backdrop (like the in-place chip) so the graph
      under them never crosses their text; labels are placed clear of them. */
   .graph-legend {
