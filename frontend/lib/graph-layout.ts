@@ -335,13 +335,24 @@ export function underOverlay(
   );
 }
 
+/** True when a label box covers the core of any node other than its own. */
+export function coversNode(
+  box: LabelBounds,
+  obstacles: LabelBounds[],
+): boolean {
+  return obstacles.some(
+    (node) => node.id !== box.id && validBox(node) && overlaps(box, node, 0),
+  );
+}
+
 /**
  * Greedy visible-priority labels using actual rendered bounds, with breathing room.
  * Required labels are kept unless they would sit under a screen overlay
  * (`blocked`: legend, zoom controls); optional labels must also fit inside the
  * viewport, clear every kept label, and not cover another node (`obstacles`,
- * keyed by node id); the first `backdrops` optional labels that would cover a
- * node are kept anyway, for a caller that draws them on a backdrop. At most
+ * keyed by node id). The first `backdrops` optional labels that would cover a
+ * node are kept anyway, for a caller that draws them on a backdrop
+ * `backdropPadding` pixels wider on every side (see `coversNode`). At most
  * `limit` optional labels are kept.
  */
 export function spacedLabels(
@@ -353,10 +364,12 @@ export function spacedLabels(
     obstacles?: LabelBounds[];
     blocked?: LabelBounds[];
     backdrops?: number;
+    backdropPadding?: number;
     limit?: number;
   } = {},
 ): Set<string> {
   const required = options.required ?? new Set<string>();
+  const pad = options.backdropPadding ?? 0;
   let backdrops = options.backdrops ?? 0;
   let room = options.limit ?? Infinity;
   const obstacles = (options.obstacles ?? []).filter(validBox);
@@ -365,25 +378,24 @@ export function spacedLabels(
     (box) =>
       required.has(box.id) && validBox(box) && !underOverlay(box, blocked),
   );
-  for (const box of labels) {
+  for (const label of labels) {
     if (room <= 0) break;
-    if (
-      required.has(box.id) ||
-      !validBox(box) ||
-      box.x1 < 0 ||
-      box.y1 < 0 ||
-      box.x2 > width ||
-      box.y2 > height
-    )
-      continue;
+    if (required.has(label.id) || !validBox(label)) continue;
+    const backdrop = coversNode(label, obstacles);
+    if (backdrop && backdrops <= 0) continue;
+    const box = backdrop
+      ? {
+          id: label.id,
+          x1: label.x1 - pad,
+          y1: label.y1 - pad,
+          x2: label.x2 + pad,
+          y2: label.y2 + pad,
+        }
+      : label;
+    if (box.x1 < 0 || box.y1 < 0 || box.x2 > width || box.y2 > height) continue;
     if (underOverlay(box, blocked)) continue;
     if (chosen.some((other) => overlaps(box, other, 6))) continue;
-    if (
-      obstacles.some((node) => node.id !== box.id && overlaps(box, node, 0))
-    ) {
-      if (backdrops <= 0) continue;
-      backdrops--;
-    }
+    if (backdrop) backdrops--;
     chosen.push(box);
     room--;
   }

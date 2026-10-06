@@ -408,6 +408,25 @@ describe("graph label legibility", () => {
       }),
     ]).toEqual(["hub", "far"]);
     expect([...spacedLabels(boxes, 400, 100, { obstacles })]).toEqual(["far"]);
+    // The backdrop's padding must fit the viewport and clear other labels too.
+    const lower = (b: {
+      id: string;
+      x1: number;
+      y1: number;
+      x2: number;
+      y2: number;
+    }) => ({
+      ...b,
+      y1: b.y1 + 10,
+      y2: b.y2 + 10,
+    });
+    expect([
+      ...spacedLabels(boxes.map(lower), 400, 100, {
+        obstacles: obstacles.map(lower),
+        backdrops: 1,
+        backdropPadding: 3,
+      }),
+    ]).toEqual(["leaf", "far"]);
     expect([
       ...spacedLabels(boxes, 400, 100, {
         required: new Set(["leaf"]),

@@ -4,6 +4,7 @@ import type { Core, StylesheetCSS } from "cytoscape";
 import { Maximize2, Minus, Plus } from "lucide-react";
 import {
   circlePositions,
+  coversNode,
   fitViewport,
   labelCandidates,
   labelFontSize,
@@ -105,7 +106,7 @@ export function GraphCanvas({
       },
       { selector: ".focus-muted", css: { opacity: 0.13 } },
       {
-        // Spread overview labels may sit over a dense core: a backdrop, drawn above the dots.
+        // Overview labels over a dense core: a backdrop, drawn above the dots.
         selector: "node.label-backed",
         css: {
           "text-background-color": "#0d1522",
@@ -278,13 +279,11 @@ export function GraphCanvas({
           "text-background-padding": "0px",
         });
         instance.nodes().removeClass("label-on label-backed");
-        for (const id of order) {
-          const node = instance.getElementById(id).addClass("label-on");
-          if (spread) node.addClass("label-backed");
-        }
-        // Only focused and hub labels draw a backdrop, so only they need padding.
+        for (const id of order)
+          instance.getElementById(id).addClass("label-on");
+        // Only focused labels draw a backdrop here, so only they need padding.
         instance
-          .nodes(".focus-root, .focus-neighbor, .label-backed")
+          .nodes(".focus-root, .focus-neighbor")
           .style({ "text-background-padding": `${3 / zoom}px` });
         instance.nodes(".focus-root").style({
           "font-size": labelFontSize(12, zoom),
@@ -318,13 +317,20 @@ export function GraphCanvas({
           required,
           obstacles,
           blocked: overlayObstacles(element),
+          backdropPadding: 3,
           ...(spread && OVERVIEW_LABELS[narrow ? "narrow" : "wide"]),
         },
       );
       instance.batch(() => {
-        for (const id of order)
-          if (!visible.has(id))
-            instance.getElementById(id).removeClass("label-on label-backed");
+        labels.forEach((box) => {
+          const node = instance.getElementById(box.id);
+          if (!visible.has(box.id)) node.removeClass("label-on");
+          // Overview labels kept over other dots draw on a backdrop, above them.
+          else if (spread && coversNode(box, obstacles))
+            node
+              .addClass("label-backed")
+              .style({ "text-background-padding": `${3 / zoom}px` });
+        });
       });
     }
     let frame = 0;
