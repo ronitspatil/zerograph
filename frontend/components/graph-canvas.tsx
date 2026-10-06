@@ -13,6 +13,7 @@ import {
   spacedLabels,
 } from "@/lib/graph-layout";
 import { formatCount } from "@/lib/format";
+import { overlayObstacles } from "@/lib/overlay-obstacles";
 import { createGraph, WEBGL_MIN_NODES } from "@/lib/renderer";
 import type { GraphData, GraphNode, Simulation } from "@/lib/types";
 
@@ -50,6 +51,7 @@ export function GraphCanvas({
   callback.current = onSelect;
   useEffect(() => {
     if (!container.current) return;
+    const element = container.current;
     const input = layoutInput(graph);
     if (!input) return;
     const positions = circlePositions(input.nodes);
@@ -292,7 +294,8 @@ export function GraphCanvas({
         labels,
         instance.width(),
         instance.height(),
-        { required, obstacles },
+        // Never under the legend or zoom controls.
+        { required, obstacles, blocked: overlayObstacles(element) },
       );
       instance.batch(() => {
         for (const id of order)

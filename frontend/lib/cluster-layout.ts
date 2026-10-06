@@ -1,4 +1,4 @@
-import type { LabelBounds, Position } from "./graph-layout";
+import { underOverlay, type LabelBounds, type Position } from "./graph-layout";
 import type { ClusterLink, ClusterSummary } from "./types";
 
 /** Server bounds: at most 300 clusters per level and 2000 links per response. */
@@ -186,7 +186,10 @@ export type LabelSide = "below" | "above";
  * cluster that ranks before it (`obstacles`, keyed by cluster id; `rank` gives the
  * priority of every cluster), so a small cluster's label cannot hide a larger
  * cluster, while the largest clusters stay labeled in dense levels. A label that
- * does not fit below its circle tries above it.
+ * does not fit below its circle tries above it. No label, required or not, is
+ * placed under a screen overlay (`blocked`: the legend, zoom controls and status
+ * chips drawn over the canvas); a required label then tries above its circle and
+ * is left out when neither side is clear.
  */
 export function placeLabels(
   candidates: { id: string; below: LabelBounds; above: LabelBounds }[],
@@ -196,22 +199,30 @@ export function placeLabels(
     required?: Set<string>;
     obstacles?: LabelBounds[];
     rank?: Map<string, number>;
+    blocked?: LabelBounds[];
   } = {},
 ): Map<string, LabelSide> {
   const required = options.required ?? new Set<string>();
   const obstacles = (options.obstacles ?? []).filter(validBox);
+  const blocked = (options.blocked ?? []).filter(validBox);
   const rank = options.rank ?? new Map<string, number>();
   const rankOf = (id: string) => rank.get(id) ?? Number.MAX_SAFE_INTEGER;
   const placed = new Map<string, LabelSide>();
   const chosen: LabelBounds[] = [];
-  for (const c of candidates)
-    if (required.has(c.id) && validBox(c.below)) {
-      placed.set(c.id, "below");
-      chosen.push(c.below);
+  for (const c of candidates) {
+    if (!required.has(c.id)) continue;
+    const side = (["below", "above"] as const).find(
+      (s) => validBox(c[s]) && !underOverlay(c[s], blocked),
+    );
+    if (side) {
+      placed.set(c.id, side);
+      chosen.push(c[side]);
     }
+  }
   const fits = (box: LabelBounds) => {
     if (
       !validBox(box) ||
+      underOverlay(box, blocked) ||
       box.x1 < 0 ||
       box.y1 < 0 ||
       box.x2 > width ||

@@ -22,6 +22,7 @@ import {
   placeLabels,
 } from "@/lib/cluster-layout";
 import { formatCount } from "@/lib/format";
+import { overlayObstacles, overlayScope } from "@/lib/overlay-obstacles";
 import { packedPositions } from "@/lib/graph-layout-engine";
 import {
   MEMBER_LIMITS,
@@ -142,6 +143,7 @@ export function ClusterCanvas({
   const input = clusterLayoutInput(clusters, links);
   useEffect(() => {
     if (!container.current || !input) return;
+    const element = container.current;
     const largest = Math.max(1, ...input.clusters.map((c) => c.size));
     const heaviest = Math.max(1, ...input.links.map((l) => l.weight));
     const positions = clusterPositions(input.clusters, input.links);
@@ -295,6 +297,13 @@ export function ClusterCanvas({
       const reserved = new Set(order.slice(0, labelBudget(1)));
       const narrow = width < 520;
       const expandedArea = [...shown.values()].some((s) => s.members.size);
+      // Overlays along the top (the in-place status chip) push the fit down.
+      const top = Math.max(
+        16,
+        ...overlayObstacles(element)
+          .filter((box) => box.y1 < height / 3 && box.x1 < width / 2)
+          .map((box) => box.y2 + 8),
+      );
       instance.viewport(
         fitClusters(
           order.map((id) => {
@@ -311,7 +320,7 @@ export function ClusterCanvas({
           width,
           height,
           {
-            top: 16,
+            top,
             left: 16,
             // The zoom controls sit on the right; the legend along the bottom.
             right: narrow ? 16 : 56,
@@ -388,10 +397,12 @@ export function ClusterCanvas({
         const obstacle = circleObstacle(id, x, y, node.renderedWidth());
         return obstacle ? [obstacle] : [];
       });
+      // Labels never go under the legend, zoom controls or status chip.
       const placed = placeLabels(candidates, width, height, {
         required,
         obstacles,
         rank,
+        blocked: overlayObstacles(element),
       });
       const size = labelZoom(zoom);
       // Only changed styles are written: every style write re-sorts and re-uploads
@@ -722,8 +733,20 @@ export function ClusterCanvas({
       instance.resize();
       schedule();
     });
-    observer.observe(container.current);
+    observer.observe(element);
+    // The status chip appears, rewraps and goes with expansions: place labels again.
+    const scope = overlayScope(element);
+    const overlays = new MutationObserver(() => {
+      if (!instance.destroyed()) schedule();
+    });
+    if (scope)
+      overlays.observe(scope, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
     return () => {
+      overlays.disconnect();
       cancelAnimationFrame(frame);
       cancelAnimationFrame(moving);
       clearTimeout(settle);

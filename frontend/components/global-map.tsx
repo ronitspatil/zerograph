@@ -344,7 +344,7 @@ export function GlobalMap({
               onSelect={setMember}
             />
           ) : (
-            <div className="global-map-canvas">
+            <div className="global-map-canvas" data-label-scope>
               <ClusterCanvas
                 clusters={clusters}
                 links={links}
@@ -355,7 +355,11 @@ export function GlobalMap({
                 onSelect={setMember}
               />
               {(expansions.length > 0 || expanding || notice) && (
-                <div className="global-map-inplace" role="status">
+                <div
+                  className="global-map-inplace"
+                  role="status"
+                  data-label-obstacle
+                >
                   {expanding ? (
                     <span>Expanding…</span>
                   ) : (
