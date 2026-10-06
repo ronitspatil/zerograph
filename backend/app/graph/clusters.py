@@ -31,7 +31,6 @@ from array import array
 from collections import Counter, deque
 from dataclasses import dataclass, field
 
-from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import delete, insert, select, text
 from sqlalchemy.orm import Session
@@ -49,6 +48,7 @@ from app.graph import repository
 from app.graph.compact import CompactGraph
 from app.graph.repository import MAX_VISIBLE_EDGES, MAX_VISIBLE_MEMBERS, get_graph_store
 from app.graph.schema import Node
+from app.graph.sweep import FAILED_BACKOFF_SECONDS, SWEEP_TENANTS, run_sweep  # noqa: F401 - re-exported
 
 # Bump when the partition or stored fields change: other versions read as missing.
 CLUSTER_VERSION = 2  # 2: labels differ from ancestors and siblings.
@@ -1242,9 +1242,7 @@ def backfill(tenant: str, wait: bool = True) -> dict:
 # Worker sweep: current revisions without clusters of this version (published
 # before migration 0005, or before a CLUSTER_VERSION bump) get them without
 # waiting for the next publication. Bounded per run; a failing revision is not
-# retried by the same process for FAILED_BACKOFF_SECONDS.
-SWEEP_TENANTS = 3
-FAILED_BACKOFF_SECONDS = 3600
+# retried by the same process for FAILED_BACKOFF_SECONDS (app.graph.sweep).
 _failed: dict[tuple[str, str], float] = {}
 
 
@@ -1270,38 +1268,19 @@ def missing_clusters(db: Session, limit: int) -> list[tuple[str, str]]:
 
 def backfill_missing(limit: int = SWEEP_TENANTS) -> list[dict]:
     """Backfill up to ``limit`` tenants' current revisions; never raises for one tenant's failure."""
-    clock = time.monotonic()
-    with session_factory()() as db:
-        pending = missing_clusters(db, limit + len(_failed))
-    results = []
-    for tenant, revision in pending:
-        failed_at = _failed.get((tenant, revision))
-        if failed_at is not None and clock - failed_at < FAILED_BACKOFF_SECONDS:
-            continue
-        if len(results) >= limit:
-            break
-        try:
-            result = backfill(tenant, wait=False)
-        except Exception as exc:  # noqa: BLE001 - one tenant must not stop the sweep
-            _failed[(tenant, revision)] = clock
-            logger.warning(
-                "Cluster backfill failed tenant={} revision={} exception_type={}",
-                tenant,
-                revision,
-                type(exc).__name__,
-            )
-            result = {"tenant": tenant, "revision": revision, "backfilled": False, "failed": True}
-        else:
-            _failed.pop((tenant, revision), None)
-            if result.get("backfilled"):
-                logger.info(
-                    "Cluster backfill stored tenant={} revision={} clusters={}",
-                    tenant,
-                    result["revision"],
-                    result["clusters"],
-                )
-        results.append(result)
-    return results
+
+    def pending(count: int) -> list[tuple[str, str]]:
+        with session_factory()() as db:
+            return missing_clusters(db, count)
+
+    return run_sweep(
+        "Cluster",
+        pending,
+        lambda tenant: backfill(tenant, wait=False),
+        _failed,
+        lambda result: f"clusters={result['clusters']}",
+        limit,
+    )
 
 
 def main() -> None:

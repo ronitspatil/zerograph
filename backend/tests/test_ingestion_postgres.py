@@ -819,3 +819,39 @@ def test_worker_cluster_backfill_skips_a_publishing_tenant_then_fills_it(postgre
     assert [r["backfilled"] for r in clusters.backfill_missing()] == [True]
     with factory() as db:
         assert stored_summary(db, "tenant", "initial").total_nodes == len(exposed().nodes)
+
+
+def test_worker_sample_refresh_skips_a_publishing_tenant_then_refreshes_it(postgres_environment, monkeypatch):
+    factory, graph = postgres_environment
+    from app.db.locks import acquire_publication_lock
+    from app.graph import analysis
+    from app.graph.sample import SAMPLE_VERSION
+
+    snapshot = exposed()
+    graph.publish("tenant", "initial", snapshot)
+    expected = compute_analysis(snapshot)
+    with factory() as db:
+        store_analysis(db, "tenant", "initial", expected)
+        db.flush()
+        row = db.get(RevisionAnalysis, ("tenant", "initial"))
+        row.sample_ids, row.sample_version = sorted(row.sample_ids)[:2], None
+        db.commit()
+    monkeypatch.setattr(analysis, "session_factory", lambda: factory)
+    monkeypatch.setattr(analysis, "get_graph_store", lambda: graph)
+    monkeypatch.setattr(analysis, "_failed", {})
+    with factory() as db:
+        assert analysis.stale_samples(db, 10) == [("tenant", "initial")]
+    with factory() as publisher:
+        acquire_publication_lock(publisher, "tenant")  # A publication in progress.
+        started = time.perf_counter()
+        assert analysis.backfill_stale_samples() == [{"tenant": "tenant", "backfilled": False, "busy": True}]
+        assert time.perf_counter() - started < 2  # Skipped, not queued behind the publisher.
+        publisher.rollback()
+    with factory() as db:
+        assert db.get(RevisionAnalysis, ("tenant", "initial")).sample_version is None
+    assert [r["backfilled"] for r in analysis.backfill_stale_samples()] == [True]
+    with factory() as db:
+        row = db.get(RevisionAnalysis, ("tenant", "initial"))
+        assert (row.sample_ids, row.sample_version) == (expected.sample_ids, SAMPLE_VERSION)
+        assert analysis.stale_samples(db, 10) == []
+    assert analysis.backfill_stale_samples() == []

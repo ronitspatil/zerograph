@@ -8,6 +8,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { formatCount } from "@/lib/format";
 import type { Sensitivity } from "@/lib/types";
 
 const LEVELS: Sensitivity[] = [
@@ -66,11 +67,13 @@ export function SensitivityChart({
           />
           <YAxis
             allowDecimals={false}
+            tickFormatter={(value: number) => formatCount(value)}
             tick={AXIS_TICK}
             axisLine={false}
             tickLine={false}
           />
           <Tooltip
+            formatter={(value) => formatCount(Number(value))}
             contentStyle={{
               background: "#131b27",
               border: "1px solid #263142",

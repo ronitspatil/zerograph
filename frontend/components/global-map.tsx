@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { ChevronRight, LoaderCircle, Network } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
+import { formatCount } from "@/lib/format";
 import { kindNote, MAX_VISIBLE_MEMBERS, topFacets } from "@/lib/cluster-layout";
 import type { MapExpansion } from "@/components/cluster-canvas";
 import type {
@@ -30,7 +31,7 @@ const GraphCanvas = dynamic(
   { ssr: false, loading },
 );
 
-const count = (value: number) => value.toLocaleString("en-US");
+const count = formatCount;
 const typeNames: Record<string, string> = {
   AIAgent: "AI agents",
   MCPServer: "MCP servers",
@@ -343,7 +344,7 @@ export function GlobalMap({
               onSelect={setMember}
             />
           ) : (
-            <div className="global-map-canvas">
+            <div className="global-map-canvas" data-label-scope>
               <ClusterCanvas
                 clusters={clusters}
                 links={links}
@@ -354,7 +355,11 @@ export function GlobalMap({
                 onSelect={setMember}
               />
               {(expansions.length > 0 || expanding || notice) && (
-                <div className="global-map-inplace" role="status">
+                <div
+                  className="global-map-inplace"
+                  role="status"
+                  data-label-obstacle
+                >
                   {expanding ? (
                     <span>Expanding…</span>
                   ) : (

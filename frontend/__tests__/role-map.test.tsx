@@ -288,7 +288,7 @@ describe("secondary organization role map", () => {
     expect(screen.getByText(/0 \/ 0 roles/)).toHaveTextContent(
       "Complete role map",
     );
-    expect(screen.getByText(/0 \/ 0 roles/)).toHaveTextContent("1000 nodes");
+    expect(screen.getByText(/0 \/ 0 roles/)).toHaveTextContent("1,000 nodes");
   });
   it("exports only the visible role page and summaries matching its filtered IDs", async () => {
     await ready();

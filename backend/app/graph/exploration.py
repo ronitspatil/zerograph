@@ -25,7 +25,7 @@ class RevisionTotals:
     edges: int
     roles: int
     role_edges: int
-    # Ascending first node IDs of the revision (explore sample); None when not stored.
+    # The stored initial explore sample in selection order; None when not stored.
     sample_ids: tuple[str, ...] | None = None
 
 
@@ -89,7 +89,13 @@ def memory_explore(
 ) -> GraphSlice:
     validate_bounds(node_limit, edge_limit, root)
     if root is None:
-        selected = sorted(snapshot.nodes, key=lambda node: node.id)[:node_limit]
+        if totals is not None and totals.sample_ids is not None:
+            # The stored publication sample, exactly as the Cypher store serves it.
+            by_id = {node.id: node for node in snapshot.nodes}
+            selected = [by_id[i] for i in totals.sample_ids[:node_limit] if i in by_id]
+        else:
+            # Legacy revisions without one: the first IDs, like the Cypher fallback.
+            selected = sorted(snapshot.nodes, key=lambda node: node.id)[:node_limit]
     else:
         by_id = {node.id: node for node in snapshot.nodes}
         if root not in by_id:
@@ -209,7 +215,7 @@ def cypher_explore(
     # Legacy revisions without stored analysis keep the scoped aggregates.
     total_nodes, total_edges = (totals.nodes, totals.edges) if totals else scoped_totals(tx, params)
     if root is None and totals is not None and totals.sample_ids is not None:
-        # The stored ascending ID sample replaces a sorted scan of the whole revision.
+        # The stored publication sample replaces a sorted scan of the whole revision.
         nodes = cypher_nodes(tx, tenant, revision, list(totals.sample_ids[:node_limit]))
     elif root is None:
         rows = tx.run(

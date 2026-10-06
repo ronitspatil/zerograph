@@ -30,6 +30,14 @@ python -m app.graph.analysis --tenant TENANT_ID
 
 It is idempotent and prints JSON stating whether it stored anything. Bump `ANALYSIS_VERSION` in `app/graph/analysis.py` whenever overview, finding or totals logic changes; older rows are then ignored until republished or backfilled.
 
+### Explore samples (`sample_version`, migration `0006`)
+
+The initial explore sample (`sample_ids`, see `app/graph/sample.py`) is stamped with `SAMPLE_VERSION`. A current revision whose analysis row is current but whose sample is older (stored before migration `0006`, when samples were the first IDs in ascending order, or before a `SAMPLE_VERSION` bump) is refreshed by the worker, not the API: Celery beat runs `backfill_samples` every 60 s, which finds such tenants with one SQL query and refreshes at most 3 per run. It uses the same sweep as the global-map cluster backfill (`app/graph/sweep.py`, see [global-map.md](global-map.md)): each tenant in its own transaction under its publication lock taken with `pg_try_advisory_xact_lock`, so a tenant that is publishing is skipped (its publication stores a current sample anyway); the revision is pinned by the lock and a shared row lock on the pointer; a tenant whose refresh fails is logged and not retried by that worker process for an hour.
+
+Only the sample is recomputed. The worker reads the revision's topology from the graph store (node IDs, type labels and relationship endpoints; no payloads, no snapshot) and the stored finding paths and high-blast-radius IDs, which is exactly the input of the publish-time selection, so the result equals what a republication would store. If the graph revision's node or relationship count differs from the stored totals the refresh fails rather than storing a wrong sample. The row is updated in place: `/graph/explore` keeps serving the older sample (bounded and valid, just less representative) until the refresh commits, with no empty or 404 window. A sample stamped with a newer version (written by a newer release during a rolling deploy) is left alone.
+
+Revisions with no current analysis row are not refreshed by the sweep, since recomputing their overview and findings needs a full snapshot; they are computed on read and get a sample at their next publication or from the command above, which also refreshes only the sample when the rest of the row is current.
+
 ## Retention
 
 Applied retention deletes a revision's `revision_analysis` and `revision_findings` rows in the transaction that holds the tenant publication lock and records `graph.revision_deleted`. If that final SQL commit fails after the graph deletion, the rows remain but are unreachable (no pointer can name a deleted revision) and inert.

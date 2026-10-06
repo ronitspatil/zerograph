@@ -90,7 +90,7 @@ describe("console loading", () => {
     render(<Console demo={false} />);
     await screen.findByRole("button", { name: "Visible agent" });
     expect(screen.queryByText(/Connecting your workspace/)).toBeNull();
-    expect(screen.getByText(/1 \/ 20000 nodes/)).toBeInTheDocument();
+    expect(screen.getByText(/1 \/ 20,000 nodes/)).toBeInTheDocument();
     // Analysis metrics are shown as not yet known rather than zero.
     expect(screen.getAllByText("—").length).toBeGreaterThan(0);
     expect(calls()).toContain("overview");
@@ -98,6 +98,18 @@ describe("console loading", () => {
       expect(calls()).toContain("findings?limit=200&revision=r1"),
     );
     expect(screen.getByText("Loading findings…")).toBeInTheDocument();
+  });
+  it("shows overview counts with thousands separators", async () => {
+    const fallback = handler;
+    handler = (path) =>
+      path === "overview"
+        ? { ...overview, total_nhis: 47845, ai_agents: 9764 }
+        : fallback(path);
+    render(<Console demo={false} />);
+    expect(await screen.findByText("47,845")).toBeInTheDocument();
+    expect(screen.getByText("9,764")).toBeInTheDocument();
+    expect(screen.getByText("250")).toBeInTheDocument();
+    expect(screen.queryByText("47845")).toBeNull();
   });
   it("keeps the graph usable when overview fails", async () => {
     handler = (path) => {

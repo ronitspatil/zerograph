@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { X } from "lucide-react";
 import { api } from "@/lib/api";
+import { formatCount } from "@/lib/format";
 import type { GraphNode, Simulation } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 export function Simulator({
@@ -110,11 +111,11 @@ export function Simulator({
         <>
           <div className="simulation-metrics">
             <div>
-              <b>{result.affected_nodes.length}</b>
+              <b>{formatCount(result.affected_nodes.length)}</b>
               <span>Reachable nodes</span>
             </div>
             <div>
-              <b>{result.affected_assets.length}</b>
+              <b>{formatCount(result.affected_assets.length)}</b>
               <span>Data assets</span>
             </div>
           </div>

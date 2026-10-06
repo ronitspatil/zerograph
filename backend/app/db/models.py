@@ -88,8 +88,10 @@ class RevisionAnalysis(Base):
     total_findings: Mapped[int] = mapped_column(Integer)
     total_asset_weight: Mapped[int] = mapped_column(Integer)
     high_blast_ids: Mapped[list[str]] = mapped_column(JSON)
-    # The first explore-sample node IDs (ascending); None for rows stored before 0005.
+    # The initial explore sample (app.graph.sample, in selection order); None before 0005.
     sample_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    # SAMPLE_VERSION of sample_ids; None for ascending-ID samples stored before 0006.
+    sample_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 

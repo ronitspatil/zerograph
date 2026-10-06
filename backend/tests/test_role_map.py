@@ -151,7 +151,7 @@ def test_role_api_contract_revision_bounds_global_scope_and_missing_metadata(cli
     with patch.object(store, "snapshot", side_effect=AssertionError("Full snapshot forbidden")):
         # Roles outside the initial identity/data sample remain discoverable globally.
         sample = client.get("/api/v1/graph/explore", params={"node_limit": 2}).json()
-        assert not any(node["type"] == "CloudRole" for node in sample["nodes"])
+        assert "role:isolated" not in {node["id"] for node in sample["nodes"]}
         response = client.get("/api/v1/graph/roles", params={"role_limit": 2})
         assert response.status_code == 200
         body = response.json()

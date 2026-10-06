@@ -3,6 +3,7 @@ import { useState } from "react";
 import { RefreshCw } from "lucide-react";
 import type { Job } from "@/lib/types";
 import { api } from "@/lib/api";
+import { formatCount } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { byteLength, INLINE_LIMIT_BYTES, uploadSnapshot } from "@/lib/upload";
 function readText(file: Blob): Promise<string> {
@@ -39,7 +40,7 @@ export function Sources({
       if (source === "snapshot" && byteLength(text) > INLINE_LIMIT_BYTES) {
         await uploadSnapshot(JSON.parse(text), (sent, total) =>
           setProgress(
-            `Uploading chunk ${Math.min(sent + 1, total)} of ${total}`,
+            `Uploading chunk ${formatCount(Math.min(sent + 1, total))} of ${formatCount(total)}`,
           ),
         );
       } else {
@@ -184,7 +185,7 @@ export function Sources({
                       {j.status}
                     </span>
                   </td>
-                  <td>{j.node_count}</td>
+                  <td>{formatCount(j.node_count)}</td>
                   <td>{new Date(j.created_at).toLocaleString()}</td>
                 </tr>
               ))}

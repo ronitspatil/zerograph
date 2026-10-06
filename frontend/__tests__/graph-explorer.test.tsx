@@ -72,11 +72,11 @@ describe("bounded graph exploration", () => {
   it("loads only bounded explore, reports partial totals and exports the visible view", async () => {
     await ready();
     expect(api).toHaveBeenCalledWith(
-      "graph/explore?node_limit=250&edge_limit=1000",
+      "graph/explore?node_limit=250&edge_limit=2000",
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(vi.mocked(api).mock.calls.some(([p]) => p === "graph")).toBe(false);
-    expect(screen.getByText(/1 \/ 5000 nodes/)).toHaveTextContent(
+    expect(screen.getByText(/1 \/ 5,000 nodes/)).toHaveTextContent(
       "Partial view",
     );
     expect(

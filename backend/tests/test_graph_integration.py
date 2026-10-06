@@ -252,6 +252,16 @@ def test_real_bounded_exploration_search_scopes_and_dense_neighbors(monkeypatch)
                 assert store.explore(tenant, revision, None, limit, 50, totals) == memory.explore(
                     tenant, revision, None, limit, 50, totals
                 )
+            # The publish-time sample (selection order, not ascending) serves identically.
+            from app.graph.analysis import compute_analysis
+
+            selected = compute_analysis(snapshot).sample_ids
+            assert selected != sorted(selected)
+            totals = RevisionTotals(len(nodes), len(edges), 0, 0, tuple(selected) + ("missing",))
+            for limit, edge_limit in ((1, 5), (2, 1), (12, 50), (62, 500), (500, 2000)):
+                actual = store.explore(tenant, revision, None, limit, edge_limit, totals)
+                assert actual == memory.explore(tenant, revision, None, limit, edge_limit, totals)
+                assert {node.id for node in actual.nodes} == set(selected[:limit])
             members = ["root", "neighbor:001", "neighbor:059", "category", "missing"]
             for edge_limit in (1, 3, 10):
                 assert store.cluster_members(tenant, revision, members, edge_limit) == memory.cluster_members(
@@ -545,6 +555,49 @@ def test_real_simulation_matches_reference_engine(monkeypatch):
             # Another revision or tenant never contributes to a neighborhood.
             assert store.reach(tenant, "missing", chosen[0], 5, True) is None
             assert store.reach("other-" + tenant, revision, chosen[0], 5, True) is None
+    finally:
+        with store.driver.session() as session:
+            session.run("MATCH (n {tenant_id:$tenant}) DETACH DELETE n", tenant=tenant).consume()
+        store.close()
+        get_settings.cache_clear()
+
+
+@pytest.mark.skipif(not os.getenv("ZG_INTEGRATION_GRAPH"), reason="No real graph database configured")
+def test_real_topology_matches_the_snapshot_and_feeds_the_same_sample(monkeypatch):
+    from app.graph.analysis import compute_analysis
+    from app.graph.sample import select_sample
+
+    monkeypatch.setenv("ZG_GRAPH_VENDOR", os.environ["ZG_INTEGRATION_GRAPH"])
+    get_settings.cache_clear()
+    store = CypherGraphStore()
+    store.driver.verify_connectivity()
+    store.migrate()
+    tenant = "integration-" + str(uuid4())
+    revision = str(uuid4())
+    try:
+        snapshot = demo_snapshot()
+        store.publish(tenant, revision, snapshot)
+        topology = store.topology(tenant, revision)
+        types = {node.id: node.type.value for node in snapshot.nodes}
+        assert sorted(topology.ids) == sorted(types)
+        assert dict(zip(topology.ids, topology.types, strict=True)) == types
+        pairs = sorted(
+            (topology.ids[s], topology.ids[t])
+            for s, t in zip(topology.sources, topology.targets, strict=True)
+        )
+        assert pairs == sorted((edge.source, edge.target) for edge in snapshot.edges)
+        expected = compute_analysis(snapshot)
+        sample = select_sample(
+            topology.ids,
+            topology.types,
+            topology.sources,
+            topology.targets,
+            [finding.path for finding in expected.findings],
+            expected.high_blast_ids,
+        )
+        assert sample == expected.sample_ids
+        assert store.topology("other-tenant", revision).ids == []
+        assert store.topology(tenant, "").ids == []
     finally:
         with store.driver.session() as session:
             session.run("MATCH (n {tenant_id:$tenant}) DETACH DELETE n", tenant=tenant).consume()

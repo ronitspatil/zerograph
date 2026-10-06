@@ -2,6 +2,7 @@
 import { useState } from "react";
 import { ArrowUpRight } from "lucide-react";
 import { api } from "@/lib/api";
+import { formatCount } from "@/lib/format";
 import type { GraphNode, Preview, Remediation } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 const examplePolicy = JSON.stringify(
@@ -221,7 +222,8 @@ export function RemediationHub({
             <>
               <div className="diff-summary">
                 <strong>
-                  {preview.optimization.removed_actions.length} actions removed
+                  {formatCount(preview.optimization.removed_actions.length)}{" "}
+                  actions removed
                 </strong>
                 <span className="muted">Proposal only</span>
               </div>
@@ -296,7 +298,7 @@ export function RemediationHub({
       <div className="panel history-panel">
         <div className="panel-heading">
           <h3>Recent proposals</h3>
-          <span className="muted">{records.length} proposals</span>
+          <span className="muted">{formatCount(records.length)} proposals</span>
         </div>
         {records.length ? (
           <table>
@@ -315,7 +317,7 @@ export function RemediationHub({
                     {identities.find((n) => n.id === r.identity_id)?.name ||
                       r.identity_id}
                   </td>
-                  <td>{r.removed_actions.length}</td>
+                  <td>{formatCount(r.removed_actions.length)}</td>
                   <td>{r.status.replaceAll("_", " ")}</td>
                   <td>
                     {r.pr_url ? (

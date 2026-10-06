@@ -14,7 +14,7 @@ docker compose logs -f backend worker
 
 Open `http://localhost:3100`, select **Explore the demo workspace**, then **Load sample environment**. An ingestion job goes through Redis and Celery; the completed snapshot appears in the graph. Select Support Copilot to simulate compromise. The remediation hub contains a synthetic sample policy and observation history. Complete audit coverage is unchecked by default.
 
-Only the frontend is published, on the loopback interface. PostgreSQL, Redis, graph Bolt, and FastAPI are on the Compose network. `docker compose down` keeps named volumes. The scheduler recovers queued jobs if broker publication fails and resets workers stalled longer than 20 minutes.
+Only the frontend is published, on the loopback interface. PostgreSQL, Redis, graph Bolt, and FastAPI are on the Compose network. `docker compose down` keeps named volumes. The scheduler recovers queued jobs if broker publication fails and resets workers stalled longer than 20 minutes. Every 60 s it also has the worker bring revisions published by an older release up to date: global-map clusters ([global-map.md](global-map.md)) and explore samples ([revision-analysis.md](revision-analysis.md#explore-samples-sample_version-migration-0006)), at most 3 tenants per run each, skipping tenants that are publishing, so neither needs a manual backfill after an upgrade.
 
 ## Authentication and authorization
 
