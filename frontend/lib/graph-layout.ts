@@ -162,10 +162,15 @@ export const DETAIL_ZOOM = 1.35;
  * of the slice (the dense core and its satellites) instead of piling up on hubs.
  */
 export const LABEL_CELL = { width: 150, height: 56 };
-/** Overview hub labels that may sit over a dense core, drawn on a backdrop. */
-export const HUB_LABELS = 2;
-/** Most optional labels shown at overview zoom on wide and narrow canvases. */
-export const OVERVIEW_LABEL_LIMIT = { wide: 22, narrow: 8 };
+/**
+ * Overview labels on wide and narrow canvases: `limit` caps how many show, and
+ * `backdrops` how many may sit over other dots (a dense core's hubs), drawn on
+ * a backdrop.
+ */
+export const OVERVIEW_LABELS = {
+  wide: { limit: 22, backdrops: 3 },
+  narrow: { limit: 8, backdrops: 4 },
+};
 
 const DATA_STORES = new Set(["Database", "VectorStore", "S3Bucket"]);
 
@@ -223,9 +228,8 @@ export function spreadCandidates(
 /**
  * Ordered label candidates for the current view. Earlier ids win collisions.
  * `required` labels (the focused node and its neighborhood) are always shown;
- * `backed` labels (overview hubs) may cover dots and draw a backdrop.
  * With `positions` (model coordinates), large overview slices pick candidates
- * spread across the canvas (`spread`: cap them with OVERVIEW_LABEL_LIMIT);
+ * spread across the canvas (`spread`: show them with OVERVIEW_LABELS);
  * without positions they fall back to the role anchors.
  */
 export function labelCandidates(
@@ -241,12 +245,11 @@ export function labelCandidates(
 ): {
   order: string[];
   required: Set<string>;
-  backed: Set<string>;
   spread: boolean;
 } {
   if (state.focus) {
     const required = new Set([state.focus, ...(state.neighbors ?? [])]);
-    return { order: [...required], required, backed: new Set(), spread: false };
+    return { order: [...required], required, spread: false };
   }
   const degree = visibleDegree(graph);
   const detail = state.zoom > DETAIL_ZOOM;
@@ -264,7 +267,6 @@ export function labelCandidates(
     return {
       order: [...anchors, ...rest],
       required: new Set(),
-      backed: new Set(),
       spread: false,
     };
   }
@@ -272,7 +274,6 @@ export function labelCandidates(
     return {
       order: [...anchors],
       required: new Set(),
-      backed: new Set(),
       spread: false,
     };
   const order = spreadCandidates(
@@ -286,7 +287,6 @@ export function labelCandidates(
   return {
     order,
     required: new Set(),
-    backed: new Set(order.slice(0, HUB_LABELS)),
     spread: true,
   };
 }
@@ -340,7 +340,8 @@ export function underOverlay(
  * Required labels are kept unless they would sit under a screen overlay
  * (`blocked`: legend, zoom controls); optional labels must also fit inside the
  * viewport, clear every kept label, and not cover another node (`obstacles`,
- * keyed by node id) unless they are `backed` (drawn on a backdrop). At most
+ * keyed by node id); the first `backdrops` optional labels that would cover a
+ * node are kept anyway, for a caller that draws them on a backdrop. At most
  * `limit` optional labels are kept.
  */
 export function spacedLabels(
@@ -351,12 +352,12 @@ export function spacedLabels(
     required?: Set<string>;
     obstacles?: LabelBounds[];
     blocked?: LabelBounds[];
-    backed?: Set<string>;
+    backdrops?: number;
     limit?: number;
   } = {},
 ): Set<string> {
   const required = options.required ?? new Set<string>();
-  const backed = options.backed ?? new Set<string>();
+  let backdrops = options.backdrops ?? 0;
   let room = options.limit ?? Infinity;
   const obstacles = (options.obstacles ?? []).filter(validBox);
   const blocked = options.blocked ?? [];
@@ -378,10 +379,11 @@ export function spacedLabels(
     if (underOverlay(box, blocked)) continue;
     if (chosen.some((other) => overlaps(box, other, 6))) continue;
     if (
-      !backed.has(box.id) &&
       obstacles.some((node) => node.id !== box.id && overlaps(box, node, 0))
-    )
-      continue;
+    ) {
+      if (backdrops <= 0) continue;
+      backdrops--;
+    }
     chosen.push(box);
     room--;
   }

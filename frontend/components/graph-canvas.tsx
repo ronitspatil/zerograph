@@ -8,7 +8,7 @@ import {
   labelCandidates,
   labelFontSize,
   layoutInput,
-  OVERVIEW_LABEL_LIMIT,
+  OVERVIEW_LABELS,
   startLayout,
   overviewAnchors,
   relationshipHint,
@@ -105,11 +105,12 @@ export function GraphCanvas({
       },
       { selector: ".focus-muted", css: { opacity: 0.13 } },
       {
-        // Overview hub labels may sit over a dense core, so they get a backdrop.
+        // Spread overview labels may sit over a dense core: a backdrop, drawn above the dots.
         selector: "node.label-backed",
         css: {
           "text-background-color": "#0d1522",
           "text-background-opacity": 0.85,
+          "z-index": 1,
         },
       },
       {
@@ -257,21 +258,17 @@ export function GraphCanvas({
       const root = hovered || selectedRef.current;
       const rootNode = root ? instance.getElementById(root) : null;
       const focused = rootNode && rootNode.nonempty() ? root : null;
-      const { order, required, backed, spread } = labelCandidates(
-        graph,
-        anchors,
-        {
-          zoom,
-          focus: focused,
-          neighbors: focused
-            ? rootNode!.neighborhood("node").map((n) => n.id())
-            : [],
-          positions: instance
-            .nodes()
-            .map((n) => ({ id: n.id(), ...n.position() })),
-          risk: riskRef.current,
-        },
-      );
+      const { order, required, spread } = labelCandidates(graph, anchors, {
+        zoom,
+        focus: focused,
+        neighbors: focused
+          ? rootNode!.neighborhood("node").map((n) => n.id())
+          : [],
+        positions: instance
+          .nodes()
+          .map((n) => ({ id: n.id(), ...n.position() })),
+        risk: riskRef.current,
+      });
       instance.batch(() => {
         // Labels keep one screen size at every zoom, in step with the UI type scale.
         instance.nodes().style({
@@ -283,7 +280,7 @@ export function GraphCanvas({
         instance.nodes().removeClass("label-on label-backed");
         for (const id of order) {
           const node = instance.getElementById(id).addClass("label-on");
-          if (backed.has(id)) node.addClass("label-backed");
+          if (spread) node.addClass("label-backed");
         }
         // Only focused and hub labels draw a backdrop, so only they need padding.
         instance
@@ -320,13 +317,8 @@ export function GraphCanvas({
         {
           required,
           obstacles,
-          backed,
           blocked: overlayObstacles(element),
-          limit: !spread
-            ? undefined
-            : narrow
-              ? OVERVIEW_LABEL_LIMIT.narrow
-              : OVERVIEW_LABEL_LIMIT.wide,
+          ...(spread && OVERVIEW_LABELS[narrow ? "narrow" : "wide"]),
         },
       );
       instance.batch(() => {

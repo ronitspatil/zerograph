@@ -235,7 +235,6 @@ describe("graph label legibility", () => {
     expect(labelCandidates(graph, anchors, { zoom: 1, focus: null })).toEqual({
       order: ["role", "hub", "leaf"],
       required: new Set(),
-      backed: new Set(),
       spread: false,
     });
     const focused = labelCandidates(graph, anchors, {
@@ -342,7 +341,7 @@ describe("graph label legibility", () => {
     expect(priority.get("risky")).toBeGreaterThan(0);
   });
 
-  it("labels a spread of large overview slices with the top hubs backed, and falls back to anchors", () => {
+  it("labels a spread of large overview slices, and falls back to anchors", () => {
     const nodes = [
       node("hub", "CloudRole"),
       ...Array.from({ length: OVERVIEW_ALL_LABELS_MAX_NODES }, (_, i) =>
@@ -369,7 +368,10 @@ describe("graph label legibility", () => {
     });
     expect(spread.order).toEqual(["hub", "n6"]);
     expect(spread.spread).toBe(true);
-    expect(spread.backed).toEqual(new Set(["hub", "n6"]));
+    // Before a layout reports positions, only the role anchors are candidates.
+    expect(
+      labelCandidates(big, overviewAnchors(big), { zoom, focus: null }),
+    ).toEqual({ order: ["hub"], required: new Set(), spread: false });
     // Zoomed out, a cell covers more of the model.
     expect(
       labelCandidates(big, overviewAnchors(big), {
@@ -389,7 +391,7 @@ describe("graph label legibility", () => {
     ).toEqual(["n6"]);
   });
 
-  it("lets backed labels cover dots and caps optional labels", () => {
+  it("lets a few backdrop labels cover dots and caps optional labels", () => {
     const boxes = [
       { id: "hub", x1: 0, y1: 0, x2: 60, y2: 10 },
       { id: "leaf", x1: 100, y1: 0, x2: 160, y2: 10 },
@@ -402,9 +404,10 @@ describe("graph label legibility", () => {
     expect([
       ...spacedLabels(boxes, 400, 100, {
         obstacles,
-        backed: new Set(["hub"]),
+        backdrops: 1,
       }),
     ]).toEqual(["hub", "far"]);
+    expect([...spacedLabels(boxes, 400, 100, { obstacles })]).toEqual(["far"]);
     expect([
       ...spacedLabels(boxes, 400, 100, {
         required: new Set(["leaf"]),
