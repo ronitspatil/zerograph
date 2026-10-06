@@ -252,6 +252,16 @@ def test_real_bounded_exploration_search_scopes_and_dense_neighbors(monkeypatch)
                 assert store.explore(tenant, revision, None, limit, 50, totals) == memory.explore(
                     tenant, revision, None, limit, 50, totals
                 )
+            # The publish-time sample (selection order, not ascending) serves identically.
+            from app.graph.analysis import compute_analysis
+
+            selected = compute_analysis(snapshot).sample_ids
+            assert selected != sorted(selected)
+            totals = RevisionTotals(len(nodes), len(edges), 0, 0, tuple(selected) + ("missing",))
+            for limit, edge_limit in ((1, 5), (2, 1), (12, 50), (62, 500), (500, 2000)):
+                actual = store.explore(tenant, revision, None, limit, edge_limit, totals)
+                assert actual == memory.explore(tenant, revision, None, limit, edge_limit, totals)
+                assert {node.id for node in actual.nodes} == set(selected[:limit])
             members = ["root", "neighbor:001", "neighbor:059", "category", "missing"]
             for edge_limit in (1, 3, 10):
                 assert store.cluster_members(tenant, revision, members, edge_limit) == memory.cluster_members(

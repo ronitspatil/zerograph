@@ -24,6 +24,7 @@ def assert_parity(snapshot: GraphSnapshot) -> None:
     assert compact.totals == reference.totals
     assert compact.total_asset_weight == reference.total_asset_weight
     assert compact.high_blast_ids == reference.high_blast_ids
+    assert compact.sample_ids == reference.sample_ids
 
 
 def random_graph(seed: int, size: int) -> GraphSnapshot:

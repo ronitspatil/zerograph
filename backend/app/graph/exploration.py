@@ -6,7 +6,6 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from app.graph.sample import snapshot_sample
 from app.graph.schema import Edge, EdgeType, GraphSnapshot, Node
 
 
@@ -90,14 +89,13 @@ def memory_explore(
 ) -> GraphSlice:
     validate_bounds(node_limit, edge_limit, root)
     if root is None:
-        # The stored publication sample, as the Cypher store serves it; else the same
-        # selection from structure alone (no findings are computed on read).
         if totals is not None and totals.sample_ids is not None:
-            wanted = list(totals.sample_ids[:node_limit])
+            # The stored publication sample, exactly as the Cypher store serves it.
+            by_id = {node.id: node for node in snapshot.nodes}
+            selected = [by_id[i] for i in totals.sample_ids[:node_limit] if i in by_id]
         else:
-            wanted = snapshot_sample(snapshot, limit=node_limit)
-        by_id = {node.id: node for node in snapshot.nodes}
-        selected = [by_id[node_id] for node_id in wanted if node_id in by_id]
+            # Legacy revisions without one: the first IDs, like the Cypher fallback.
+            selected = sorted(snapshot.nodes, key=lambda node: node.id)[:node_limit]
     else:
         by_id = {node.id: node for node in snapshot.nodes}
         if root not in by_id:
