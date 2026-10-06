@@ -21,6 +21,7 @@ import {
   placeInDisc,
   placeLabels,
 } from "@/lib/cluster-layout";
+import { formatCount } from "@/lib/format";
 import { packedPositions } from "@/lib/graph-layout-engine";
 import {
   MEMBER_LIMITS,
@@ -245,7 +246,7 @@ export function ClusterCanvas({
           ...input.clusters.map((c, i) => ({
             data: {
               id: c.id,
-              label: `${c.label} · ${c.size.toLocaleString("en-US")}`,
+              label: `${c.label} · ${formatCount(c.size)}`,
               color: nodeColors[c.dominant_type] ?? "#73849a",
               diameter: clusterDiameter(c.size, largest),
               size: c.size,
@@ -767,7 +768,7 @@ export function ClusterCanvas({
         role="img"
         data-renderer={renderer ?? undefined}
         data-members={shownMembers}
-        aria-label={`Global map with ${clusters.length} clusters${shownMembers ? ` and ${shownMembers.toLocaleString("en-US")} members shown in place` : ""}. Use the cluster list to open one with the keyboard.`}
+        aria-label={`Global map with ${formatCount(clusters.length)} clusters${shownMembers ? ` and ${formatCount(shownMembers)} members shown in place` : ""}. Use the cluster list to open one with the keyboard.`}
       />
       <div className="graph-controls">
         <button aria-label="Zoom in" onClick={() => zoom(1.2)}>

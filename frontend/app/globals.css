@@ -766,6 +766,7 @@
   }
   .panel-heading > .count {
     white-space: nowrap;
+    font-variant-numeric: tabular-nums;
   }
   .live-label {
     display: flex;

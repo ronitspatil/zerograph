@@ -12,6 +12,7 @@ import {
   overviewAnchors,
   spacedLabels,
 } from "@/lib/graph-layout";
+import { formatCount } from "@/lib/format";
 import { createGraph, WEBGL_MIN_NODES } from "@/lib/renderer";
 import type { GraphData, GraphNode, Simulation } from "@/lib/types";
 
@@ -404,7 +405,7 @@ export function GraphCanvas({
         ref={container}
         className="graph-canvas"
         role="img"
-        aria-label={`Identity and data graph with ${graph.nodes.length} nodes. Use the identity list to select a node with the keyboard.`}
+        aria-label={`Identity and data graph with ${formatCount(graph.nodes.length)} nodes. Use the identity list to select a node with the keyboard.`}
       />
       <div className="graph-controls">
         <button aria-label="Zoom in" onClick={() => zoom(1.2)}>
