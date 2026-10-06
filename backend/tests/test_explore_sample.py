@@ -162,3 +162,22 @@ def test_api_default_view_serves_the_stored_sample_with_its_relationships(client
     small = client.get("/api/v1/graph/explore", params={"node_limit": 5, "edge_limit": 1}).json()
     assert [node["id"] for node in small["nodes"]] == sorted(analysis.sample_ids[:5])
     assert len(small["edges"]) == 1
+
+
+def test_outgoing_relationship_budget_skips_hubs_until_nothing_else_is_left():
+    # An admin hub granting 40 buckets, on the first finding's path, and a small team.
+    ids = ["agent", "hub", "team"] + [f"bucket:{i:02}" for i in range(40)] + ["dev", "repo"]
+    types = ["AIAgent", "CloudRole", "CloudRole"] + ["S3Bucket"] * 40 + ["ServiceAccount", "Database"]
+    index = {node_id: i for i, node_id in enumerate(ids)}
+    pairs = [("agent", "team"), ("team", "hub"), ("dev", "team"), ("team", "repo")]
+    pairs += [("hub", f"bucket:{i:02}") for i in range(40)]
+    sources = [index[a] for a, _ in pairs]
+    targets = [index[b] for _, b in pairs]
+    path = [["agent", "team", "hub", "bucket:00"]]
+    within = select_sample(ids, types, sources, targets, path, limit=4, budget=10)
+    # The seed chain stops before the hub; growth continues without it.
+    assert within[:2] == ["agent", "team"] and "hub" not in within
+    whole = select_sample(ids, types, sources, targets, path, budget=10)
+    assert sorted(whole) == sorted(ids)
+    assert whole.index("hub") > whole.index("repo")
+    assert select_sample(ids, types, sources, targets, path, limit=3)[:3] == ["agent", "team", "hub"]

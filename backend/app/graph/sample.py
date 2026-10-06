@@ -16,6 +16,12 @@ Selection, deterministic for a given revision whatever the node or edge order:
    within a type, most relationships into the sample, then highest degree, then ID.
 3. When the reachable frontier is exhausted, start again from the best unchosen
    entity in the same global order, so a graph that fits is included whole.
+
+The default view's edge query expands every outgoing relationship of the sampled
+entities, so the sample has an outgoing-relationship budget: an entity that would
+exceed it (an admin hub with thousands of grants) is skipped, and taken only once
+nothing else is left. A hub shows a sliver of its links in a bounded view anyway;
+its neighborhood is one search away.
 """
 
 import heapq
@@ -27,6 +33,8 @@ from app.graph.schema import NodeType
 SAMPLE_SIZE = 500
 # Bump when the selection changes: older stored samples are refreshed by the analysis backfill.
 SAMPLE_VERSION = 2
+# Outgoing relationships of the sample, all together: the default view's query cost.
+OUT_DEGREE_BUDGET = 3000
 # Finding paths that mark their entities as important (bounded work at any scale).
 IMPORTANT_FINDINGS = 64
 TYPE_ORDER = {kind.value: position for position, kind in enumerate(NodeType)}
@@ -40,6 +48,7 @@ def select_sample(
     finding_paths: Iterable[Sequence[str]] = (),
     important_ids: Iterable[str] = (),
     limit: int = SAMPLE_SIZE,
+    budget: int = OUT_DEGREE_BUDGET,
 ) -> list[str]:
     """Up to ``limit`` node IDs in selection order (see the module docstring).
 
@@ -55,7 +64,9 @@ def select_sample(
 
     # Undirected adjacency (one entry per relationship end) in CSR form.
     degree = array("l", bytes(8 * (count + 1)))
+    out = array("l", bytes(8 * count))
     for source, target in zip(sources, targets, strict=True):
+        out[source] += 1
         degree[source + 1] += 1
         degree[target + 1] += 1
     for node in range(count):
@@ -95,13 +106,18 @@ def select_sample(
     by_type: dict[int, list[tuple]] = {}
     selected: list[str] = []
     important_selected = 0
+    spent = 0
+
+    def affordable(node: int) -> bool:
+        return spent + out[node] <= budget
 
     def entry(node: int) -> tuple:
         return (-into[node], -links(node), ids[node], node)
 
     def choose(node: int) -> None:
-        nonlocal important_selected
+        nonlocal important_selected, spent
         chosen[node] = 1
+        spent += out[node]
         selected.append(ids[node])
         per_type[kind_rank[node]] = per_type.get(kind_rank[node], 0) + 1
         important_selected += important[node]
@@ -115,11 +131,13 @@ def select_sample(
             heapq.heappush(by_type.setdefault(kind_rank[neighbor], []), item)
 
     def fresh(heap: list[tuple]) -> tuple | None:
-        """Drop chosen or outdated entries (a node's newest entry ranks first)."""
+        """Drop chosen, outdated or unaffordable entries (a node's newest entry ranks first).
+
+        The budget only shrinks, so an unaffordable entry never becomes affordable."""
         while heap:
             item = heap[0]
             node = item[3]
-            if chosen[node] or -item[0] != into[node]:
+            if chosen[node] or -item[0] != into[node] or not affordable(node):
                 heapq.heappop(heap)
                 continue
             return item
@@ -149,10 +167,15 @@ def select_sample(
             restart = sorted(range(count), key=lambda node: (-important[node], -links(node), ids[node]))
         while chosen[restart[restart_at]]:
             restart_at += 1
+        # The best affordable entity; over budget only when nothing else is left.
+        for node in restart[restart_at:]:
+            if not chosen[node] and affordable(node):
+                return node
         return restart[restart_at]
 
     for node in seed_path:
-        if len(selected) >= limit:
+        # Stop at the first entity over budget, so the seed stays one connected chain.
+        if len(selected) >= limit or not affordable(node):
             break
         if not chosen[node]:
             choose(node)
