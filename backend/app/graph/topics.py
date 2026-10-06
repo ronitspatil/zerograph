@@ -784,10 +784,12 @@ def store_topics(db: Session, tenant: str, revision: str, computed: ComputedTopi
     )
     db.flush()
 
+    flagged: Counter = Counter(row["topic"] for row in computed.roles.values() if row["flags"])
+
     def topic_rows():
         for ordinal, t in enumerate(topic_order(computed)):
             topic, s = topics[t], stats[t]
-            overprivileged = sum(1 for row in computed.roles.values() if row["topic"] == t and row["flags"])
+            overprivileged = flagged[t]
             extra = {
                 key: value
                 for key, value in s.items()
