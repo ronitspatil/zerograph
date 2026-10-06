@@ -105,6 +105,8 @@ class CompactGraph:
         self.tags: list[tuple[str, ...]] = []
         self.provider: list[str] = []
         self.hints: dict[int, tuple[str, ...]] = {}
+        # Last-used hints (sparse): ``RoleLastUsed`` ISO date from metadata. Hints only.
+        self.last_used: dict[int, str] = {}
         self._tuples: dict[tuple[str, ...], tuple[str, ...]] = {}
         self.edge_source = array("l")
         self.edge_target = array("l")
@@ -153,6 +155,9 @@ class CompactGraph:
             )
             if hints:
                 self.hints[len(self.ids) - 1] = self._tuple(hints)
+            last_used = metadata.get("role_last_used")
+            if isinstance(last_used, str) and last_used:
+                self.last_used[len(self.ids) - 1] = last_used[:64]
 
     def _tuple(self, values) -> tuple[str, ...]:
         """One shared tuple per distinct value list (tags and actions repeat heavily)."""

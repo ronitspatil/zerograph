@@ -236,6 +236,8 @@ class RevisionTopicSummary(Base):
     tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     revision: Mapped[str] = mapped_column(String(64), primary_key=True)
     topic_version: Mapped[int] = mapped_column(Integer)
+    # Usage evidence the rows were computed with (app.graph.usage.Evidence.fingerprint); "" = none.
+    usage_fingerprint: Mapped[str] = mapped_column(String(32), default="", server_default="")
     total_topics: Mapped[int] = mapped_column(Integer)
     total_links: Mapped[int] = mapped_column(Integer)
     totals: Mapped[dict[str, Any]] = mapped_column(JSON)
@@ -309,6 +311,14 @@ class RevisionTopicMember(Base):
     cross_topic_grants: Mapped[int] = mapped_column(Integer)
     restricted_outside: Mapped[int] = mapped_column(Integer)
     profile: Mapped[list[Any]] = mapped_column(JSON)
+    # Excess privilege (roles and identities): needed set basis ("used", "inferred", "none"),
+    # needed sensitivity weight with/without hubs, used assets, own grants unused (on restricted data).
+    basis: Mapped[str] = mapped_column(String(16), default="", server_default="")
+    needed_weight: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    needed_weight_excl_hubs: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    used_resources: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    unused_grants: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    unused_restricted: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
 
 class RevisionPolicyDocument(Base):

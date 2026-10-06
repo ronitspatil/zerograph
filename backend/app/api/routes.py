@@ -74,6 +74,7 @@ from app.graph.topics import (
     TopicDetailResponse,
     TopicMapResponse,
     TopicNotFound,
+    stored_privilege,
     stored_topic_summary,
     topic_detail,
     topic_map,
@@ -488,12 +489,32 @@ def role_map(
     )
 
 
+def excess_privilege_tile(privilege: dict | None) -> dict | None:
+    """Graph-wide excess privilege for the overview, always decomposed with/without hubs."""
+    if not privilege:
+        return None
+    evidence = privilege.get("evidence", {})
+    return {
+        "status": evidence.get("status", "none"),
+        "window_start": evidence.get("window_start"),
+        "window_end": evidence.get("window_end"),
+        "sufficient_services": evidence.get("sufficient_services", []),
+        "identities": privilege["identities"],
+        "roles": privilege["roles"],
+        "unused_grants": privilege["unused_grants"],
+        "unused_restricted_grants": privilege["unused_restricted_grants"],
+        "dormant_identities": privilege["dormant_identities"],
+        "dormant_roles": privilege["dormant_roles"],
+    }
+
+
 @router.get("/overview")
 def overview(db: DB, graph: Graph, actor: Viewer):
     revision = pin_revision(db, actor.tenant_id)
     stored = stored_analysis(db, actor.tenant_id, revision)
     if stored is not None:
-        return {"revision": revision, **stored.overview}
+        privilege = stored_privilege(db, actor.tenant_id, revision) if revision else None
+        return {"revision": revision, **stored.overview, "excess_privilege": excess_privilege_tile(privilege)}
     # Legacy revision (published before stored analysis) or empty tenant.
     snapshot = graph.snapshot(actor.tenant_id, revision) if revision else GraphSnapshot()
     return {"revision": revision, **compute_analysis(snapshot).overview}

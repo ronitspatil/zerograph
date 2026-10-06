@@ -145,6 +145,9 @@ def test_publish_stores_analysis_before_pointer_swap_and_reads_never_load_snapsh
         assert db.scalar(select(func.count()).select_from(RevisionFinding)) == row.total_findings
     with patch.object(graph, "snapshot", side_effect=AssertionError("full snapshot load")):
         body = client.get("/api/v1/overview").json()
+        # The excess-privilege tile comes from the stored topic rows (no usage evidence here).
+        tile = body.pop("excess_privilege")
+        assert tile["status"] == "none" and tile["identities"]["epi"] is None
         assert body == {"revision": revision, **reference_overview(published)}
         response = client.get("/api/v1/findings")
         assert response.status_code == 200

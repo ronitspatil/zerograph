@@ -39,7 +39,9 @@ and are counted in the backup bridge metadata.
    upload. Re-sending a file number replaces it.
 3. `POST /api/v1/usage/uploads/{id}/commit` aggregates the files into `observed_access`
    and records coverage. The response carries the counts and the tenant's evidence
-   status.
+   status. The worker then recomputes topics and the excess-privilege index for the
+   current revision (see [privilege.md](privilege.md)); later publications use the
+   evidence directly.
 
 `GET /api/v1/usage` (viewer) returns the evidence status and the last 20 uploads. At
 most `ZG_MAX_OPEN_UPLOADS` usage uploads may be open per tenant; open uploads expire
@@ -73,7 +75,8 @@ complete coverage windows that ends latest spans at least **90 days** and ends w
 **7 days** of evaluation. The tenant's evidence status is `none` (no uploads),
 `attested` (at least one sufficient service) or `partial`. The evidence fingerprint
 (committed uploads plus which services are sufficient) changes when an upload is
-committed or deleted, or when evidence goes stale.
+committed or deleted, or when evidence goes stale; the worker's topic sweep then
+recomputes the current revision's topics and EPI (`backfill_topics`, every 60 s).
 
 `RoleLastUsed` and IAM Access Advisor last-accessed data, collected into node metadata
 by the AWS collector, are **hints only**: they are reported beside the analysis, never
