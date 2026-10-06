@@ -957,20 +957,25 @@
     background: var(--hover);
     color: var(--text);
   }
+  /* Legend entries sit on a backdrop (like the in-place chip) so the graph
+     under them never crosses their text; labels are placed clear of them. */
   .graph-legend {
     position: absolute;
-    left: 16px;
+    left: 12px;
     bottom: 16px;
     right: 64px;
     display: flex;
     flex-wrap: wrap;
-    gap: 8px 16px;
+    gap: 8px;
     pointer-events: none;
   }
   .graph-legend span {
     display: flex;
     align-items: center;
     gap: 8px;
+    padding: 0 var(--space-1);
+    border-radius: 4px;
+    background: rgba(10, 16, 27, 0.88);
     font-size: 12px;
     color: var(--muted);
   }
@@ -1902,7 +1907,7 @@
       padding: 8px 12px;
     }
     .graph-legend {
-      gap: 4px 12px;
+      gap: 4px;
     }
     .graph-footer {
       padding: 8px 12px;
