@@ -130,6 +130,243 @@ def generate(n: int, seed: int = 7, exposed_rate: float = 0.002) -> GraphSnapsho
     )
 
 
+# Planted-topic fixture (optimizer Phase 1): name, weight, sensitivity bias, name tokens.
+PLANTED_TOPICS = [
+    ("data-lake", 6, Sensitivity.CONFIDENTIAL, ("lake", "datalake", "lakehouse")),
+    ("payments-db", 3, Sensitivity.RESTRICTED, ("payments", "billing", "ledger")),
+    ("ml-vector", 3, Sensitivity.CONFIDENTIAL, ("embeddings", "vector", "rag")),
+    ("ci-cd", 3, Sensitivity.INTERNAL, ("build", "artifacts", "pipeline")),
+    ("analytics-warehouse", 5, Sensitivity.CONFIDENTIAL, ("warehouse", "analytics", "reporting")),
+    ("crm", 4, Sensitivity.CONFIDENTIAL, ("crm", "salesforce", "leads")),
+    ("hr-people", 2, Sensitivity.RESTRICTED, ("hr", "people", "payroll")),
+    ("observability-logs", 4, Sensitivity.INTERNAL, ("logs", "metrics", "traces")),
+    ("customer-api", 4, Sensitivity.INTERNAL, ("api", "gateway", "customer")),
+    ("support-tickets", 2, Sensitivity.CONFIDENTIAL, ("support", "tickets", "zendesk")),
+    ("marketing", 3, Sensitivity.INTERNAL, ("marketing", "campaigns", "ads")),
+    ("security-audit", 1, Sensitivity.RESTRICTED, ("audit", "security", "siem")),
+]
+# Name tokens shared by every topic (filtered out by the analysis as unspecific).
+GENERIC_TOKENS = (
+    "prod", "staging", "raw", "events", "store", "primary", "replica", "archive", "cache", "main", "data", "backup",
+)  # fmt: skip
+TOPIC_FIXTURE = (
+    "Per N nodes: same type mix as the base fixture; 12 planted topics (weighted); each data asset belongs to one "
+    "topic, ~50% carry a topic=/app=/team= tag, ~60% a topic token in their name; roles get 1-60 grants (Zipf), "
+    "85% in their topic and 15% cross-topic over-grants (45% for 1% broad roles); 5% near-duplicate roles; "
+    "identities assume 1-3 roles (90% in their topic), 5% also an admin hub; 7% dormant identities; 3 admin hub "
+    "roles each granting 10% of all data with a wildcard action. Usage evidence is generated but only written to "
+    "a sidecar (Phase 2). Seeded, deterministic."
+)
+_READ = {
+    NodeType.BUCKET: ["s3:GetObject", "s3:ListBucket"],
+    NodeType.DATABASE: ["rds-data:ExecuteStatement"],
+    NodeType.VECTOR: ["aoss:ReadDocument"],
+}
+_WRITE = {
+    NodeType.BUCKET: ["s3:PutObject"],
+    NodeType.DATABASE: ["rds-data:BatchExecuteStatement"],
+    NodeType.VECTOR: ["aoss:WriteDocument"],
+}
+_PREFIX = {NodeType.BUCKET: "bucket", NodeType.DATABASE: "db", NodeType.VECTOR: "index"}
+
+
+def generate_topics(n: int = 100_000, seed: int = 11) -> tuple[GraphSnapshot, dict, dict]:
+    """Planted-topic identity graph with a ground-truth sidecar and synthetic usage.
+
+    Returns ``(snapshot, truth, usage)``. ``truth`` holds the planted topic of every
+    data asset, role and identity, the cross-topic over-grants (role, data) that are
+    never used, near-duplicate roles, dormant identities and hub roles. ``usage`` is
+    synthetic observed access over a 90-day window (role -> data used, identity ->
+    role assumed); Phase 1 never reads it. Deterministic for the same ``n``/``seed``
+    (adapted from the optimizer design scout's ``measure.py`` planted generator).
+    """
+    rng = random.Random(seed)
+    names = [topic[0] for topic in PLANTED_TOPICS]
+    weights = [topic[1] for topic in PLANTED_TOPICS]
+    bias = {topic[0]: topic[2] for topic in PLANTED_TOPICS}
+    tokens = {topic[0]: topic[3] for topic in PLANTED_TOPICS}
+    data_kinds = (NodeType.DATABASE, NodeType.BUCKET, NodeType.VECTOR)
+    shared_account = f"{100000000000 + 99:012d}"
+    topic_of: dict[str, str] = {}
+    kind_of: dict[str, NodeType] = {}
+    by_type: dict[NodeType, list[str]] = {}
+    nodes: list[Node] = []
+    for kind, share in MIX:
+        ids = []
+        for i in range(max(3, int(n * share))):
+            node_id = f"{kind.value.lower()}:{i:07d}"
+            topic = rng.choices(names, weights)[0]
+            topic_of[node_id], kind_of[node_id] = topic, kind
+            account = (
+                f"{100000000000 + names.index(topic):012d}" if rng.random() < 0.7 else shared_account
+            )
+            tags: list[str] = []
+            sensitivity = Sensitivity.INTERNAL
+            if kind in data_kinds:
+                sensitivity = bias[topic] if rng.random() < 0.7 else rng.choice(SENSITIVITIES)
+                if rng.random() < 0.5:
+                    key = rng.choices(["topic", "app", "team"], [5, 3, 2])[0]
+                    tags.append(f"{key}={topic}")
+                tags.append("env=" + rng.choice(["prod", "prod", "staging"]))
+                if rng.random() < 0.1:
+                    tags.append("PII")
+                if rng.random() < 0.6:
+                    name = f"{rng.choice(tokens[topic])}-{rng.choice(GENERIC_TOKENS)}-{i:05d}"
+                else:
+                    name = f"{_PREFIX[kind]}-{rng.getrandbits(24):06x}"
+            elif kind == NodeType.ROLE:
+                if rng.random() < 0.4:
+                    suffix = rng.choice(["reader", "writer", "etl", "service", "ops"])
+                    name = f"{rng.choice(tokens[topic])}-{suffix}-{i:05d}"
+                else:
+                    name = f"role-{i:05d}"
+            else:
+                name = f"{kind.value.lower()}-{i:05d}"
+            nodes.append(
+                Node(
+                    id=node_id,
+                    type=kind,
+                    name=name,
+                    account_id=account,
+                    provider="aws",
+                    sensitivity=sensitivity,
+                    tags=tags,
+                    privileged=kind == NodeType.ROLE and rng.random() < 0.02,
+                )
+            )
+            ids.append(node_id)
+        by_type[kind] = ids
+    data = by_type[NodeType.DATABASE] + by_type[NodeType.BUCKET] + by_type[NodeType.VECTOR]
+    data_by_topic: dict[str, list[str]] = {name: [] for name in names}
+    for item in data:
+        data_by_topic[topic_of[item]].append(item)
+    for pool in data_by_topic.values():
+        rng.shuffle(pool)
+    roles = by_type[NodeType.ROLE]
+    roles_by_topic: dict[str, list[str]] = {name: [] for name in names}
+    for role in roles:
+        roles_by_topic[topic_of[role]].append(role)
+    hubs = roles[:3]
+    broad = set(roles[3 : 3 + int(len(roles) * 0.01)])
+    grants: dict[str, dict[str, str]] = {role: {} for role in roles}  # role -> data -> "read"/"write"
+    used: dict[str, set[str]] = {role: set() for role in roles}
+    over: set[tuple[str, str]] = set()
+    for role in roles:
+        topic = topic_of[role]
+        if role in hubs:
+            for item in rng.sample(data, len(data) // 10):
+                grants[role][item] = "admin"
+                if rng.random() < 0.01:
+                    used[role].add(item)
+                else:
+                    over.add((role, item))
+            continue
+        pool = data_by_topic[topic]
+        for _ in range(1 + zipf_pick(rng, 60, 1.0)):
+            cross = rng.random() < (0.45 if role in broad else 0.15)
+            item = rng.choice(data) if cross else pool[zipf_pick(rng, len(pool), 1.02)]
+            if item in grants[role]:
+                continue
+            grants[role][item] = "read" if rng.random() < 0.7 else "write"
+            legitimate_cross = cross and topic_of[item] != topic and rng.random() < 0.05
+            if topic_of[item] == topic or legitimate_cross:
+                if rng.random() < 0.65:
+                    used[role].add(item)
+            else:
+                over.add((role, item))
+    duplicates: dict[str, str] = {}
+    for role in rng.sample(roles[3:], int(len(roles) * 0.05)):
+        peers = [
+            p for p in roles_by_topic[topic_of[role]] if p != role and p not in hubs and len(grants[p]) >= 4
+        ]
+        if not peers:
+            continue
+        peer = rng.choice(peers)
+        for item in grants[role]:
+            over.discard((role, item))
+        grants[role] = dict(grants[peer])
+        used[role] = set(used[peer])
+        for item in grants[role]:
+            if (peer, item) in over:
+                over.add((role, item))
+        if grants[role] and rng.random() < 0.5:
+            item = next(iter(grants[role]))
+            grants[role].pop(item)
+            used[role].discard(item)
+            over.discard((role, item))
+        duplicates[role] = peer
+    hub_set = set(hubs)
+    for node in nodes:
+        if node.id in hub_set:
+            node.name = f"org-admin-{hubs.index(node.id)}"
+            node.privileged = True
+    identities = (
+        by_type[NodeType.HUMAN] + by_type[NodeType.SERVICE] + by_type[NodeType.AGENT] + by_type[NodeType.MCP]
+    )
+    assumes: dict[str, list[str]] = {}
+    assume_used: dict[str, set[str]] = {}
+    dormant: set[str] = set()
+    for identity in identities:
+        if rng.random() < 0.07:
+            dormant.add(identity)
+        topic = topic_of[identity]
+        chosen: list[str] = []
+        used_roles: set[str] = set()
+        for _ in range(1 + (rng.random() < 0.6) + (rng.random() < 0.4)):
+            same = rng.random() < 0.9
+            pool = roles_by_topic[topic] if same else roles
+            role = pool[zipf_pick(rng, len(pool))]
+            if role not in chosen:
+                chosen.append(role)
+            if same and identity not in dormant and rng.random() < 0.85:
+                used_roles.add(role)
+        if rng.random() < 0.05:
+            hub = rng.choice(hubs)
+            if hub not in chosen:
+                chosen.append(hub)
+        assumes[identity], assume_used[identity] = chosen, used_roles
+
+    edges: dict[str, Edge] = {}
+
+    def add(source, target, kind, actions):
+        edge = Edge(source=source, target=target, type=kind, actions=actions, evidence=[f"policy:{source}"])
+        edges.setdefault(edge.id, edge)
+
+    for identity in identities:
+        for role in assumes[identity]:
+            add(identity, role, EdgeType.ASSUMES, ["sts:AssumeRole"])
+    for role in roles:
+        for item, access in grants[role].items():
+            kind = kind_of[item]
+            if access == "admin":
+                add(role, item, EdgeType.WRITE, ["*"])
+            elif access == "read":
+                add(role, item, EdgeType.READ, list(_READ[kind]))
+            else:
+                add(role, item, EdgeType.WRITE, list(_WRITE[kind]))
+    snapshot = GraphSnapshot.model_construct(nodes=nodes, edges=list(edges.values()), warnings=[], source="snapshot")
+    truth = {
+        "seed": seed,
+        "topics": names,
+        "resource_topic": {item: topic_of[item] for item in data},
+        "role_topic": {role: topic_of[role] for role in roles if role not in hub_set},
+        "identity_topic": {identity: topic_of[identity] for identity in identities},
+        "hub_roles": hubs,
+        "broad_roles": sorted(broad),
+        "over_grants": sorted([list(pair) for pair in over]),
+        "duplicate_of": dict(sorted(duplicates.items())),
+        "dormant_identities": sorted(dormant),
+    }
+    usage = {
+        "seed": seed,
+        "window_days": 90,
+        "note": "Synthetic observed access for optimizer Phase 2; not read by Phase 1 analysis.",
+        "role_data_used": {role: sorted(used[role]) for role in roles if used[role]},
+        "identity_role_used": {i: sorted(assume_used[i]) for i in identities if assume_used[i]},
+    }
+    return snapshot, truth, usage
+
+
 @contextmanager
 def app_database(url: str | None):
     """Yield a SQLAlchemy URL for disposable app state, removed afterwards."""
