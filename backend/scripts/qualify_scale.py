@@ -469,20 +469,25 @@ def qualify(
         # Alternate a baseline publish of the same graph with publish-time analysis
         # disabled (a legacy-style revision readers compute on read) and a normal
         # publish; each run uses a fresh tenant, and the fastest run of each counts.
-        # Publish-time clustering (Phase 4) runs in both arms; its measured time is
-        # subtracted so the comparison isolates the analysis cost, and reported.
-        runs = {"without": [], "with": [], "analysis": [], "clustering": []}
+        # Publish-time clustering (Phase 4) and topics (optimizer Phase 1) run in both
+        # arms; their measured time is subtracted so the comparison isolates the
+        # analysis cost, and reported.
+        runs = {"without": [], "with": [], "analysis": [], "clustering": [], "topics": []}
 
         def clustered(tenant: str) -> float:
             spent: dict[str, float] = {}
+            topics: dict[str, float] = {}
             with (
                 patch.object(tasks, "compute_clusters", measured(spent, "compute", tasks.compute_clusters)),
                 patch.object(tasks, "store_clusters", measured(spent, "store", tasks.store_clusters)),
                 patch.object(tasks, "load_previous", measured(spent, "load", tasks.load_previous)),
+                patch.object(tasks, "compute_topics", measured(topics, "compute", tasks.compute_topics)),
+                patch.object(tasks, "store_topics", measured(topics, "store", tasks.store_topics)),
             ):
                 elapsed = publish(tenant)
             runs["clustering"].append(sum(spent.values()))
-            return elapsed - sum(spent.values())
+            runs["topics"].append(sum(topics.values()))
+            return elapsed - sum(spent.values()) - sum(topics.values())
 
         for run in range(publish_runs):
             with (
@@ -506,8 +511,9 @@ def qualify(
             "analysis_s": round(analysis_seconds, 4),
             "analysis_compute_s": round(min(spent["compute"] for spent in runs["analysis"]), 4),
             "analysis_store_s": round(min(spent["store"] for spent in runs["analysis"]), 4),
-            # Excluded from the publish times above (it runs in both arms).
+            # Excluded from the publish times above (they run in both arms).
             "clustering_s": round(min(runs["clustering"]), 4),
+            "topics_s": round(min(runs["topics"]), 4),
             "runs": {
                 "with_analysis_s": [round(value, 4) for value in runs["with"]],
                 "without_analysis_s": [round(value, 4) for value in runs["without"]],
