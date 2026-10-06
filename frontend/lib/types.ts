@@ -82,6 +82,108 @@ export interface Overview {
   uncertain_edges: number;
   accounts: string[];
   sensitivity: Record<Sensitivity, number>;
+  /** Graph-wide excess privilege (null before topics exist). */
+  excess_privilege?: ExcessPrivilegeTile | null;
+}
+
+/** How needed access was established: attested observed use, a peer baseline, or none. */
+export type PrivilegeBasis = "used" | "inferred" | "none";
+
+/** Granted vs needed sensitivity weight, with and without hub roles. */
+export interface PrivilegeAggregate {
+  granted_weight: number;
+  needed_weight: number;
+  granted_weight_excl_hubs: number;
+  needed_weight_excl_hubs: number;
+  epi: number | null;
+  epi_excl_hubs: number | null;
+  basis: Record<PrivilegeBasis, number>;
+}
+
+export interface ServiceEvidence {
+  service: string;
+  window_start: string | null;
+  window_end: string | null;
+  days: number;
+  fresh: boolean;
+  attested_uploads: number;
+  complete_uploads: number;
+  events: number;
+  unmapped: number;
+  sufficient: boolean;
+}
+
+export interface UsageEvidence {
+  status: "none" | "partial" | "attested";
+  evaluated_at?: string;
+  window_start?: string | null;
+  window_end?: string | null;
+  window_days_required?: number;
+  freshness_days?: number;
+  uploads?: number;
+  observed_pairs?: number;
+  services?: Record<string, ServiceEvidence>;
+  sufficient_services?: string[];
+  sources?: string[];
+  hints?: string[];
+  fingerprint?: string;
+}
+
+export interface TopicPrivilege {
+  roles: PrivilegeAggregate;
+  identities: PrivilegeAggregate;
+  unused_grants: number;
+  unused_restricted_grants: number;
+  dormant_identities: number;
+  dormant_roles: number;
+  dormant_role_hint_conflicts: number;
+}
+
+export interface GraphPrivilege extends TopicPrivilege {
+  evidence: UsageEvidence;
+  matched_observations?: number;
+  unmatched_observations?: number;
+  peer_share?: number;
+}
+
+export interface ExcessPrivilegeTile {
+  status: UsageEvidence["status"];
+  window_start: string | null;
+  window_end: string | null;
+  sufficient_services: string[];
+  identities: PrivilegeAggregate;
+  roles: PrivilegeAggregate;
+  unused_grants: number;
+  unused_restricted_grants: number;
+  dormant_identities: number;
+  dormant_roles: number;
+}
+
+export interface UsageUploadSummary {
+  id: string;
+  status: string;
+  source: string;
+  revision: string;
+  window_start: string;
+  window_end: string;
+  attested_services: string[];
+  created_at: string;
+  committed_at: string | null;
+  stats: Record<string, unknown>;
+  coverage: {
+    service: string;
+    attested: boolean;
+    events: number;
+    unmapped: number;
+    complete: boolean;
+  }[];
+}
+
+export interface UsageStatus {
+  evidence: UsageEvidence;
+  uploads: UsageUploadSummary[];
+  services: string[];
+  notice: string;
 }
 export interface Finding {
   id: string;
@@ -272,6 +374,8 @@ export interface TopicSummary {
   seeds: Record<string, number>;
   sensitivity: Record<string, number>;
   types: Record<string, number>;
+  /** Excess privilege of the topic's roles and identities (absent before Phase 2 rows). */
+  privilege?: TopicPrivilege | null;
 }
 
 export interface TopicMap {
@@ -286,6 +390,7 @@ export interface TopicMap {
     cross_topic_grants?: number;
     cross_topic_roles?: number;
     roles?: number;
+    privilege?: GraphPrivilege;
   };
   warnings: string[];
   view: {
@@ -318,6 +423,15 @@ export interface TopicMember {
   cross_topic_grants: number;
   restricted_outside: number;
   profile: { topic_id: string; share: number; resources: number }[];
+  /** Roles and identities: how needed access was established ("" for data assets). */
+  basis?: PrivilegeBasis | "";
+  needed_weight?: number;
+  needed_weight_excl_hubs?: number;
+  epi?: number | null;
+  epi_excl_hubs?: number | null;
+  used_resources?: number;
+  unused_grants?: number;
+  unused_restricted?: number;
 }
 
 export interface TopicDetail {

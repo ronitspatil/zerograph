@@ -4,6 +4,9 @@ import { Sources } from "@/components/sources";
 import { api } from "@/lib/api";
 vi.mock("@/lib/api", () => ({ api: vi.fn() }));
 beforeEach(() => vi.clearAllMocks());
+// The usage evidence panel loads its status on mount; ingestion calls are the rest.
+const ingestionCalls = () =>
+  vi.mocked(api).mock.calls.filter((call) => call[0] !== "usage");
 it("queues only a configured AWS connector without client credentials", async () => {
   vi.mocked(api).mockResolvedValue({ id: "job" });
   const refresh = vi.fn();
@@ -13,7 +16,7 @@ it("queues only a configured AWS connector without client credentials", async ()
   });
   fireEvent.click(screen.getByRole("button", { name: "Queue ingestion" }));
   await waitFor(() => expect(refresh).toHaveBeenCalledOnce());
-  expect(JSON.parse(vi.mocked(api).mock.calls[0][1]!.body as string)).toEqual({
+  expect(JSON.parse(ingestionCalls()[0][1]!.body as string)).toEqual({
     source: "aws",
     payload: {},
   });
@@ -51,7 +54,7 @@ it("uploads a large snapshot file in chunks through an upload session", async ()
   );
   fireEvent.click(screen.getByRole("button", { name: "Queue ingestion" }));
   await waitFor(() => expect(refresh).toHaveBeenCalledOnce());
-  const paths = vi.mocked(api).mock.calls.map((call) => call[0]);
+  const paths = ingestionCalls().map((call) => call[0]);
   expect(paths[0]).toBe("ingestions/uploads");
   expect(paths.at(-1)).toBe("ingestions/uploads/upload-1/commit");
   const chunks = vi
