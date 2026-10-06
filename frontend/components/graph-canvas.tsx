@@ -413,9 +413,12 @@ export function GraphCanvas({
         aria-label={`Identity and data graph with ${formatCount(graph.nodes.length)} nodes. Use the identity list to select a node with the keyboard.`}
       />
       {hint && (
-        <p className="graph-hint" role="note">
-          {hint}
-        </p>
+        // Labels stay clear of the hint, like the other overlays.
+        <div data-label-obstacle>
+          <p className="graph-hint" role="note">
+            {hint}
+          </p>
+        </div>
       )}
       <div className="graph-controls">
         <button aria-label="Zoom in" onClick={() => zoom(1.2)}>

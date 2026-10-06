@@ -1,3 +1,4 @@
+import { formatCount } from "./format";
 import type { GraphData } from "./types";
 export interface Position {
   id: string;
@@ -328,10 +329,10 @@ export function relationshipHint(
   if (graph.view?.mode === "roles")
     return count === 1
       ? "This role has no direct role links in this view."
-      : `These ${count} roles have no direct role links between them in this view.`;
+      : `These ${formatCount(count)} roles have no direct role links between them in this view.`;
   const subject =
     count === 1
       ? "This entity has no relationships in this view."
-      : `These ${count} entities have no relationships between them in this view.`;
+      : `These ${formatCount(count)} entities have no relationships between them in this view.`;
   return `${subject} Search for an entity or open a neighborhood to see its connections.`;
 }
