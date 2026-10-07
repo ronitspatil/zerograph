@@ -600,3 +600,123 @@ def test_diff_correctness_and_reingest_round_trip(client, environment):
         after = actual_after(P.load_model(db, "tenant-a", later))
     assert after[0] == expected[0]
     assert set(after[1]) == set(expected[1]) and all(after[1][k] == expected[1][k] for k in expected[1])
+
+
+@pytest.fixture
+def rollout_postgres(monkeypatch):
+    import os
+
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import sessionmaker
+
+    from app.api import routes
+    from app.db.models import Base
+
+    url = os.getenv("ZG_INGESTION_POSTGRES_URL")
+    if not url:
+        pytest.skip("No disposable PostgreSQL integration database configured")
+    namespace = "zg_rollout_" + uuid4().hex
+    admin = create_engine(url)
+    with admin.begin() as db:
+        db.execute(text(f'CREATE SCHEMA "{namespace}"'))
+    engine = create_engine(url, connect_args={"options": f"-csearch_path={namespace}"}, pool_size=10)
+    factory = sessionmaker(engine, expire_on_commit=False)
+    Base.metadata.create_all(engine)
+    config = fake_git.settings()
+    monkeypatch.setattr(routes, "get_settings", lambda: config)
+    try:
+        yield factory
+    finally:
+        engine.dispose()
+        with admin.begin() as db:
+            db.execute(text(f'DROP SCHEMA "{namespace}" CASCADE'))
+        admin.dispose()
+
+
+def test_postgres_concurrent_pr_opens_elect_exactly_one_canary(rollout_postgres, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from fastapi import HTTPException
+
+    from app.api import routes
+    from app.remediation.gitops_sync import PullRequest
+
+    factory = rollout_postgres
+    ids = [str(uuid4()) for _ in range(4)]
+    with factory() as db:
+        db.add(TenantState(tenant_id="tenant-a", revision="r1"))
+        for number, change_id in enumerate(ids):
+            record = Remediation(
+                id=str(uuid4()),
+                tenant_id="tenant-a",
+                actor="t",
+                status="rollout",
+                identity_id=f"role:{number}",
+                original=doc({"Effect": "Allow", "Action": "s3:GetObject", "Resource": [A, B]}),
+                optimized=doc({"Effect": "Allow", "Action": "s3:GetObject", "Resource": [B]}),
+                evidence={"rollout_id": change_id},
+            )
+            db.add(record)
+            db.add(
+                RolloutChange(
+                    id=change_id,
+                    tenant_id="tenant-a",
+                    scope="role",
+                    topic_id="t1",
+                    subject_id=f"role:{number}",
+                    subject_name=f"role {number}",
+                    proposal_ids=[f"p{number}"],
+                    state="draft",
+                    canary=False,
+                    revision="r1",
+                    remediation_ids=[record.id],
+                    files=[
+                        {
+                            "path": f"role-{number}/inline-a.json",
+                            "op": "rewrite",
+                            "principal": f"role:{number}",
+                            "policy_name": "a",
+                            "remediation_id": record.id,
+                        }
+                    ],
+                    summary={"proposal_count": 1},
+                    watch_days=7,
+                    actor="t",
+                    created_at=NOW,
+                    updated_at=NOW,
+                )
+            )
+        db.commit()
+    barrier = Barrier(len(ids))
+
+    class Client:
+        def __init__(self, settings):
+            self.real = GitOpsClient(settings, fake_git.FakeRepository().transport())
+
+        def change_scope(self, *args):
+            return self.real.change_scope(*args)
+
+        def close(self):
+            self.real.close()
+
+        def open_change(self, change_id, *args, **kwargs):
+            return PullRequest(f"https://github.com/acme/policies/pull/{ids.index(change_id) + 1}", "b")
+
+    monkeypatch.setattr(routes, "GitOpsClient", Client)
+    actor = Actor("alice", "tenant-a", frozenset({"admin"}))
+
+    def request(change_id):
+        barrier.wait(5)
+        with factory() as db:
+            try:
+                return routes.open_rollout_pr(change_id, db, None, actor)["state"]
+            except HTTPException as exc:
+                return exc.status_code
+
+    with ThreadPoolExecutor(max_workers=len(ids)) as pool:
+        results = list(pool.map(request, ids))
+    assert sorted(results, key=str) == [409, 409, 409, "pr_open"]
+    with factory() as db:
+        canaries = db.scalars(select(RolloutChange).where(RolloutChange.canary.is_(True))).all()
+        assert len(canaries) == 1 and canaries[0].state == "pr_open"
