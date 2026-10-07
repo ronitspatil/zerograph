@@ -37,6 +37,7 @@ from app.engine.analysis_index import WEIGHTS
 from app.engine.blast_radius import BlastRadius, apply_overlay
 from app.engine.blast_radius import simulate as simulate_reach
 from app.engine.toxic_combos import Finding
+from app.graph import proposals as optimizer
 from app.graph import usage
 from app.graph.analysis import (
     UnknownCursor,
@@ -65,7 +66,6 @@ from app.graph.exploration import (
     RootNotFound,
     SearchResponse,
 )
-from app.graph import proposals as optimizer
 from app.graph.policies import PrincipalPoliciesResponse, principal_policies
 from app.graph.repository import MAX_VISIBLE_EDGES, MAX_VISIBLE_MEMBERS, GraphStore, get_graph_store
 from app.graph.role_map import RoleMapResponse, RoleMapView
@@ -566,7 +566,9 @@ class SimulationOverlay(BaseModel):
     model_config = ConfigDict(extra="forbid")
     proposal_ids: list[ProposalId] = Field(default_factory=list, max_length=200)
     edges: list[OverlayEdge] = Field(default_factory=list, max_length=2000)
-    edge_ids: list[Annotated[str, Field(min_length=1, max_length=64)]] = Field(default_factory=list, max_length=2000)
+    edge_ids: list[Annotated[str, Field(min_length=1, max_length=64)]] = Field(
+        default_factory=list, max_length=2000
+    )
     disabled_nodes: list[EntityId] = Field(default_factory=list, max_length=500)
 
 
@@ -622,7 +624,9 @@ def _overlay(db: Session, tenant: str, revision: str, request: SimulationOverlay
         if model is None:
             raise _proposals_missing()
         try:
-            ordinals = optimizer.selected_ordinals(db, tenant, revision, request.proposal_ids, None, None, model)
+            ordinals = optimizer.selected_ordinals(
+                db, tenant, revision, request.proposal_ids, None, None, model
+            )
         except optimizer.ProposalNotFound as exc:
             raise HTTPException(404, f"Proposal not found in this revision: {exc}") from None
         overlay = optimizer.overlay_from(model, ordinals)
@@ -752,7 +756,15 @@ def list_proposals(
     summary = _proposal_summary(db, actor.tenant_id, current)
     response.headers["X-Graph-Revision"] = current
     return optimizer.proposal_page(
-        db, summary, tier=tier, kind=type, topic=topic, subject=subject, state=state, cursor=cursor, limit=limit
+        db,
+        summary,
+        tier=tier,
+        kind=type,
+        topic=topic,
+        subject=subject,
+        state=state,
+        cursor=cursor,
+        limit=limit,
     )
 
 
@@ -815,7 +827,9 @@ class ProposalSimulationRequest(BaseModel):
 
 
 @router.post("/proposals/simulate", response_model=SimulationResult, response_model_exclude_none=True)
-def simulate_proposals(request: ProposalSimulationRequest, response: Response, db: DB, graph: Graph, actor: Viewer):
+def simulate_proposals(
+    request: ProposalSimulationRequest, response: Response, db: DB, graph: Graph, actor: Viewer
+):
     """Blast radius before and after one or more proposals of the pinned revision (simulated only)."""
     current = expected_revision(db, actor.tenant_id, request.revision)
     _proposal_summary(db, actor.tenant_id, current)
@@ -879,10 +893,14 @@ def decide_proposal(
     _proposal_summary(db, actor.tenant_id, current)
     try:
         row = optimizer.proposal_row(db, actor.tenant_id, current, proposal_id)
-        optimizer.decide(db, actor.tenant_id, current, proposal_id, request.state, actor.subject, request.note)
+        optimizer.decide(
+            db, actor.tenant_id, current, proposal_id, request.state, actor.subject, request.note
+        )
     except optimizer.ProposalNotFound:
         raise HTTPException(404, "Proposal not found in this revision") from None
-    action = {"accepted": "proposal.accepted", "rejected": "proposal.rejected"}.get(request.state, "proposal.cleared")
+    action = {"accepted": "proposal.accepted", "rejected": "proposal.rejected"}.get(
+        request.state, "proposal.cleared"
+    )
     audit(
         db,
         actor,
