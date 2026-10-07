@@ -75,3 +75,24 @@ identities derive from their role sets). Timings are stored in the summary
 force of these definitions on explicit sets (no caching), used by the tests and the
 qualification to check every role and identity, every topic and the graph-wide values
 within 1e-6, in both the used and the inferred mode.
+
+## Measured (Memgraph 3.2.0, PostgreSQL 16)
+
+`backend/scripts/qualify_usage.py` on the planted fixture (100,000 nodes, seed 11): the
+fixture's usage uploaded as 12 gzip CloudTrail export files (279,273 records) through
+the real API, then the worker sweep, then alternating publications with usage disabled
+(Phase 1 behaviour) and enabled. One M5 MacBook, Memgraph in Docker (colima).
+
+| Measure | Result |
+|---|---|
+| Usage ingest (12 files, 18.2 MB gzip) | 9.3 s, 163,821 observed pairs; API peak RSS 416 MB |
+| Recompute on upload (sweep, Memgraph snapshot load included) | 8.1 s, worker peak RSS 715 MB |
+| Publication without / with usage (min) | 18.9 / 19.9 s (+1.0 s; topic phase 2.2 to 3.7 s) |
+| Worker peak RSS without / with usage | 384–396 / 440–448 MB |
+| Role-level EPI / whole EPI compute | 0.06 / 0.45 s (in process) |
+| Data topic NMI / purity after refinement | 0.863 / 0.921 (Phase 1: 0.823 / 0.923) |
+| Role primary topic accuracy | 96.4% |
+| EPI vs brute-force reference | 55,000 roles and identities, 18 topics, graph: exact (error 0), used and inferred modes |
+| Graph-wide identity EPI (without hubs) | 0.983 (0.633); roles 0.479 |
+| Dormant identities | 6,097 detected, recall 1.0 of 2,839 planted, 0 with observed use |
+| `GET /graph/topics` / topic page / `/overview` p95 | 7.0 / 5.3 / 1.8 ms |
