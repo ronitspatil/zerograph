@@ -735,6 +735,11 @@ def qualify(
                 patch.object(tasks, "load_previous", measured(spent, "load", tasks.load_previous)),
                 patch.object(tasks, "compute_topics", measured(topics, "compute", tasks.compute_topics)),
                 patch.object(tasks, "store_topics", measured(topics, "store", tasks.store_topics)),
+                patch.object(
+                    tasks,
+                    "compute_proposals_and_store",
+                    measured(topics, "proposals", tasks.compute_proposals_and_store),
+                ),
             ):
                 elapsed = publish(tenant)
             runs["clustering"].append(sum(spent.values()))

@@ -271,9 +271,8 @@ def _publish_job(job_id: str, token: str, tenant: str, collected: GraphSnapshot 
         )
         store_topics(db, tenant, revision, topics)
         # Least-privilege proposals (proposed, never applied) and their what-if model.
-        compute_proposals_and_store(
-            db, tenant, revision, topics, findings_from(published.analysis.findings)
-        )
+        findings = published.analysis.findings if published.analysis is not None else ()
+        compute_proposals_and_store(db, tenant, revision, topics, findings_from(findings))
         published.graph = None
         del topics
         if previous and previous != set_id:
