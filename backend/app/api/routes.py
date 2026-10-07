@@ -1877,6 +1877,10 @@ def create_pr(remediation_id: str, db: DB, actor: Admin):
     client = None
     try:
         record = refresh()
+        if record.evidence.get("rollout_id"):
+            raise HTTPException(
+                409, "This remediation belongs to an optimizer rollout change; use the rollout"
+            )
         if record.pr_url:
             return {"url": record.pr_url, "status": record.status}
         settings = get_settings()
