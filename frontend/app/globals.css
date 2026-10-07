@@ -1576,6 +1576,13 @@
   }
   .proposal-simulation dl {
     margin-bottom: 0;
+    /* A fixed value column: results replacing "—" never re-wrap the labels. */
+    grid-template-columns: minmax(0, 1fr) 128px;
+  }
+  .proposal-simulation dd {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .proposal-detail .proposal-sim-status {
     white-space: nowrap;
