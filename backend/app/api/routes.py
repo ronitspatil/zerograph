@@ -18,12 +18,13 @@ from app.collectors.mcp_agent_collector import MCPInventory
 from app.collectors.tasks import ingest
 from app.core.auth import Actor, require_role
 from app.core.config import get_settings
-from app.db.locks import pin_pointer_gate
+from app.db.locks import acquire_rollout_lock, pin_pointer_gate
 from app.db.models import (
     AuditEvent,
     IngestionJob,
     Remediation,
     RevisionAnalysis,
+    RolloutChange,
     StagedEntity,
     TenantState,
     UploadSession,
@@ -80,6 +81,7 @@ from app.graph.topics import (
     topic_detail,
     topic_map,
 )
+from app.remediation import rollout
 from app.remediation.gitops_sync import GitOpsClient, GitOpsConflict, GitOpsError
 from app.remediation.policy_optimizer import Optimization, UsageEvidence, optimize, terraform_policy
 
@@ -927,6 +929,540 @@ def decide_proposal(
     }
 
 
+# ---------------------------------------------------------------------------
+# Optimizer rollout: accepted proposals -> draft pull requests, canary, rollback.
+# Nothing is applied by ZeroGraph; merging happens in the customer's repository.
+
+TOPIC_KEY = r"^[A-Za-z0-9_.:-]{1,32}$"
+ChangeId = Annotated[str, Path(pattern=r"^[0-9a-f-]{36}$")]
+
+
+class RolloutSelection(BaseModel):
+    """One principal (a pull request per role) or one topic (a bundle of its principals)."""
+
+    model_config = ConfigDict(extra="forbid")
+    subject_id: str | None = Field(default=None, min_length=1, max_length=512)
+    topic_id: str | None = Field(default=None, pattern=TOPIC_KEY)
+    revision: str | None = Field(default=None, max_length=128)
+
+
+class RevertRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: str = Field(default="", max_length=500)
+
+
+def tenant_key(tenant: str) -> str:
+    return hashlib.sha256(tenant.encode()).hexdigest()[:16]
+
+
+def _rollout_busy(exc: DBAPIError, db: Session) -> HTTPException:
+    if getattr(exc.orig, "sqlstate", None) != "55P03":
+        raise exc
+    db.rollback()
+    return HTTPException(
+        503, "Rollout or graph publication is busy; retry shortly", headers={"Retry-After": "5"}
+    )
+
+
+def _bounded_lock(db: Session) -> None:
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(text("SELECT set_config('lock_timeout', :timeout, true)"), {"timeout": "5000ms"})
+
+
+def _plan(db: Session, tenant: str, revision: str, selection: RolloutSelection, **extra) -> rollout.Plan:
+    if (selection.subject_id is None) == (selection.topic_id is None):
+        raise HTTPException(422, "Choose one principal (subject_id) or one topic (topic_id)")
+    _proposal_summary(db, tenant, revision)
+    model = optimizer.load_model(db, tenant, revision)
+    if model is None:
+        raise _proposals_missing()
+    try:
+        return rollout.plan_change(
+            db, tenant, revision, model, subject=selection.subject_id, topic=selection.topic_id, **extra
+        )
+    except rollout.RolloutError as exc:
+        raise HTTPException(409, str(exc)) from None
+
+
+def _change_simulation(db, graph, actor, revision, plan: rollout.Plan) -> dict | None:
+    """Blast radius of a single principal before/after the change (None for bundles)."""
+    if plan.scope != "role" or not plan.included:
+        return None
+    try:
+        result = run_simulation(
+            db,
+            graph,
+            actor,
+            revision,
+            plan.subject_id,
+            5,
+            True,
+            SimulationOverlay(proposal_ids=plan.proposal_ids[:200]),
+        )
+    except HTTPException:
+        return None
+    after = result.whatif.after if result.whatif else result
+    return {
+        "risk_before": result.risk_score,
+        "risk_after": after.risk_score,
+        "assets_before": len(result.affected_assets),
+        "assets_after": len(after.affected_assets),
+        "assets_removed": result.whatif.assets_removed_count if result.whatif else 0,
+    }
+
+
+def _usage_evidence(db: Session, tenant: str, revision: str) -> dict:
+    summary = optimizer.stored_proposal_summary(db, tenant, revision)
+    totals = summary.totals if summary is not None else {}
+    totals = totals if isinstance(totals, dict) else json.loads(totals)
+    return totals.get("evidence", {})
+
+
+def _gitops_settings(actor: Actor):
+    settings = get_settings()
+    if not settings.git_repository or not settings.git_token.get_secret_value():
+        raise HTTPException(409, "GitOps destination is not configured")
+    if settings.git_tenant_id != actor.tenant_id:
+        raise HTTPException(403, "GitOps destination is not configured for this tenant")
+    return settings
+
+
+@router.get("/rollout")
+def rollout_changes(db: DB, actor: Viewer, limit: int = Query(default=100, ge=1, le=500)):
+    """Rollout changes of the tenant (newest first) with state, canary gating, PR links and the
+    canary watch countdown. Merged changes whose watch passed without a flag become verified."""
+    verified = rollout.refresh(db, actor.tenant_id)
+    if verified:
+        db.commit()
+    changes = list(
+        db.scalars(
+            select(RolloutChange)
+            .where(RolloutChange.tenant_id == actor.tenant_id)
+            .order_by(RolloutChange.created_at.desc(), RolloutChange.id)
+            .limit(limit)
+        )
+    )
+    canaries: dict[str, dict] = {}
+    views = []
+    for change in changes:
+        decision = rollout.gate(db, change) if change.state == "draft" else None
+        views.append(rollout.view(change, decision))
+        if change.topic_id not in canaries:
+            current = rollout.canary_of(db, actor.tenant_id, change.topic_id)
+            canaries[change.topic_id] = (
+                {"change_id": current.id, "subject_name": current.subject_name, "state": current.state}
+                if current
+                else None
+            )
+    settings = get_settings()
+    return {
+        "changes": views,
+        "canaries": canaries,
+        "watch_days": settings.rollout_watch_days,
+        "denied_threshold": settings.rollout_denied_threshold,
+        "gitops_configured": bool(settings.git_repository) and settings.git_tenant_id == actor.tenant_id,
+        "notice": rollout.NOTICE,
+    }
+
+
+@router.post("/rollout/plan")
+def plan_rollout(request: RolloutSelection, db: DB, actor: Analyst):
+    """Preview the change for a principal or topic bundle: eligible accepted proposals, file
+    diffs, draft-only proposals with reasons. Nothing is stored or sent. Analyst: the diffs
+    show policy documents (like ``GET /graph/policies``)."""
+    current = expected_revision(db, actor.tenant_id, request.revision)
+    plan = _plan(db, actor.tenant_id, current, request)
+    note = ""
+    if plan.files:
+        probe = RolloutChange(
+            id="", tenant_id=actor.tenant_id, scope=plan.scope, topic_id=plan.topic_id, subject_name=""
+        )
+        decision = rollout.gate(db, probe)
+        note = (
+            "Becomes the topic's canary"
+            if decision.canary
+            else ("Widens the rollout (canary verified)" if decision.allowed else decision.reason)
+        )
+    return rollout.plan_view(plan, note)
+
+
+@router.post("/rollout/changes", status_code=201)
+def create_rollout_change(request: RolloutSelection, db: DB, graph: Graph, actor: Admin):
+    """Store a draft change (one principal, or a topic bundle) from accepted proposals. Its pull
+    request opens separately, subject to canary gating."""
+    try:
+        current = expected_revision(db, actor.tenant_id, request.revision)
+        plan = _plan(db, actor.tenant_id, current, request)
+        if not plan.files:
+            raise HTTPException(409, "No accepted proposal of this selection can become a pull request")
+        evidence = _usage_evidence(db, actor.tenant_id, current)
+        simulation = _change_simulation(db, graph, actor, current, plan)
+        _bounded_lock(db)
+        acquire_rollout_lock(db, actor.tenant_id)
+        # Re-plan under the rollout lock: another change may have taken these proposals.
+        plan = _plan(db, actor.tenant_id, current, request)
+        model = optimizer.load_model(db, actor.tenant_id, current)
+        change = rollout.create_change(
+            db,
+            actor.tenant_id,
+            actor.subject,
+            plan,
+            model,
+            evidence,
+            simulation,
+            get_settings().rollout_watch_days,
+        )
+    except rollout.RolloutError as exc:
+        raise HTTPException(409, str(exc)) from None
+    except DBAPIError as exc:
+        raise _rollout_busy(exc, db) from None
+    audit(
+        db,
+        actor,
+        "rollout.created",
+        {
+            "change_id": change.id,
+            "scope": change.scope,
+            "subject": change.subject_id,
+            "topic": change.topic_id,
+            "revision": current,
+            "proposals": len(change.proposal_ids),
+            "files": [item["path"] for item in change.files][:50],
+        },
+    )
+    db.commit()
+    return rollout.detail(change, rollout.gate(db, change))
+
+
+@router.get("/rollout/changes/{change_id}")
+def get_rollout_change(change_id: ChangeId, db: DB, actor: Analyst):
+    """One change with its file diffs, proposals and draft-only proposals (analyst: the diffs
+    show policy documents)."""
+    try:
+        change = rollout.get_change(db, actor.tenant_id, change_id)
+    except rollout.ChangeNotFound:
+        raise HTTPException(404, "Rollout change not found") from None
+    return rollout.detail(change, rollout.gate(db, change) if change.state == "draft" else None)
+
+
+@router.delete("/rollout/changes/{change_id}", status_code=204)
+def discard_rollout_change(change_id: ChangeId, db: DB, actor: Admin):
+    """Discard a draft whose pull request was never requested (its proposals become free)."""
+    try:
+        change = rollout.get_change(db, actor.tenant_id, change_id, lock=True)
+    except rollout.ChangeNotFound:
+        raise HTTPException(404, "Rollout change not found") from None
+    if change.state != "draft" or change.gitops_scope is not None:
+        raise HTTPException(409, "Only a draft whose pull request was never requested can be discarded")
+    for remediation_id in change.remediation_ids:
+        record = db.get(Remediation, remediation_id)
+        if record is not None and record.tenant_id == actor.tenant_id:
+            db.delete(record)
+    audit(db, actor, "rollout.discarded", {"change_id": change.id, "subject": change.subject_id})
+    db.delete(change)
+    db.commit()
+    return Response(status_code=204)
+
+
+@router.post("/rollout/changes/{change_id}/pr")
+def open_rollout_pr(change_id: ChangeId, db: DB, graph: Graph, actor: Admin):
+    """Open the change's draft pull request through GitOps, subject to canary gating. A draft
+    generated on an older revision is regenerated first (same proposals by ID)."""
+    client = None
+
+    def refresh():
+        _bounded_lock(db)
+        acquire_rollout_lock(db, actor.tenant_id)
+        return rollout.get_change(db, actor.tenant_id, change_id, lock=True)
+
+    try:
+        change = refresh()
+        if change.pr_url:
+            return {"url": change.pr_url, "state": change.state}
+        if change.state != "draft":
+            raise HTTPException(409, f"A {change.state} change has no pull request to open")
+        decision = rollout.gate(db, change)
+        if not decision.allowed:
+            raise HTTPException(409, decision.reason)
+        settings = _gitops_settings(actor)
+        key = tenant_key(actor.tenant_id)
+        if change.gitops_scope is None:
+            current = pin_revision(db, actor.tenant_id)
+            if change.revision != current:
+                selection = (
+                    RolloutSelection(subject_id=change.subject_id)
+                    if change.scope == "role"
+                    else RolloutSelection(topic_id=change.topic_id)
+                )
+                plan = _plan(
+                    db,
+                    actor.tenant_id,
+                    current,
+                    selection,
+                    exclude_change=change.id,
+                    only=change.proposal_ids,
+                )
+                model = optimizer.load_model(db, actor.tenant_id, current)
+                rollout.regenerate(
+                    db,
+                    change,
+                    plan,
+                    model,
+                    _usage_evidence(db, actor.tenant_id, current),
+                    None,
+                    actor.subject,
+                )
+                audit(db, actor, "rollout.regenerated", {"change_id": change.id, "revision": current})
+            client = GitOpsClient(settings)
+            files = rollout.change_files(db, change)
+            scope = client.change_scope(change.id, key, files)
+            change.gitops_scope = {**scope, "canary": decision.canary}
+            change.canary = decision.canary
+            change.summary = {**change.summary, "canary_note": rollout.canary_note(change, decision)}
+            change.updated_at = now()
+            audit(
+                db,
+                actor,
+                "rollout.pr_requested",
+                {"change_id": change.id, "canary": decision.canary, "scope": scope},
+            )
+            db.commit()  # Durable intent (and the canary claim) precede provider side effects.
+            change = refresh()
+            if change.pr_url:
+                return {"url": change.pr_url, "state": change.state}
+            client.close()
+        settings = _gitops_settings(actor)
+        client = GitOpsClient(settings)
+        files = rollout.change_files(db, change)
+        scope = client.change_scope(change.id, key, files)
+        if {k: v for k, v in change.gitops_scope.items() if k != "canary"} != scope:
+            raise HTTPException(409, "Change destination or content changed; discard and recreate the change")
+        db.commit()  # Release the rollout lock before calling the provider.
+        pr = client.open_change(
+            change.id,
+            key,
+            files,
+            rollout.pr_title(change),
+            rollout.pr_body(change, change.summary.get("canary_note", ""), key, settings.git_policy_prefix),
+        )
+        change = rollout.get_change(db, actor.tenant_id, change_id, lock=True)
+        if not change.pr_url:
+            change.pr_url, change.state, change.updated_at = pr.url, "pr_open", now()
+            for remediation_id in change.remediation_ids:
+                record = db.get(Remediation, remediation_id)
+                if record is not None:
+                    record.pr_url, record.status = pr.url, "pr_opened"
+            audit(
+                db,
+                actor,
+                "rollout.pr_opened",
+                {"change_id": change.id, "url": pr.url, "canary": change.canary},
+            )
+        db.commit()
+        return {"url": change.pr_url, "state": change.state}
+    except rollout.ChangeNotFound:
+        raise HTTPException(404, "Rollout change not found") from None
+    except rollout.RolloutError as exc:
+        raise HTTPException(409, str(exc)) from None
+    except GitOpsConflict as exc:
+        raise HTTPException(409, str(exc)) from None
+    except GitOpsError as exc:
+        raise HTTPException(502, str(exc)) from None
+    except DBAPIError as exc:
+        raise _rollout_busy(exc, db) from None
+    finally:
+        if client is not None:
+            client.close()
+
+
+@router.post("/rollout/changes/{change_id}/merged")
+def mark_rollout_merged(change_id: ChangeId, db: DB, actor: Admin):
+    """Record that the pull request was merged in the customer's repository; the canary watch starts."""
+    return _transition(db, actor, change_id, "merged")
+
+
+@router.post("/rollout/changes/{change_id}/reverted")
+def mark_rollout_reverted(change_id: ChangeId, db: DB, actor: Admin):
+    """Record that the revert pull request was merged; the change is rolled back."""
+    return _transition(db, actor, change_id, "rolled_back")
+
+
+def _transition(db: Session, actor: Actor, change_id: str, target: str) -> dict:
+    try:
+        _bounded_lock(db)
+        acquire_rollout_lock(db, actor.tenant_id)
+        change = rollout.get_change(db, actor.tenant_id, change_id, lock=True)
+        rollout.transition(change, target)
+    except rollout.ChangeNotFound:
+        raise HTTPException(404, "Rollout change not found") from None
+    except rollout.RolloutError as exc:
+        raise HTTPException(409, str(exc)) from None
+    except DBAPIError as exc:
+        raise _rollout_busy(exc, db) from None
+    audit(
+        db,
+        actor,
+        f"rollout.{target}",
+        {"change_id": change.id, "canary": change.canary, "watch_days": change.watch_days},
+    )
+    db.commit()
+    return rollout.view(change)
+
+
+def open_revert(db: Session, actor: Actor, change_id: str, reason: str, automatic: bool = False) -> dict:
+    """Open (or find) the change's revert pull request: restores every original byte for byte.
+    Never merges. Audited; used by the API and by the AccessDenied watch."""
+    client = None
+    try:
+        _bounded_lock(db)
+        change = rollout.get_change(db, actor.tenant_id, change_id, lock=True)
+        if change.revert_pr_url:
+            return {"url": change.revert_pr_url, "state": change.state}
+        rollout.can_revert(change)
+        settings = _gitops_settings(actor)
+        key = tenant_key(actor.tenant_id)
+        client = GitOpsClient(settings)
+        files = rollout.revert_files(db, change)
+        scope = client.change_scope(change.id, key, files, "revert")
+        if change.revert_scope is None:
+            change.revert_scope = scope
+            change.state, change.updated_at = "revert_open", now()
+            audit(
+                db,
+                actor,
+                "rollout.revert_requested",
+                {"change_id": change.id, "automatic": automatic, "reason": reason[:500], "scope": scope},
+            )
+            db.commit()
+            change = rollout.get_change(db, actor.tenant_id, change_id, lock=True)
+            if change.revert_pr_url:
+                return {"url": change.revert_pr_url, "state": change.state}
+        elif change.revert_scope != scope:
+            raise HTTPException(409, "Revert destination or content changed; revert manually")
+        db.commit()
+        pr = client.open_change(
+            change.id,
+            key,
+            files,
+            f"ZeroGraph: revert least-privilege change for {change.subject_name}",
+            rollout.revert_body(change, reason or "Requested by an administrator"),
+            purpose="revert",
+        )
+        change = rollout.get_change(db, actor.tenant_id, change_id, lock=True)
+        if not change.revert_pr_url:
+            change.revert_pr_url, change.revert_error, change.updated_at = pr.url, None, now()
+            audit(
+                db,
+                actor,
+                "rollout.revert_opened",
+                {"change_id": change.id, "url": pr.url, "automatic": automatic},
+            )
+        db.commit()
+        return {"url": change.revert_pr_url, "state": change.state}
+    except (GitOpsConflict, GitOpsError) as exc:
+        db.rollback()
+        try:
+            change = rollout.get_change(db, actor.tenant_id, change_id, lock=True)
+            change.revert_error = str(exc)[:256]
+            audit(db, actor, "rollout.revert_failed", {"change_id": change_id, "error": str(exc)[:256]})
+            db.commit()
+        except rollout.ChangeNotFound:
+            db.rollback()
+        raise HTTPException(409 if isinstance(exc, GitOpsConflict) else 502, str(exc)) from None
+    finally:
+        if client is not None:
+            client.close()
+
+
+@router.post("/rollout/changes/{change_id}/revert")
+def revert_rollout_change(change_id: ChangeId, request: RevertRequest, db: DB, actor: Admin):
+    """One-click revert: a draft pull request restoring the original policies (never merged)."""
+    try:
+        return open_revert(db, actor, change_id, request.reason or "Requested by an administrator")
+    except rollout.ChangeNotFound:
+        raise HTTPException(404, "Rollout change not found") from None
+    except rollout.RolloutError as exc:
+        raise HTTPException(409, str(exc)) from None
+    except DBAPIError as exc:
+        raise _rollout_busy(exc, db) from None
+
+
+MAX_AUTOMATIC_REVERTS = 10
+
+
+def access_denied_watch(db: Session, actor: Actor, upload_id: str) -> dict | None:
+    """After a usage upload: flag merged changes with AccessDenied on what they touched inside
+    their watch window and open (never merge) a revert pull request for each. Best effort: a
+    failure is recorded on the change and audited, never fails the upload."""
+    settings = get_settings()
+    try:
+        _bounded_lock(db)
+        acquire_rollout_lock(db, actor.tenant_id)
+        flagged = rollout.access_denied(db, actor.tenant_id, settings.rollout_denied_threshold)
+        for change in flagged:
+            audit(
+                db,
+                Actor(rollout.HOOK_ACTOR, actor.tenant_id, frozenset()),
+                "rollout.flagged",
+                {
+                    "change_id": change.id,
+                    "upload_id": upload_id,
+                    "events": change.flag["events"],
+                    "by": actor.subject,
+                },
+            )
+        db.commit()
+    except DBAPIError:
+        db.rollback()
+        return {
+            "flagged": [],
+            "reverts": [],
+            "error": "Rollout watch busy; it runs again with the next upload",
+        }
+    if not flagged:
+        return {"flagged": [], "reverts": []}
+    reverts = []
+    hook = Actor(rollout.HOOK_ACTOR, actor.tenant_id, frozenset({"admin"}))
+    for change in flagged[:MAX_AUTOMATIC_REVERTS]:
+        try:
+            found = open_revert(
+                db, hook, change.id, f"AccessDenied events after merge (upload {upload_id})", True
+            )
+            reverts.append({"change_id": change.id, "url": found["url"]})
+        except (HTTPException, rollout.RolloutError) as exc:
+            detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            reverts.append({"change_id": change.id, "error": str(detail)[:256]})
+    return {"flagged": [change.id for change in flagged], "reverts": reverts}
+
+
+@router.get("/proposals/{proposal_id}/draft")
+def proposal_draft(
+    db: DB,
+    actor: Viewer,
+    proposal_id: Annotated[str, Path(pattern=PROPOSAL_ID)],
+    revision: str | None = None,
+):
+    """A reviewed description of the change a proposal makes, and whether it can become a pull
+    request (merges, splits, wildcard scoping and manual-tier proposals are draft only)."""
+    current = expected_revision(db, actor.tenant_id, revision)
+    _proposal_summary(db, actor.tenant_id, current)
+    try:
+        row = optimizer.proposal_row(db, actor.tenant_id, current, proposal_id)
+    except optimizer.ProposalNotFound:
+        raise HTTPException(404, "Proposal not found in this revision") from None
+    reason = rollout.draft_reason(row)
+    held = rollout.active_proposals(db, actor.tenant_id).get(proposal_id)
+    return {
+        "revision": current,
+        "proposal_id": proposal_id,
+        "pr_eligible": reason is None,
+        "reason": reason,
+        "text": rollout.draft_text(row, reason),
+        "change_id": held,
+        "notice": rollout.NOTICE,
+    }
+
+
 class IngestionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     source: Literal["snapshot", "mcp", "aws", "demo"]
@@ -1321,6 +1857,10 @@ def create_pr(remediation_id: str, db: DB, actor: Admin):
         return record
 
     def validate(record, settings):
+        if record.evidence.get("rollout_id"):
+            raise HTTPException(
+                409, "This remediation belongs to an optimizer rollout change; use the rollout"
+            )
         if record.original == record.optimized:
             raise HTTPException(409, "No policy reduction to propose")
         state = db.execute(
@@ -1556,13 +2096,16 @@ def commit_usage_upload(upload_id: UploadId, db: DB, actor: Admin):
         },
     )
     db.commit()
+    evidence = usage.evidence(db, actor.tenant_id).as_dict()
+    watch = access_denied_watch(db, actor, upload.id)
     return usage.UsageCommitResponse(
         id=upload.id,
         status=upload.status,
         revision=upload.revision,
         stats=stats,
-        evidence=usage.evidence(db, actor.tenant_id).as_dict(),
+        evidence=evidence,
         notice=usage.NOTICE,
+        rollout=watch,
     )
 
 

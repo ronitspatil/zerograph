@@ -154,7 +154,9 @@ class FakeRepository:
         if not github and path == "" and method == "GET":
             return httpx.Response(200, json={"id": PROJECT_ID, "path_with_namespace": REPOSITORY})
         # Branches.
-        if method == "GET" and (path.startswith("/git/ref/heads/") or path.startswith("/repository/branches/")):
+        if method == "GET" and (
+            path.startswith("/git/ref/heads/") or path.startswith("/repository/branches/")
+        ):
             name = unquote(path.split("/heads/", 1)[1] if github else path.split("/branches/", 1)[1])
             branch = self.branches.get(name)
             if branch is None:
@@ -210,7 +212,9 @@ class FakeRepository:
                     if current is None or payload.get("last_commit_id") != head:
                         return httpx.Response(400, json={"message": "stale"})
                     self._set(ref, file_path, payload["content"].encode() if method == "PUT" else None)
-                    return httpx.Response(200 if method == "PUT" else 204, json={} if method == "PUT" else None)
+                    return httpx.Response(
+                        200 if method == "PUT" else 204, json={} if method == "PUT" else None
+                    )
         # Reviews.
         if path in ("/pulls", "/merge_requests"):
             if method == "GET":

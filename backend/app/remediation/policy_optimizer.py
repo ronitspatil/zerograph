@@ -330,18 +330,17 @@ def verify_scope(
         return evaluate(Request(principal, action, resource), identity=documents).decision
 
     for resource, actions in removed.items():
-        for action in set(actions) | extra:
+        required = set(actions)
+        for action in required | extra:
             for target in (resource, resource + "/*"):
-                if action in extra and action not in set(actions):
-                    # Unmodelled actions: never allowed more than before.
-                    if (
-                        decision(before, action, target) == Decision.DENY
-                        and decision(after, action, target) != Decision.DENY
-                    ):
-                        problems.append(f"widened {action} on {target}")
-                    continue
-                if decision(after, action, target) != Decision.DENY:
-                    problems.append(f"still granted {action} on {target}")
+                if action in required:
+                    if decision(after, action, target) != Decision.DENY:
+                        problems.append(f"still granted {action} on {target}")
+                elif (
+                    decision(before, action, target) == Decision.DENY
+                    and decision(after, action, target) != Decision.DENY
+                ):
+                    problems.append(f"widened {action} on {target}")
     for resource, actions in kept.items():
         for action in set(actions) | extra:
             for target in (resource, resource + "/*"):

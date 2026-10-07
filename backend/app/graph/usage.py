@@ -437,6 +437,8 @@ class UsageCommitResponse(BaseModel):
     stats: dict
     evidence: dict
     notice: str
+    # Optimizer rollout AccessDenied watch: changes flagged by this upload and revert PRs opened.
+    rollout: dict | None = None
 
 
 class UsageStatusResponse(BaseModel):
