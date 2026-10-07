@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, Index, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Index, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -236,6 +236,8 @@ class RevisionTopicSummary(Base):
     tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     revision: Mapped[str] = mapped_column(String(64), primary_key=True)
     topic_version: Mapped[int] = mapped_column(Integer)
+    # Usage evidence the rows were computed with (app.graph.usage.Evidence.fingerprint); "" = none.
+    usage_fingerprint: Mapped[str] = mapped_column(String(32), default="", server_default="")
     total_topics: Mapped[int] = mapped_column(Integer)
     total_links: Mapped[int] = mapped_column(Integer)
     totals: Mapped[dict[str, Any]] = mapped_column(JSON)
@@ -309,3 +311,125 @@ class RevisionTopicMember(Base):
     cross_topic_grants: Mapped[int] = mapped_column(Integer)
     restricted_outside: Mapped[int] = mapped_column(Integer)
     profile: Mapped[list[Any]] = mapped_column(JSON)
+    # Excess privilege (roles and identities): needed set basis ("used", "inferred", "none"),
+    # needed sensitivity weight with/without hubs, used assets, own grants unused (on restricted data).
+    basis: Mapped[str] = mapped_column(String(16), default="", server_default="")
+    needed_weight: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    needed_weight_excl_hubs: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    used_resources: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    unused_grants: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    unused_restricted: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+
+
+class RevisionPolicyDocument(Base):
+    """A policy document of a revision, stored once per content hash (canonical JSON SHA-256)."""
+
+    __tablename__ = "revision_policy_documents"
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    revision: Mapped[str] = mapped_column(String(64), primary_key=True)
+    digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    document: Mapped[str] = mapped_column(Text)
+
+
+class RevisionPolicy(Base):
+    """A policy document attached to a principal of a revision (inline, managed, boundary,
+    trust or inherited from a group), referencing the document by digest."""
+
+    __tablename__ = "revision_policies"
+    __table_args__ = (Index("ix_revision_policies_principal", "tenant_id", "revision", "principal_id"),)
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    revision: Mapped[str] = mapped_column(String(64), primary_key=True)
+    attachment_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    principal_id: Mapped[str] = mapped_column(String(512))
+    kind: Mapped[str] = mapped_column(String(16))
+    name: Mapped[str] = mapped_column(String(256))
+    arn: Mapped[str] = mapped_column(Text)
+    digest: Mapped[str] = mapped_column(String(64))
+
+
+class UsageUpload(Base):
+    """A chunked upload of usage evidence (CloudTrail export files) for one declared window.
+
+    ``revision`` is the tenant's current revision when the upload started: usage applies
+    to it and carries forward to later revisions by stable principal/resource IDs.
+    ``status``: open -> committed (its observed access and coverage rows are live).
+    """
+
+    __tablename__ = "usage_uploads"
+    __table_args__ = (Index("ix_usage_uploads_tenant_status", "tenant_id", "status", "created_at"),)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(128))
+    actor: Mapped[str] = mapped_column(String(256))
+    source: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(16), default="open")
+    revision: Mapped[str] = mapped_column(String(64), default="")
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    attested_services: Mapped[list[str]] = mapped_column(JSON)
+    stats: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class UsageUploadChunk(Base):
+    """Classification counts of one uploaded file (re-sending a chunk number replaces it)."""
+
+    __tablename__ = "usage_upload_chunks"
+    upload_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    chunk: Mapped[int] = mapped_column(Integer, primary_key=True)
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    stats: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class UsageStaged(Base):
+    """Observed access aggregated per uploaded file, before the upload is committed."""
+
+    __tablename__ = "usage_staged"
+    upload_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    chunk: Mapped[int] = mapped_column(Integer, primary_key=True)
+    principal_id: Mapped[str] = mapped_column(String(512), primary_key=True)
+    resource_id: Mapped[str] = mapped_column(String(512), primary_key=True)
+    action_class: Mapped[str] = mapped_column(String(16), primary_key=True)
+    service: Mapped[str] = mapped_column(String(32), primary_key=True)
+    first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    count: Mapped[int] = mapped_column(Integer)
+
+
+class ObservedAccess(Base):
+    """Provider-neutral observed access of a committed usage upload, by stable entity IDs."""
+
+    __tablename__ = "observed_access"
+    __table_args__ = (Index("ix_observed_access_tenant", "tenant_id", "principal_id"),)
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    upload_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    principal_id: Mapped[str] = mapped_column(String(512), primary_key=True)
+    resource_id: Mapped[str] = mapped_column(String(512), primary_key=True)
+    action_class: Mapped[str] = mapped_column(String(16), primary_key=True)
+    service: Mapped[str] = mapped_column(String(32), primary_key=True)
+    first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    count: Mapped[int] = mapped_column(Integer)
+    source: Mapped[str] = mapped_column(String(32))
+
+
+class UsageCoverage(Base):
+    """Coverage attestation of a committed upload for one service over its window.
+
+    ``complete`` is attested with no unmapped events for that service; only complete
+    coverage can make observed use the needed set (otherwise peers are inferred).
+    """
+
+    __tablename__ = "usage_coverage"
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    upload_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    service: Mapped[str] = mapped_column(String(32), primary_key=True)
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    attested: Mapped[bool] = mapped_column(Boolean)
+    events: Mapped[int] = mapped_column(Integer)
+    unmapped: Mapped[int] = mapped_column(Integer)
+    complete: Mapped[bool] = mapped_column(Boolean)

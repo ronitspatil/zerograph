@@ -57,7 +57,8 @@ def test_live_collector_enriches_metadata_but_does_not_claim_complete_access():
     c, _, _, _ = collector()
     snapshot = c.collect()
     bucket = next(n for n in snapshot.nodes if n.type.value == "S3Bucket")
-    assert set(bucket.tags) == {"PII", "PHI"}
+    # Classification labels plus the raw tag (kept as a topic anchor).
+    assert set(bucket.tags) == {"PII", "PHI", "classification=patient"}
     assert snapshot.edges
     assert all(e.certainty == "conditional" for e in snapshot.edges)
     assert any("session" in warning for warning in snapshot.warnings)
@@ -134,7 +135,11 @@ def test_buckets_paginate_and_duplicates_do_not_consume_inventory_budget():
     snapshot = c.collect()
     assert len(snapshot.nodes) == 2
     assert s3.list_buckets.call_args_list[1].kwargs == {"MaxBuckets": 100, "ContinuationToken": "next"}
-    assert iam.get_account_authorization_details.call_args_list[0].kwargs["Filter"] == ["Role"]
+    assert iam.get_account_authorization_details.call_args_list[0].kwargs["Filter"] == [
+        "Role",
+        "User",
+        "Group",
+    ]
     assert c.counts["roles"] == c.counts["buckets"] == 1
     assert s3.get_bucket_policy.call_count == 1
 
@@ -379,7 +384,7 @@ def test_actual_botocore_models_validate_paginated_requests_without_network():
     iam.add_response(
         "get_account_authorization_details",
         {"RoleDetailList": [], "IsTruncated": True, "Marker": "next"},
-        {"Filter": ["Role"], "MaxItems": 100},
+        {"Filter": ["Role", "User", "Group"], "MaxItems": 100},
     )
     iam.add_response(
         "get_account_authorization_details",
@@ -402,7 +407,7 @@ def test_actual_botocore_models_validate_paginated_requests_without_network():
             ],
             "IsTruncated": False,
         },
-        {"Filter": ["Role"], "MaxItems": 100, "Marker": "next"},
+        {"Filter": ["Role", "User", "Group"], "MaxItems": 100, "Marker": "next"},
     )
     s3.add_response(
         "list_buckets",
@@ -594,6 +599,8 @@ def test_readonly_permission_templates_match_sdk_operation_contract():
     }
     assert actions == {
         "iam:GetAccountAuthorizationDetails",
+        "iam:GenerateServiceLastAccessedDetails",
+        "iam:GetServiceLastAccessedDetails",
         "iam:GetPolicy",
         "iam:GetPolicyVersion",
         "s3:ListAllMyBuckets",
@@ -606,8 +613,9 @@ def test_readonly_permission_templates_match_sdk_operation_contract():
         "organizations:DescribePolicy",
     }
     assert {statement["Sid"] for statement in policy["Statement"] if statement["Resource"] == "*"} == {
-        "RoleInventoryOnly",
+        "IamInventoryOnly",
         "OwnedBucketInventory",
+        "OptionalAccessAdvisorResults",
         "OptionalOrganizationDescription",
     }
     metadata = next(

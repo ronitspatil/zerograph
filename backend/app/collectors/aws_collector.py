@@ -1,4 +1,14 @@
-"""Bounded, read-only IAM-role and S3-metadata inventory; never confirmed access."""
+"""Bounded, read-only IAM (roles, users, groups) and S3-metadata inventory; never confirmed access.
+
+Besides the graph, a collection keeps what the optimizer needs as evidence: raw role,
+user and bucket tags (``key=value``), each role's ``RoleLastUsed`` and (optionally)
+IAM Access Advisor service last-accessed data as **hints** in node metadata, and
+every decoded policy document (inline, attached managed, permissions boundary,
+trust, and group-inherited for users) as content-hashed ``PolicyAttachment``
+entries stored per revision in SQL, never in node JSON. IAM users are modeled as
+``HumanUser`` identities; group membership is folded into each user's effective
+policies (group policies are attached as ``group-inline``/``group-managed``).
+"""
 
 import argparse
 import hashlib
@@ -16,14 +26,25 @@ from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
 from app.collectors.data_classifier import enrich_node
+from app.collectors.execution_audit import AccessAdvisorCollector
 from app.collectors.iam_evaluator import Decision, Request, evaluate
-from app.graph.schema import Edge, EdgeType, GraphSnapshot, Node, NodeType
+from app.graph.schema import (
+    MAX_SNAPSHOT_POLICIES,
+    Edge,
+    EdgeType,
+    GraphSnapshot,
+    Node,
+    NodeType,
+    PolicyAttachment,
+)
 
 READ_ACTIONS = ("s3:GetObject", "s3:GetObjectVersion", "s3:ListBucket")
 WRITE_ACTIONS = ("s3:PutObject", "s3:DeleteObject", "s3:DeleteObjectVersion")
 SDK_CONFIG = Config(retries={"mode": "standard", "total_max_attempts": 3}, connect_timeout=5, read_timeout=10)
 HARD_LIMITS = {
     "max_roles": 1000,
+    "max_users": 1000,
+    "max_groups": 1000,
     "max_buckets": 1000,
     "max_pages": 1000,
     "max_requests": 10000,
@@ -32,7 +53,12 @@ HARD_LIMITS = {
     "max_edges": 15000,
     "max_org_depth": 20,
     "max_seconds": 600,
+    "max_policy_attachments": MAX_SNAPSHOT_POLICIES,
+    "max_access_advisor_jobs": 1000,
 }
+MAX_TAGS = 32  # Node.tags bound; raw tags beyond it are dropped and counted.
+ACCESS_ADVISOR_POLLS = 10
+MAX_ADVISOR_SERVICES = 400
 MAX_POLICY_BYTES = 65536
 MAX_POLICY_STATEMENTS = 256
 
@@ -46,6 +72,8 @@ class CollectionIncomplete(ValueError):
 @dataclass(frozen=True)
 class CollectionLimits:
     max_roles: int = 500
+    max_users: int = 500
+    max_groups: int = 500
     max_buckets: int = 500
     max_pages: int = 100
     max_requests: int = 3000
@@ -54,6 +82,8 @@ class CollectionLimits:
     max_edges: int = 15000
     max_org_depth: int = 10
     max_seconds: int = 600
+    max_policy_attachments: int = 10000
+    max_access_advisor_jobs: int = 200
 
     def __post_init__(self):
         for key, value in asdict(self).items():
@@ -77,6 +107,31 @@ def decode_policy(document: dict | str) -> dict:
     return policy
 
 
+def _iso(value) -> str:
+    """AWS timestamps (datetime from botocore, or a string) as ISO 8601."""
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value or "")[:64]
+
+
+def _privileged(policies: list[dict]) -> bool:
+    return any(
+        s.get("Effect") == "Allow" and s.get("Action") in ("*", ["*"])
+        for p in policies
+        for s in (p.get("Statement", []) if isinstance(p.get("Statement", []), list) else [p["Statement"]])
+    )
+
+
+class _CountedClient:
+    """Routes a client's calls through the collector's request and wall-time budgets."""
+
+    def __init__(self, collector: "AWSCollector", client):
+        self._collector, self._client = collector, client
+
+    def __getattr__(self, operation: str):
+        return lambda **kwargs: self._collector._call(self._client, operation, **kwargs)
+
+
 class AWSCollector:
     def __init__(
         self,
@@ -85,8 +140,11 @@ class AWSCollector:
         *,
         expected_account: str | None = None,
         expected_role_arn: str | None = None,
+        access_advisor: bool = False,
+        sleep=time.sleep,
     ):
         self.session, self.limits = session, limits or CollectionLimits()
+        self.access_advisor, self._sleep = access_advisor, sleep
         self.iam = session.client("iam", config=SDK_CONFIG)
         self.s3 = session.client("s3", config=SDK_CONFIG)
         self.sts = session.client("sts", config=SDK_CONFIG)
@@ -110,8 +168,13 @@ class AWSCollector:
             "classification_tags": {"observed": 0, "absent": 0, "unknown": 0},
             "encryption_configuration": {"observed": 0, "unknown": 0},
             "object_encryption_verified": False,
+            "iam_user_inventory_complete": False,
+            "iam_group_inventory_complete": False,
+            "role_last_used": {"observed": 0, "absent": 0},
         }
-        self.counts = {"roles": 0, "buckets": 0, "edges": 0, "evaluations": 0}
+        self.counts = {"roles": 0, "users": 0, "groups": 0, "buckets": 0, "edges": 0, "evaluations": 0}
+        self.attachments: list[PolicyAttachment] = []
+        self.attachment_ids: set[str] = set()
 
     def _warning(self, code: str, message: str):
         if code not in self.warning_counts:
@@ -258,28 +321,38 @@ class AWSCollector:
         return account, parts[1]
 
     def _inventory(self, account: str, partition: str):
-        roles, buckets = {}, {}
+        roles, users, groups, buckets = {}, {}, {}, {}
+        kinds = (
+            ("RoleDetailList", "role", roles, self.limits.max_roles, "roles"),
+            ("UserDetailList", "user", users, self.limits.max_users, "users"),
+            ("GroupDetailList", "group", groups, self.limits.max_groups, "groups"),
+        )
         for page in self._pages(
             self.iam,
             "get_account_authorization_details",
             token="Marker",
             truncated=True,
-            Filter=["Role"],
+            Filter=["Role", "User", "Group"],
             MaxItems=100,
         ):
-            for role in page.get("RoleDetailList", []):
-                arn = role["Arn"]
-                if not arn.startswith(f"arn:{partition}:iam::{account}:role/"):
-                    raise CollectionIncomplete("Role inventory crosses verified account or partition")
-                if arn in roles:
-                    if roles[arn] != role:
-                        raise CollectionIncomplete("Conflicting duplicate IAM role inventory")
-                    continue
-                if len(roles) >= self.limits.max_roles:
-                    raise CollectionIncomplete("IAM role inventory budget exhausted")
-                roles[arn] = dict(role)
-                self.counts["roles"] = len(roles)
+            for field, kind, found, limit, label in kinds:
+                for item in page.get(field, []):
+                    arn = item["Arn"]
+                    if not arn.startswith(f"arn:{partition}:iam::{account}:{kind}/"):
+                        raise CollectionIncomplete(
+                            f"IAM {kind} inventory crosses verified account or partition"
+                        )
+                    if arn in found:
+                        if found[arn] != item:
+                            raise CollectionIncomplete(f"Conflicting duplicate IAM {kind} inventory")
+                        continue
+                    if len(found) >= limit:
+                        raise CollectionIncomplete(f"IAM {kind} inventory budget exhausted")
+                    found[arn] = dict(item)
+                    self.counts[label] = len(found)
         self.coverage["iam_role_inventory_complete"] = True
+        self.coverage["iam_user_inventory_complete"] = True
+        self.coverage["iam_group_inventory_complete"] = True
         for page in self._pages(self.s3, "list_buckets", token="ContinuationToken", MaxBuckets=100):
             for bucket in page["Buckets"]:
                 name = bucket["Name"]
@@ -292,11 +365,13 @@ class AWSCollector:
                 buckets[name] = bucket
                 self.counts["buckets"] = len(buckets)
         self.coverage["general_purpose_bucket_inventory_complete"] = True
-        self.counts.update(roles=len(roles), buckets=len(buckets))
-        evaluations = len(roles) * len(buckets) * 6 + len(roles) * (len(roles) - 1)
+        self.counts.update(roles=len(roles), users=len(users), groups=len(groups), buckets=len(buckets))
+        principals = len(roles) + len(users)
+        # Each principal x bucket x 6 S3 actions, and each principal x role AssumeRole (not itself).
+        evaluations = principals * len(buckets) * 6 + principals * len(roles) - len(roles)
         if evaluations > self.limits.max_evaluations:
             raise CollectionIncomplete("Permission evaluation budget exhausted before enrichment")
-        return list(roles.values()), list(buckets.values())
+        return list(roles.values()), list(users.values()), list(groups.values()), list(buckets.values())
 
     def _optional(self, client, operation, name, *, absent=None):
         try:
@@ -323,44 +398,198 @@ class AWSCollector:
         )
         return {}, "unknown"
 
+    def _attach(self, principal: str, kind: str, name: str, document: dict, arn: str = "") -> None:
+        """Keep a decoded policy document for SQL storage (content-hashed at publication)."""
+        attachment = PolicyAttachment(
+            principal=principal, kind=kind, name=name[:256], arn=arn, document=document
+        )
+        if attachment.id in self.attachment_ids:
+            return
+        if len(self.attachments) >= self.limits.max_policy_attachments:
+            raise CollectionIncomplete("Policy attachment budget exhausted")
+        self.attachment_ids.add(attachment.id)
+        self.attachments.append(attachment)
+
+    def _identity_policies(self, principal: str, detail: dict, inline_field: str) -> list[dict]:
+        """Decoded inline + attached managed policies of a role or user; attachments recorded."""
+        policies = []
+        for position, item in enumerate(detail.get(inline_field, [])):
+            document = self._policy(item["PolicyDocument"])
+            self._attach(principal, "inline", item.get("PolicyName") or f"inline-{position}", document)
+            policies.append(document)
+        attached = {
+            p["PolicyArn"]: p.get("PolicyName", "") for p in detail.get("AttachedManagedPolicies", [])
+        }
+        if len(attached) > 100:
+            raise CollectionIncomplete("Policy reference budget exhausted")
+        for arn, name in attached.items():
+            document = self._managed(arn)
+            self._attach(principal, "managed", name or arn.rsplit("/", 1)[-1], document, arn)
+            policies.append(document)
+        return policies
+
+    def _boundary(self, principal: str, detail: dict) -> list[dict] | None:
+        boundary_arn = detail.get("PermissionsBoundary", {}).get("PermissionsBoundaryArn")
+        if not boundary_arn:
+            return None
+        document = self._managed(boundary_arn)
+        self._attach(principal, "boundary", boundary_arn.rsplit("/", 1)[-1], document, boundary_arn)
+        return [document]
+
+    def _tags(self, tags: list[dict], keep: int = MAX_TAGS) -> tuple[list[str], int]:
+        """Raw ``key=value`` tags (sorted, bounded) and how many were dropped."""
+        values = sorted({f"{tag['Key']}={tag.get('Value', '')}"[:256] for tag in tags if tag.get("Key")})
+        if len(values) > keep:
+            self._warning("tags_truncated", "Some tags were dropped beyond the per-entity tag bound")
+        return values[:keep], max(0, len(values) - keep)
+
+    def _access_advisor(self, principals: list[str]) -> dict[str, dict]:
+        """Optional IAM Access Advisor service last-accessed hints (never proof of non-use)."""
+        hints: dict[str, dict] = {}
+        if not self.access_advisor:
+            return hints
+        selected = sorted(principals)[: self.limits.max_access_advisor_jobs]
+        if len(principals) > len(selected):
+            self._warning(
+                "access_advisor_bounded",
+                "Access Advisor hints were requested for a bounded subset of principals",
+            )
+        advisor = AccessAdvisorCollector(_CountedClient(self, self.iam))
+        jobs: dict[str, str] = {}
+        try:
+            for arn in selected:
+                jobs[arn] = advisor.start(arn)
+            for _ in range(ACCESS_ADVISOR_POLLS):
+                for arn in sorted(set(jobs) - set(hints)):
+                    result = advisor.result(jobs[arn])
+                    if result["status"] == "COMPLETED":
+                        hints[arn] = {
+                            "basis": "access_advisor_activity_hint",
+                            "services": [
+                                {
+                                    "service": service["service"],
+                                    "last_authenticated": _iso(service["last_authenticated"]),
+                                }
+                                for service in result["services"][:MAX_ADVISOR_SERVICES]
+                            ],
+                        }
+                    elif result["status"] == "FAILED":
+                        hints[arn] = {
+                            "basis": "access_advisor_activity_hint",
+                            "status": "failed",
+                            "services": [],
+                        }
+                if len(hints) == len(jobs):
+                    break
+                self._sleep(1.0)
+        except (ClientError, BotoCoreError):
+            self._warning(
+                "access_advisor_unknown", "Access Advisor hints unavailable for one or more principals"
+            )
+        if len(hints) < len(jobs):
+            self._warning(
+                "access_advisor_incomplete", "Access Advisor jobs did not complete within the poll budget"
+            )
+        self.coverage["access_advisor"] = {"requested": len(jobs), "completed": len(hints)}
+        return {arn: hint for arn, hint in hints.items() if hint.get("status") != "failed"}
+
     def collect(self) -> GraphSnapshot:
         self._reset()
         account, partition = self._identity()
-        roles, buckets = self._inventory(account, partition)
+        roles, users, groups, buckets = self._inventory(account, partition)
         scps, _ = self._organizations(account)
         nodes, edges = {}, {}
+        group_details = {group["GroupName"]: group for group in groups}
+        group_policies: dict[str, list[tuple[str, dict, str, str]]] = {}
+        principals: list[dict] = []
         for role in roles:
-            policies = [self._policy(p["PolicyDocument"]) for p in role.get("RolePolicyList", [])]
-            attached = dict.fromkeys(p["PolicyArn"] for p in role.get("AttachedManagedPolicies", []))
-            if len(attached) > 100:
-                raise CollectionIncomplete("Role policy reference budget exhausted")
-            policies.extend(self._managed(arn) for arn in attached)
-            boundary_arn = role.get("PermissionsBoundary", {}).get("PermissionsBoundaryArn")
+            policies = self._identity_policies(role["Arn"], role, "RolePolicyList")
             role["policies"] = policies
-            role["boundary"] = [self._managed(boundary_arn)] if boundary_arn else None
+            role["boundary"] = self._boundary(role["Arn"], role)
             role["trust"] = self._policy(role["AssumeRolePolicyDocument"])
+            self._attach(role["Arn"], "trust", "trust", role["trust"])
             linked = ":role/aws-service-role/" in role["Arn"]
             role["scps"] = [] if linked else scps
+            tags, dropped = self._tags(role.get("Tags", []))
+            metadata = {
+                "policy_count": len(policies),
+                "scp_inventory": self.coverage["scp_inventory"],
+                "scp_exempt_service_linked_role": linked,
+            }
+            last_used = role.get("RoleLastUsed") or {}
+            if last_used.get("LastUsedDate"):
+                metadata["role_last_used"] = _iso(last_used["LastUsedDate"])
+                metadata["role_last_used_region"] = str(last_used.get("Region", ""))[:64]
+                self.coverage["role_last_used"]["observed"] += 1
+            else:
+                self.coverage["role_last_used"]["absent"] += 1
+            if dropped:
+                metadata["tags_dropped"] = dropped
             nodes[role["Arn"]] = Node(
                 id=role["Arn"],
                 name=role["RoleName"],
                 type=NodeType.ROLE,
                 account_id=account,
                 provider="aws",
-                privileged=any(
-                    s.get("Effect") == "Allow" and s.get("Action") in ("*", ["*"])
-                    for p in policies
-                    for s in (
-                        p.get("Statement", [])
-                        if isinstance(p.get("Statement", []), list)
-                        else [p["Statement"]]
-                    )
-                ),
-                metadata={
-                    "policy_count": len(policies),
-                    "scp_inventory": self.coverage["scp_inventory"],
-                    "scp_exempt_service_linked_role": linked,
-                },
+                tags=tags,
+                privileged=_privileged(policies),
+                metadata=metadata,
+            )
+            principals.append(role)
+        for user in users:
+            policies = self._identity_policies(user["Arn"], user, "UserPolicyList")
+            memberships = sorted(set(user.get("GroupList", [])))
+            for name in memberships:
+                group = group_details.get(name)
+                if group is None:
+                    raise CollectionIncomplete("IAM user belongs to a group missing from the inventory")
+                if name not in group_policies:
+                    group_policies[name] = []
+                    for position, item in enumerate(group.get("GroupPolicyList", [])):
+                        document = self._policy(item["PolicyDocument"])
+                        policy = item.get("PolicyName") or f"inline-{position}"
+                        group_policies[name].append(("group-inline", document, f"{name}/{policy}", ""))
+                    attached = {
+                        p["PolicyArn"]: p.get("PolicyName", "")
+                        for p in group.get("AttachedManagedPolicies", [])
+                    }
+                    if len(attached) > 100:
+                        raise CollectionIncomplete("Policy reference budget exhausted")
+                    for arn, policy in attached.items():
+                        label = policy or arn.rsplit("/", 1)[-1]
+                        group_policies[name].append(
+                            ("group-managed", self._managed(arn), f"{name}/{label}", arn)
+                        )
+                for kind, document, label, arn in group_policies[name]:
+                    self._attach(user["Arn"], kind, label, document, arn)
+                    policies.append(document)
+            user["policies"] = policies
+            user["boundary"] = self._boundary(user["Arn"], user)
+            user["scps"] = scps
+            tags, dropped = self._tags(user.get("Tags", []))
+            metadata = {
+                "iam_user": True,
+                "policy_count": len(policies),
+                "groups": memberships[:50],
+                "scp_inventory": self.coverage["scp_inventory"],
+            }
+            if dropped:
+                metadata["tags_dropped"] = dropped
+            nodes[user["Arn"]] = Node(
+                id=user["Arn"],
+                name=user["UserName"],
+                type=NodeType.HUMAN,
+                account_id=account,
+                provider="aws",
+                tags=tags,
+                privileged=_privileged(policies),
+                metadata=metadata,
+            )
+            principals.append(user)
+        advisor = self._access_advisor([principal["Arn"] for principal in principals])
+        for arn, hint in advisor.items():
+            nodes[arn] = nodes[arn].model_copy(
+                update={"metadata": {**nodes[arn].metadata, "access_advisor": hint}}
             )
         region_clients = {}
         for bucket in buckets:
@@ -397,7 +626,7 @@ class AWSCollector:
             self.coverage["bucket_policy"][policy_status] += 1
             self.coverage["classification_tags"][tag_status] += 1
             self.coverage["encryption_configuration"][encryption_status] += 1
-            nodes[arn] = enrich_node(
+            enriched = enrich_node(
                 Node(
                     id=arn,
                     name=name,
@@ -415,7 +644,15 @@ class AWSCollector:
                 ),
                 [name, *tags],
             )
-            for role in roles:
+            # Raw tags (topic anchors such as topic=/app=/team=) beside classification labels.
+            raw, dropped = self._tags(tagging.get("TagSet", []), MAX_TAGS - len(enriched.tags))
+            if raw or dropped:
+                update = {"tags": sorted(set(enriched.tags) | set(raw))}
+                if dropped:
+                    update["metadata"] = {**enriched.metadata, "tags_dropped": dropped}
+                enriched = enriched.model_copy(update=update)
+            nodes[arn] = enriched
+            for principal in principals:
                 for kind, actions in [(EdgeType.READ, READ_ACTIONS), (EdgeType.WRITE, WRITE_ACTIONS)]:
                     possible = []
                     for action in actions:
@@ -423,32 +660,32 @@ class AWSCollector:
                         self.counts["evaluations"] += 1
                         result = evaluate(
                             Request(
-                                role["Arn"],
+                                principal["Arn"],
                                 action,
                                 arn if action == "s3:ListBucket" else arn + "/*",
-                                {"aws:PrincipalArn": role["Arn"], "aws:PrincipalAccount": account},
+                                {"aws:PrincipalArn": principal["Arn"], "aws:PrincipalAccount": account},
                             ),
-                            role["policies"],
+                            principal["policies"],
                             resource_policies,
-                            role["boundary"],
-                            role["scps"],
+                            principal["boundary"],
+                            principal["scps"],
                             scope_complete=False,
                         )
                         if result.decision != Decision.DENY:
                             possible.append(action)
                     if possible:
                         edge = Edge(
-                            source=role["Arn"],
+                            source=principal["Arn"],
                             target=arn,
                             type=kind,
                             actions=possible,
                             certainty="conditional",
                             evidence=[
-                                "IAM roles + available bucket policy/boundary/SCP metadata; object scope, ACLs, RCPs and session context unresolved"
+                                "IAM identity + available bucket policy/boundary/SCP metadata; object scope, ACLs, RCPs and session context unresolved"
                             ],
                         )
                         self._edge(edges, edge)
-        for source in roles:
+        for source in principals:
             for target in roles:
                 if source["Arn"] == target["Arn"]:
                     continue
@@ -476,20 +713,22 @@ class AWSCollector:
                             actions=["sts:AssumeRole"],
                             evidence=[
                                 *result.reasons,
-                                "Trust and role policies collected; missing policy domains can restrict access; AWS access remains conditional",
+                                "Trust and identity policies collected; missing policy domains can restrict access; AWS access remains conditional",
                             ],
                         ),
                     )
         self.counts["edges"] = len(edges)
+        self.counts["policy_attachments"] = len(self.attachments)
         self._warning(
             "scope_incomplete",
-            "Initial AWS scope: IAM roles and general-purpose S3 metadata; no object contents, IAM-user grants, cross-account inventory or database grants; RCPs, VPC endpoint policies, ACLs and session policies are not collected; all AWS edges conditional",
+            "Initial AWS scope: IAM roles, users and groups and general-purpose S3 metadata; no object contents, cross-account inventory or database grants; RCPs, VPC endpoint policies, ACLs and session policies are not collected; all AWS edges conditional; RoleLastUsed and Access Advisor are hints, never proof of non-use",
         )
         return GraphSnapshot(
             nodes=list(nodes.values()),
             edges=list(edges.values()),
             warnings=self.warnings,
             source=f"aws:{account}",
+            policies=self.attachments,
         )
 
     def _edge(self, edges, edge):

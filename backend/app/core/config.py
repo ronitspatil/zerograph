@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     aws_role_arn: str = ""
     aws_external_id: SecretStr = SecretStr("")
     aws_region: str = "us-east-1"
+    # Optional IAM Access Advisor last-accessed hints (needs the Access Advisor permissions).
+    aws_access_advisor: bool = False
+    # Peer baseline for inferred need: a grant is needed when at least this share of
+    # same-topic, same-role peers were observed using it.
+    peer_baseline_share: float = Field(default=0.5, gt=0, le=1)
     git_provider: Literal["github", "gitlab"] = "github"
     git_repository: str = ""
     git_tenant_id: str = ""

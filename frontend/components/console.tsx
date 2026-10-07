@@ -38,6 +38,7 @@ import { Button } from "@/components/ui/button";
 import { Simulator } from "@/components/simulator";
 import { RemediationHub } from "@/components/remediation-hub";
 import { Sources } from "@/components/sources";
+import { ExcessPrivilegePanel } from "@/components/privilege";
 import { SensitivityChart } from "@/components/sensitivity-chart";
 import { Wordmark } from "@/components/ui/logo";
 import { GlobalMap } from "@/components/global-map";
@@ -1195,6 +1196,12 @@ export function Console({ demo }: { demo: boolean }) {
                         Explore access graph
                       </Button>
                     </div>
+                    <ExcessPrivilegePanel
+                      tile={overview?.excess_privilege}
+                      onOpenSources={
+                        canAdmin ? () => setView("sources") : undefined
+                      }
+                    />
                   </div>
                   <Findings
                     findings={findings}

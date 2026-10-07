@@ -1329,9 +1329,16 @@
   /* Overview */
   .overview-grid {
     display: grid;
-    grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 1fr);
     gap: 16px;
     margin-bottom: 24px;
+  }
+  .privilege-panel .summary-number span {
+    font-size: 12px;
+    line-height: 1.4;
+  }
+  .privilege-panel .text-link {
+    padding: 0;
   }
   .chart-panel > p {
     padding: 12px 16px 0;
@@ -1466,6 +1473,44 @@
   }
   .history-panel {
     margin-top: 24px;
+  }
+  .usage-panel {
+    margin-top: 24px;
+  }
+  .usage-intro {
+    font-size: 12px;
+    margin: 12px 0 0;
+  }
+  .usage-services {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+    border: 0;
+    margin: 12px 0;
+    padding: 0;
+    font-size: 13px;
+  }
+  .usage-services legend {
+    width: 100%;
+    margin-bottom: 8px;
+  }
+  .usage-services label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .usage-result {
+    margin-top: 16px;
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+  }
+  .usage-result p {
+    font-size: 12px;
+    margin: 8px 0 12px;
+    overflow-wrap: anywhere;
+  }
+  .usage-result .table-scroll {
+    overflow-x: auto;
   }
   .source-cards {
     display: grid;
@@ -1812,6 +1857,12 @@
     }
     .remediation-grid {
       grid-template-columns: minmax(0, 1fr);
+    }
+    .overview-grid {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    }
+    .overview-grid > .chart-panel {
+      grid-column: 1 / -1;
     }
     .policy-diff {
       flex-basis: auto;

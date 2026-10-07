@@ -25,7 +25,7 @@ from app.graph.analysis import (
 from app.graph.demo import demo_snapshot
 from app.graph.exploration import RevisionTotals
 from app.graph.repository import CypherGraphStore
-from app.graph.schema import IDENTITY_TYPES, Edge, EdgeType, GraphSnapshot, Node, NodeType, Sensitivity
+from app.graph.schema import NHI_TYPES, Edge, EdgeType, GraphSnapshot, Node, NodeType, Sensitivity
 from app.main import create_app
 
 
@@ -33,7 +33,7 @@ def reference_overview(snapshot: GraphSnapshot) -> dict:
     """The request-time overview implementation this change replaced, kept as a golden reference."""
     prepared = AnalysisIndex.build(snapshot, include_uncertain=True)
     findings = detect(snapshot, index=prepared)
-    identities = [n for n in snapshot.nodes if n.type in IDENTITY_TYPES]
+    identities = [n for n in snapshot.nodes if n.type in NHI_TYPES]
     high_blast = sum(prepared.score(n.id, prepared.paths(n.id))[0] >= 70 for n in identities)
     return {
         "total_nhis": len(identities),
@@ -145,6 +145,9 @@ def test_publish_stores_analysis_before_pointer_swap_and_reads_never_load_snapsh
         assert db.scalar(select(func.count()).select_from(RevisionFinding)) == row.total_findings
     with patch.object(graph, "snapshot", side_effect=AssertionError("full snapshot load")):
         body = client.get("/api/v1/overview").json()
+        # The excess-privilege tile comes from the stored topic rows (no usage evidence here).
+        tile = body.pop("excess_privilege")
+        assert tile["status"] == "none" and tile["identities"]["epi"] is None
         assert body == {"revision": revision, **reference_overview(published)}
         response = client.get("/api/v1/findings")
         assert response.status_code == 200

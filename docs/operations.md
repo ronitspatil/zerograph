@@ -26,7 +26,7 @@ The console uses PKCE and an encrypted HTTP-only session cookie. Configure `ZG_S
 
 ## AWS collection
 
-Configure `ZG_AWS_TENANT_ID`, `ZG_AWS_ROLE_ARN`, region, and optional external ID on the backend and worker. Give the workload an AWS identity through the standard boto3 credential chain. No cloud credentials are accepted from the browser.
+Configure `ZG_AWS_TENANT_ID`, `ZG_AWS_ROLE_ARN`, region, optional external ID and optional `ZG_AWS_ACCESS_ADVISOR=true` (IAM Access Advisor last-accessed hints; needs the two Access Advisor permissions in `deploy/aws/collector-role-policy.example.json`) on the backend and worker. Give the workload an AWS identity through the standard boto3 credential chain. No cloud credentials are accepted from the browser.
 
 The assumed role needs read-only access to IAM authorization details and managed policy versions, S3 bucket listing, policies, tags and encryption configuration, and Organizations descriptions and SCP hierarchy. Scope these rights to the required accounts where AWS supports resource constraints. The collector never reads object contents or modifies cloud infrastructure. Missing required IAM inventory aborts the job; optional missing metadata is reported as incomplete coverage.
 

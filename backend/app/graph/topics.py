@@ -68,12 +68,21 @@ from app.db.models import (
 )
 from app.db.session import session_factory
 from app.graph.compact import DATA, EDGE_CODE, MAX_HOPS, WEIGHT, CompactGraph
+from app.graph.privilege import (
+    PrivilegeContext,
+    UsageInput,
+    aggregate,
+    compute_privilege,
+    data_service,
+    refine_with_usage,
+)
 from app.graph.repository import get_graph_store
 from app.graph.schema import EdgeType, NodeType
 from app.graph.sweep import SWEEP_TENANTS, run_sweep
 
 # Bump when topic labels, profiles, flags or stored fields change: other versions read as missing.
-TOPIC_VERSION = 1
+# 2: usage refinement, excess-privilege index (needed weights, basis, unused, dormant).
+TOPIC_VERSION = 2
 BASIS = "granted (structural)"
 NOTICE = (
     "Topics are derived from resource tags, names and access. They are not policy boundaries. "
@@ -115,16 +124,17 @@ TYPE_NAMES = {
 }
 
 # Member flags (bitmask).
-HUB, VIA_HUB, PRIVILEGED, CROSS_TOPIC, RESTRICTED_OUTSIDE = 1, 2, 4, 8, 16
+HUB, VIA_HUB, PRIVILEGED, CROSS_TOPIC, RESTRICTED_OUTSIDE, DORMANT = 1, 2, 4, 8, 16, 32
 FLAG_NAMES = [
     (HUB, "hub"),
     (VIA_HUB, "via_hub"),
     (PRIVILEGED, "privileged"),
     (CROSS_TOPIC, "cross_topic"),
     (RESTRICTED_OUTSIDE, "restricted_outside"),
+    (DORMANT, "dormant"),
 ]
 # Seed kinds, in label priority.
-SEEDS = ("tag", "metadata", "name", "coaccess", "fallback")
+SEEDS = ("tag", "metadata", "name", "usage", "coaccess", "fallback")
 
 _TOKEN = re.compile(r"[a-z0-9]+")
 _SLUG = re.compile(r"[^a-z0-9.]+")
@@ -207,7 +217,8 @@ class ComputedTopics:
     compute_ms: int
 
 
-def compute_topics(graph: CompactGraph) -> ComputedTopics:
+def compute_topics(graph: CompactGraph, usage: UsageInput | None = None) -> ComputedTopics:
+    """Topics, profiles and flags; with ``usage``, usage refinement and the EPI too."""
     started = time.perf_counter()
     n = graph.node_count
     types, names, sensitivity = graph.types, graph.names, graph.sensitivity
@@ -304,8 +315,25 @@ def compute_topics(graph: CompactGraph) -> ComputedTopics:
                     "name",
                     f'name token "{token}" ({round(share * 100)}% of tagged assets with it)',
                 )
-    # 3. Co-access propagation over non-hub grant holders.
+    # 3. Co-access propagation over non-hub grant holders. With sufficient usage evidence for
+    # an asset's service, only holders observed using it vote: a never-used grant is not
+    # evidence of shared access (it is usually the over-grant the analysis is looking for).
     seeded = set(label)
+    users_of: dict[int, set[int]] = {}
+    unused_only: set[int] = set()
+    observed_votes: set[int] = set()
+    if usage is not None and usage.present:
+        sufficient = usage.evidence.sufficient_services
+        for principal, items in usage.data_used.items():
+            for item in items:
+                users_of.setdefault(item, set()).add(principal)
+        for item in data_nodes:
+            if item not in seeded and data_service(graph, item) in sufficient:
+                voters = [h for h in granted_on.get(item, ()) if h in users_of.get(item, ())]
+                if granted_on.get(item) and not voters:
+                    unused_only.add(item)
+                granted_on[item] = voters
+                observed_votes.add(item)
     for _ in range(PROPAGATION_ROUNDS):
         holder_topic: dict[int, str] = {}
         for holder, items in direct.items():
@@ -322,7 +350,8 @@ def compute_topics(graph: CompactGraph) -> ComputedTopics:
             if not votes:
                 continue
             topic, hits = min(votes.items(), key=lambda kv: (-kv[1], kv[0]))
-            reason = f"co-access: {hits} of {sum(votes.values())} granted roles are {topic}"
+            holders_text = "roles observed using it" if item in observed_votes else "granted roles"
+            reason = f"co-access: {hits} of {sum(votes.values())} {holders_text} are {topic}"
             if label.get(item) != topic:
                 changed = True
             label[item] = topic
@@ -330,6 +359,14 @@ def compute_topics(graph: CompactGraph) -> ComputedTopics:
         if not changed:
             break
     del seeded
+    # 3b. Hybrid refinement: usage co-access communities name weakly labeled assets.
+    refine_started = time.perf_counter()
+    refinement = (
+        refine_with_usage(graph, usage, label, seed, hubs)
+        if usage is not None and usage.present
+        else {"communities": 0, "named": 0, "relabeled": 0}
+    )
+    refinement["ms"] = round((time.perf_counter() - refine_started) * 1000)
 
     # 4. Topics, plus fallback groups by service type and data category.
     topics: list[Topic] = []
@@ -354,7 +391,10 @@ def compute_topics(graph: CompactGraph) -> ComputedTopics:
             name = f"unassigned-{normalize(types[item])}" + (f"-{normalize(cat)}" if cat else "")
             text_label = f"Unassigned {group}" + (f" ({cat})" if cat else "")
             position = topic_for("fallback", name, text_label)
-            reason = f"no tag, name or access signal; grouped by type {types[item]}" + (
+            signal = (
+                "granted but never used in the evidence window" if item in unused_only else "access signal"
+            )
+            reason = f"no tag, name or {signal}; grouped by type {types[item]}" + (
                 f" and category {cat}" if cat else ""
             )
             seed[item] = ("fallback", reason)
@@ -449,10 +489,12 @@ def compute_topics(graph: CompactGraph) -> ComputedTopics:
         return result
 
     role_rows: dict[int, dict] = {}
+    holders_of: dict[int, frozenset[int]] = {}
     for role in range(n):
         if types[role] != ROLE:
             continue
         holders, _ = holder_set(role)
+        holders_of[role] = holders
         own_hub = role in hubs
         others = holders - hubs if not own_hub else holders - (hubs - {role})
         full = profile(holders)
@@ -506,6 +548,7 @@ def compute_topics(graph: CompactGraph) -> ComputedTopics:
         if types[node] not in PRINCIPALS:
             continue
         holders, reached_privileged = holder_set(node)
+        holders_of[node] = holders
         others = holders - hubs
         full = profile(holders)
         core = profile(others) if others != holders else full
@@ -535,6 +578,19 @@ def compute_topics(graph: CompactGraph) -> ComputedTopics:
         }
     distinct_sets = len(cache)
     cache.clear()
+
+    # 5b. Excess-privilege index (needed vs granted), role level first.
+    timings = compute_privilege(
+        PrivilegeContext(
+            graph, direct, hops, hubs, weight, is_restricted, role_rows, identity_rows, holders_of
+        ),
+        usage,
+    )
+    del holders_of
+    for rows in (role_rows, identity_rows):
+        for row in rows.values():
+            if row["dormant"]:
+                row["flags"] |= DORMANT
 
     # 6. Per-topic and graph-wide counts (hub-decomposed) and cross-topic links.
     topic_stats = [
@@ -613,6 +669,37 @@ def compute_topics(graph: CompactGraph) -> ComputedTopics:
     def flagged(rows: dict[int, dict], flag: int) -> int:
         return sum(1 for row in rows.values() if row["flags"] & flag)
 
+    # Excess privilege per topic (roles and identities by primary topic) and graph-wide.
+    def privilege_counts(roles: list[dict], identities: list[dict]) -> dict:
+        return {
+            "roles": aggregate(roles),
+            "identities": aggregate(identities),
+            "unused_grants": sum(row["unused_grants"] for row in roles),
+            "unused_restricted_grants": sum(row["unused_restricted"] for row in roles),
+            "dormant_identities": sum(row["dormant"] for row in identities),
+            "dormant_roles": sum(row["dormant"] for row in roles),
+            "dormant_role_hint_conflicts": sum(row["hint_conflict"] for row in roles),
+        }
+
+    by_topic: dict[int, tuple[list[dict], list[dict]]] = {}
+    for rows, slot in ((role_rows, 0), (identity_rows, 1)):
+        for row in rows.values():
+            if row["topic"] >= 0:
+                by_topic.setdefault(row["topic"], ([], []))[slot].append(row)
+    for position, stats in enumerate(topic_stats):
+        roles_, identities_ = by_topic.get(position, ([], []))
+        stats["privilege"] = privilege_counts(roles_, identities_)
+    privilege = privilege_counts(list(role_rows.values()), list(identity_rows.values()))
+    if usage is not None and usage.present:
+        privilege["evidence"] = usage.evidence.as_dict()
+        privilege["matched_observations"] = usage.matched
+        privilege["unmatched_observations"] = usage.unmatched
+        privilege["peer_share"] = usage.peer_share
+    else:
+        privilege["evidence"] = {"status": "none"}
+    privilege["timings_ms"] = timings
+    privilege["refinement"] = refinement
+
     seeds = Counter()
     for t in topics:
         seeds.update(t.seeds)
@@ -649,6 +736,8 @@ def compute_topics(graph: CompactGraph) -> ComputedTopics:
             row["reach_weight_excl_hubs"] for row in identity_rows.values()
         ),
         "distinct_holder_sets": distinct_sets,
+        "privilege": privilege,
+        "usage_fingerprint": usage.evidence.fingerprint if usage is not None else "",
     }
     return ComputedTopics(
         graph,
@@ -682,13 +771,15 @@ def _reason(topic: Topic) -> str:
     parts = [
         f"{source.split(' ', 1)[1]} on {count:,} assets"
         for source, count in sorted(
-            ((s, c) for s, c in topic.sources.items() if s not in ("name", "coaccess", "fallback")),
+            ((s, c) for s, c in topic.sources.items() if s not in ("name", "usage", "coaccess", "fallback")),
             key=lambda item: (-item[1], item[0]),
         )[:3]
     ]
     text_ = "Tagged " + "; ".join(parts) if parts else "Named"
     if topic.seeds["name"]:
         text_ += f"; {topic.seeds['name']:,} more by name tokens"
+    if topic.seeds["usage"]:
+        text_ += f"; {topic.seeds['usage']:,} by observed co-use"
     if topic.seeds["coaccess"]:
         text_ += f"; {topic.seeds['coaccess']:,} by shared access"
     return text_[:512]
@@ -724,7 +815,7 @@ def member_rows(computed: ComputedTopics, tenant: str, revision: str):
             kind, reason = computed.resource_seed[item]
             yield (
                 tenant, revision, ids[item], topic_ref, "resource", ordinal, names[item][:256], types[item],
-                sensitivity[item], kind, reason[:256], 0, 0, 0, 0, 0, 0, 0, [],
+                sensitivity[item], kind, reason[:256], 0, 0, 0, 0, 0, 0, 0, [], "", 0, 0, 0, 0, 0,
             )  # fmt: skip
     for kind, rows, rank in (
         (
@@ -750,13 +841,16 @@ def member_rows(computed: ComputedTopics, tenant: str, revision: str):
                     tenant, revision, ids[node], topic_ref, kind, ordinal, names[node][:256], types[node], "",
                     "", "", row["flags"], row["direct"], row["reach"], row["reach_weight"],
                     row["reach_weight_excl_hubs"], row.get("cross", 0), row["restricted_outside"], profile(row),
+                    row["basis"], row["needed_weight"], row["needed_weight_excl_hubs"], row["used_resources"],
+                    row["unused_grants"], row["unused_restricted"],
                 )  # fmt: skip
 
 
 MEMBER_COLUMNS = [
     "tenant_id", "revision", "entity_id", "topic_id", "kind", "ordinal", "name", "entity_type", "sensitivity",
     "seed", "reason", "flags", "direct_grants", "reach_resources", "reach_weight", "reach_weight_excl_hubs",
-    "cross_topic_grants", "restricted_outside", "profile",
+    "cross_topic_grants", "restricted_outside", "profile", "basis", "needed_weight", "needed_weight_excl_hubs",
+    "used_resources", "unused_grants", "unused_restricted",
 ]  # fmt: skip
 
 
@@ -771,6 +865,7 @@ def store_topics(db: Session, tenant: str, revision: str, computed: ComputedTopi
             tenant_id=tenant,
             revision=revision,
             topic_version=TOPIC_VERSION,
+            usage_fingerprint=computed.summary.get("usage_fingerprint", ""),
             total_topics=len(topics),
             total_links=len(computed.links),
             totals={
@@ -891,6 +986,9 @@ class TopicSummary(BaseModel):
     seeds: dict[str, int]
     sensitivity: dict[str, int]
     types: dict[str, int]
+    # Excess privilege of the topic's roles and identities (granted vs needed, with and
+    # without hubs), unused and dormant counts; basis counts say how much is inferred.
+    privilege: dict | None = None
 
 
 class TopicLink(BaseModel):
@@ -941,6 +1039,16 @@ class TopicMember(BaseModel):
     cross_topic_grants: int
     restricted_outside: int
     profile: list[TopicShare]
+    # Excess privilege (roles and identities): "used" (attested observed use), "inferred"
+    # (peer baseline) or "none" (no usage evidence; EPI is null).
+    basis: str = ""
+    needed_weight: int = 0
+    needed_weight_excl_hubs: int = 0
+    epi: float | None = None
+    epi_excl_hubs: float | None = None
+    used_resources: int = 0
+    unused_grants: int = 0
+    unused_restricted: int = 0
 
 
 class TopicDetailView(BaseModel):
@@ -991,6 +1099,7 @@ def _summary(row: RevisionTopic) -> TopicSummary:
         seeds=stats.get("seeds", {}),
         sensitivity=stats.get("sensitivity", {}),
         types=stats.get("types", {}),
+        privilege=stats.get("privilege"),
     )
 
 
@@ -1012,7 +1121,30 @@ def _member(row: RevisionTopicMember) -> TopicMember:
         cross_topic_grants=row.cross_topic_grants,
         restricted_outside=row.restricted_outside,
         profile=[TopicShare(topic_id=t, share=s, resources=c) for t, s, c in profile],
+        basis=row.basis,
+        needed_weight=row.needed_weight,
+        needed_weight_excl_hubs=row.needed_weight_excl_hubs,
+        epi=_epi(row.basis, row.reach_weight, row.needed_weight),
+        epi_excl_hubs=_epi(row.basis, row.reach_weight_excl_hubs, row.needed_weight_excl_hubs),
+        used_resources=row.used_resources,
+        unused_grants=row.unused_grants,
+        unused_restricted=row.unused_restricted,
     )
+
+
+def _epi(basis: str, granted: int, needed: int) -> float | None:
+    if basis not in ("used", "inferred") or not granted:
+        return None
+    return round(1 - needed / granted, 6)
+
+
+def stored_privilege(db: Session, tenant: str, revision: str) -> dict | None:
+    """Graph-wide excess privilege of a revision (None before topics are stored)."""
+    summary = stored_topic_summary(db, tenant, revision)
+    if summary is None:
+        return None
+    totals = summary.totals if isinstance(summary.totals, dict) else json.loads(summary.totals)
+    return totals.get("privilege")
 
 
 def validate_topic_bounds(edge_limit: int) -> None:
@@ -1129,8 +1261,14 @@ def backfill(tenant: str, wait: bool = True) -> dict:
     """Compute and store topics for a tenant's current revision under the publication lock.
 
     The worker's sweep passes ``wait=False`` and skips a tenant whose publication (or
-    another backfill) holds the lock. Rows of an older ``TOPIC_VERSION`` are replaced.
+    another backfill) holds the lock. Rows of an older ``TOPIC_VERSION``, or computed
+    with other usage evidence (a committed or deleted upload, evidence gone stale), are
+    replaced.
     """
+    from app.core.config import get_settings
+    from app.graph.privilege import load_usage
+    from app.graph.usage import evidence
+
     with session_factory()() as db:
         if db.get_bind().dialect.name == "postgresql":
             db.execute(text("SET LOCAL lock_timeout = '5s'"))
@@ -1144,20 +1282,34 @@ def backfill(tenant: str, wait: bool = True) -> dict:
         if state is None or not state.revision:
             raise ValueError("Tenant has no published revision")
         revision = state.revision
-        if stored_topic_summary(db, tenant, revision) is not None:
+        stored = stored_topic_summary(db, tenant, revision)
+        if stored is not None and stored.usage_fingerprint == evidence(db, tenant).fingerprint:
             return {"tenant": tenant, "revision": revision, "backfilled": False}
         delete_topics(db, tenant, revision)
-        computed = compute_topics(CompactGraph.from_snapshot(get_graph_store().snapshot(tenant, revision)))
+        graph = CompactGraph.from_snapshot(get_graph_store().snapshot(tenant, revision))
+        computed = compute_topics(
+            graph, load_usage(db, tenant, graph, peer_share=get_settings().peer_baseline_share)
+        )
         store_topics(db, tenant, revision, computed)
         db.commit()
-        return {"tenant": tenant, "revision": revision, "backfilled": True, "topics": len(computed.topics)}
+        return {
+            "tenant": tenant,
+            "revision": revision,
+            "backfilled": True,
+            "topics": len(computed.topics),
+            "usage": computed.summary["usage_fingerprint"] != "",
+        }
 
 
 _failed: dict[tuple[str, str], float] = {}
 
 
 def missing_topics(db: Session, limit: int) -> list[tuple[str, str]]:
-    """(tenant, revision) pairs whose current revision has no topics of this version."""
+    """(tenant, revision) pairs whose current revision has no topics of this version, or
+    topics computed with usage evidence other than the tenant's current evidence."""
+    from app.db.models import UsageUpload
+    from app.graph.usage import evidence
+
     present = (
         select(RevisionTopicSummary.tenant_id)
         .where(
@@ -1173,7 +1325,30 @@ def missing_topics(db: Session, limit: int) -> list[tuple[str, str]]:
         .order_by(TenantState.tenant_id)
         .limit(limit)
     )
-    return [(tenant, revision) for tenant, revision in rows]
+    pending = [(tenant, revision) for tenant, revision in rows]
+    if len(pending) >= limit:
+        return pending
+    # Stored with usage evidence, or the tenant has committed uploads: compare fingerprints.
+    with_usage = select(UsageUpload.tenant_id).where(UsageUpload.status == "committed").distinct()
+    candidates = db.execute(
+        select(TenantState.tenant_id, TenantState.revision, RevisionTopicSummary.usage_fingerprint)
+        .join(
+            RevisionTopicSummary,
+            (RevisionTopicSummary.tenant_id == TenantState.tenant_id)
+            & (RevisionTopicSummary.revision == TenantState.revision),
+        )
+        .where(
+            RevisionTopicSummary.topic_version == TOPIC_VERSION,
+            (RevisionTopicSummary.usage_fingerprint != "") | TenantState.tenant_id.in_(with_usage),
+        )
+        .order_by(TenantState.tenant_id)
+    )
+    for tenant, revision, fingerprint in candidates:
+        if evidence(db, tenant).fingerprint != fingerprint:
+            pending.append((tenant, revision))
+            if len(pending) >= limit:
+                break
+    return pending
 
 
 def backfill_missing(limit: int = SWEEP_TENANTS) -> list[dict]:
@@ -1188,7 +1363,7 @@ def backfill_missing(limit: int = SWEEP_TENANTS) -> list[dict]:
         pending,
         lambda tenant: backfill(tenant, wait=False),
         _failed,
-        lambda result: f"topics={result['topics']}",
+        lambda result: f"topics={result['topics']} usage={result.get('usage', False)}",
         limit,
     )
 

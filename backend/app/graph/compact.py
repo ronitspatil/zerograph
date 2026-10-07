@@ -20,10 +20,10 @@ from app.engine.analysis_index import WEIGHTS
 from app.engine.toxic_combos import Finding
 from app.graph.exploration import RevisionTotals
 from app.graph.sample import select_sample
-from app.graph.schema import DATA_TYPES, IDENTITY_TYPES, TRAVERSAL_TYPES, EdgeType, GraphSnapshot, NodeType
+from app.graph.schema import DATA_TYPES, NHI_TYPES, TRAVERSAL_TYPES, EdgeType, GraphSnapshot, NodeType
 
 DATA = frozenset(kind.value for kind in DATA_TYPES)
-IDENTITY = frozenset(kind.value for kind in IDENTITY_TYPES)
+IDENTITY = frozenset(kind.value for kind in NHI_TYPES)
 TRAVERSAL = frozenset(kind.value for kind in TRAVERSAL_TYPES)
 WEIGHT = {level.value: weight for level, weight in WEIGHTS.items()}
 SENSITIVE = frozenset({"confidential", "restricted"})
@@ -105,6 +105,8 @@ class CompactGraph:
         self.tags: list[tuple[str, ...]] = []
         self.provider: list[str] = []
         self.hints: dict[int, tuple[str, ...]] = {}
+        # Last-used hints (sparse): ``RoleLastUsed`` ISO date from metadata. Hints only.
+        self.last_used: dict[int, str] = {}
         self._tuples: dict[tuple[str, ...], tuple[str, ...]] = {}
         self.edge_source = array("l")
         self.edge_target = array("l")
@@ -153,6 +155,9 @@ class CompactGraph:
             )
             if hints:
                 self.hints[len(self.ids) - 1] = self._tuple(hints)
+            last_used = metadata.get("role_last_used")
+            if isinstance(last_used, str) and last_used:
+                self.last_used[len(self.ids) - 1] = last_used[:64]
 
     def _tuple(self, values) -> tuple[str, ...]:
         """One shared tuple per distinct value list (tags and actions repeat heavily)."""

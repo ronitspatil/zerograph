@@ -1,10 +1,12 @@
 {
   "Version": "2012-10-17",
   "Statement": [
-    {"Sid": "RoleInventoryOnly", "Effect": "Allow", "Action": "iam:GetAccountAuthorizationDetails", "Resource": "*"},
+    {"Sid": "IamInventoryOnly", "Effect": "Allow", "Action": "iam:GetAccountAuthorizationDetails", "Resource": "*"},
     {"Sid": "ManagedPolicyRead", "Effect": "Allow", "Action": ["iam:GetPolicy", "iam:GetPolicyVersion"], "Resource": ["arn:aws:iam::123456789012:policy/*", "arn:aws:iam::aws:policy/*"]},
     {"Sid": "OwnedBucketInventory", "Effect": "Allow", "Action": "s3:ListAllMyBuckets", "Resource": "*"},
     {"Sid": "SandboxBucketMetadataOnly", "Effect": "Allow", "Action": ["s3:GetBucketPolicy", "s3:GetBucketTagging", "s3:GetEncryptionConfiguration"], "Resource": "arn:aws:s3:::zerograph-qualification-*", "Condition": {"StringEquals": {"s3:ResourceAccount": "123456789012"}}},
+    {"Sid": "OptionalAccessAdvisorJobs", "Effect": "Allow", "Action": "iam:GenerateServiceLastAccessedDetails", "Resource": ["arn:aws:iam::123456789012:role/*", "arn:aws:iam::123456789012:user/*"]},
+    {"Sid": "OptionalAccessAdvisorResults", "Effect": "Allow", "Action": "iam:GetServiceLastAccessedDetails", "Resource": "*"},
     {"Sid": "OptionalOrganizationDescription", "Effect": "Allow", "Action": "organizations:DescribeOrganization", "Resource": "*"},
     {"Sid": "OptionalOrganizationParents", "Effect": "Allow", "Action": "organizations:ListParents", "Resource": ["arn:aws:organizations::111122223333:account/o-example/123456789012", "arn:aws:organizations::111122223333:ou/o-example/*"]},
     {"Sid": "OptionalScpAttachments", "Effect": "Allow", "Action": "organizations:ListPoliciesForTarget", "Resource": ["arn:aws:organizations::111122223333:account/o-example/123456789012", "arn:aws:organizations::111122223333:ou/o-example/*", "arn:aws:organizations::111122223333:root/o-example/*"], "Condition": {"StringEquals": {"organizations:PolicyType": "SERVICE_CONTROL_POLICY"}}},

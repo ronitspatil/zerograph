@@ -21,6 +21,13 @@ import type {
   TopicSummary,
 } from "@/lib/types";
 import { Button } from "@/components/ui/button";
+import {
+  BASIS_LABELS,
+  epiText,
+  EVIDENCE_LABELS,
+  PrivilegeRows,
+  windowText,
+} from "@/components/privilege";
 
 const loading = () => (
   <div className="canvas-loading">
@@ -61,6 +68,7 @@ export const FLAG_LABELS: Record<string, string> = {
   privileged: "Privileged",
   cross_topic: "Cross-topic access",
   restricted_outside: "Restricted data outside topic",
+  dormant: "Dormant (no observed use)",
 };
 
 const KIND_LABELS: Record<TopicMemberKind, string> = {
@@ -73,6 +81,7 @@ const SEED_LABELS: Record<string, string> = {
   tag: "Tag",
   metadata: "Metadata",
   name: "Name token",
+  usage: "Observed co-use",
   coaccess: "Shared access",
   fallback: "Service type",
 };
@@ -280,6 +289,9 @@ export function TopicLens({
       </>
     );
   const summary = map.summary;
+  const privilege = summary.privilege;
+  const evidence = privilege?.evidence;
+  const measured = !!evidence && evidence.status !== "none";
   const focus = selected ? (byId.get(selected) ?? null) : null;
   const shown = hovered ?? focus;
   const notice = map.view.notice || TOPICS_NOTICE_FALLBACK;
@@ -294,7 +306,9 @@ export function TopicLens({
         {map.view.truncated ? " · Partial map" : " · Complete map"}
       </span>
       <span className="global-map-notice">
-        Granted (structural) access, not usage
+        {measured
+          ? `Granted vs needed · ${EVIDENCE_LABELS[evidence.status].toLowerCase()}`
+          : "Granted (structural) access, not usage"}
       </span>
     </>
   );
@@ -367,10 +381,10 @@ export function TopicLens({
               onOpen={() => onOpenNeighborhood(member.id, map.revision)}
             />
           ) : hovered && hovered.id !== selected ? (
-            <TopicFacts topic={hovered} hint />
+            <TopicFacts topic={hovered} measured={measured} hint />
           ) : focus ? (
             <>
-              <TopicFacts topic={focus} />
+              <TopicFacts topic={focus} measured={measured} />
               <span className="section-label">Most over-privileged roles</span>
               {detail && detail.topic.id === focus.id ? (
                 detail.top_roles.length ? (
@@ -422,9 +436,12 @@ export function TopicLens({
                     <small>
                       {m.kind === "resource"
                         ? `${m.sensitivity} · ${SEED_LABELS[m.seed] ?? m.seed}`
-                        : m.flags.length
-                          ? m.flags.map((f) => FLAG_LABELS[f]).join(", ")
-                          : `${count(m.reach_resources)} data assets granted`}
+                        : (m.flags.length
+                            ? m.flags.map((f) => FLAG_LABELS[f]).join(", ")
+                            : `${count(m.reach_resources)} data assets granted`) +
+                          (m.epi != null
+                            ? ` · EPI ${epiText(m.epi)} ${m.basis}`
+                            : "")}
                     </small>
                   </button>
                 ))}
@@ -464,6 +481,53 @@ export function TopicLens({
                 <span>Hub roles</span>
                 <b>{count(summary.hub_roles as number)}</b>
               </div>
+              {privilege && (
+                <>
+                  <span className="section-label">Excess privilege</span>
+                  {measured ? (
+                    <>
+                      <div className="sidebar-stat">
+                        <span>Identities (without hubs)</span>
+                        <b>
+                          {epiText(privilege.identities.epi)} (
+                          {epiText(privilege.identities.epi_excl_hubs)})
+                        </b>
+                      </div>
+                      <div className="sidebar-stat">
+                        <span>Roles (without hubs)</span>
+                        <b>
+                          {epiText(privilege.roles.epi)} (
+                          {epiText(privilege.roles.epi_excl_hubs)})
+                        </b>
+                      </div>
+                      <div className="sidebar-stat">
+                        <span>Unused grants (restricted)</span>
+                        <b>
+                          {count(privilege.unused_grants)} (
+                          {count(privilege.unused_restricted_grants)})
+                        </b>
+                      </div>
+                      <div className="sidebar-stat">
+                        <span>Dormant identities</span>
+                        <b>{count(privilege.dormant_identities)}</b>
+                      </div>
+                      <small>
+                        {EVIDENCE_LABELS[evidence.status]} ·{" "}
+                        {windowText(evidence)} · sufficient for{" "}
+                        {evidence.sufficient_services?.join(", ") || "none"} ·
+                        sources {evidence.sources?.join(", ")}; RoleLastUsed and
+                        Access Advisor are hints only.
+                      </small>
+                    </>
+                  ) : (
+                    <small>
+                      No usage evidence yet: only granted access is shown.
+                      Upload a CloudTrail export in Data sources to compare it
+                      with observed use.
+                    </small>
+                  )}
+                </>
+              )}
               <small>{notice}</small>
             </>
           )}
@@ -479,7 +543,16 @@ export function TopicLens({
   );
 }
 
-function TopicFacts({ topic, hint }: { topic: TopicSummary; hint?: boolean }) {
+function TopicFacts({
+  topic,
+  hint,
+  measured,
+}: {
+  topic: TopicSummary;
+  hint?: boolean;
+  measured?: boolean;
+}) {
+  const privilege = topic.privilege;
   return (
     <>
       <span className="section-label">{hint ? "Topic" : "Open topic"}</span>
@@ -511,6 +584,34 @@ function TopicFacts({ topic, hint }: { topic: TopicSummary; hint?: boolean }) {
         <dt>Hub role grants in</dt>
         <dd>{count(topic.hub_grants_in)}</dd>
       </dl>
+      {measured && privilege && !hint && (
+        <>
+          <span className="section-label">Excess privilege</span>
+          <dl>
+            <PrivilegeRows label="Roles" aggregate={privilege.roles} />
+            <PrivilegeRows
+              label="Identities"
+              aggregate={privilege.identities}
+            />
+            <dt>Unused grants</dt>
+            <dd>
+              {count(privilege.unused_grants)} (
+              {count(privilege.unused_restricted_grants)} restricted)
+            </dd>
+            <dt>Dormant identities</dt>
+            <dd>{count(privilege.dormant_identities)}</dd>
+          </dl>
+        </>
+      )}
+      {measured && privilege && hint && (
+        <dl>
+          <dt>Identity EPI</dt>
+          <dd>
+            {epiText(privilege.identities.epi)} (
+            {epiText(privilege.identities.epi_excl_hubs)} without hubs)
+          </dd>
+        </dl>
+      )}
       {hint && <small>Select the circle to open this topic.</small>}
     </>
   );
@@ -573,6 +674,29 @@ function MemberPanel({
             )}
             <dt>Restricted outside</dt>
             <dd>{count(member.restricted_outside)}</dd>
+            {member.basis && member.basis !== "none" && (
+              <>
+                <dt>Needed weight</dt>
+                <dd>
+                  {count(member.needed_weight)} (
+                  {count(member.needed_weight_excl_hubs)} without hubs)
+                </dd>
+                <dt>EPI</dt>
+                <dd>
+                  {epiText(member.epi)} ({epiText(member.epi_excl_hubs)} without
+                  hubs)
+                </dd>
+                <dt>Needed from</dt>
+                <dd>{BASIS_LABELS[member.basis]}</dd>
+                <dt>Data assets used</dt>
+                <dd>{count(member.used_resources)}</dd>
+                <dt>Unused own grants</dt>
+                <dd>
+                  {count(member.unused_grants)} (
+                  {count(member.unused_restricted)} restricted)
+                </dd>
+              </>
+            )}
           </>
         )}
       </dl>

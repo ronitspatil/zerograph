@@ -130,7 +130,7 @@ def test_chunk_retry_replaces_the_chunk(client, environment):
     [
         (b"not json\n", "Line 1: invalid JSON"),
         (b'{"node": {"id": "a"}}\n', "Line 1: invalid node"),
-        (b'{"vertex": {}}\n', "Line 1: expected exactly one of node, edge or warning"),
+        (b'{"vertex": {}}\n', "Line 1: expected exactly one of node, edge, policy or warning"),
         (b'{"node": {}, "edge": {}}\n', "Line 1: expected exactly one"),
         (b'\n{"warning": 5}\n', "Line 2: invalid warning"),
         (
@@ -165,11 +165,19 @@ def test_cross_chunk_duplicates_and_dangling_edges_are_refused(client, environme
     assert duplicate.status_code == 422
     assert "already staged" in duplicate.json()["detail"]
     dangling = Edge(source=snapshot.nodes[0].id, target="missing", type=EdgeType.READ)
-    assert put(client, upload_id, 1, ndjson(GraphSnapshot.model_construct(nodes=[], edges=[dangling], warnings=[]))).status_code == 200
+    assert (
+        put(
+            client,
+            upload_id,
+            1,
+            ndjson(GraphSnapshot.model_construct(nodes=[], edges=[dangling], warnings=[])),
+        ).status_code
+        == 200
+    )
     with patch(DELAY) as delay:
         refused = client.post(f"/api/v1/ingestions/uploads/{upload_id}/commit")
     assert refused.status_code == 422
-    assert refused.json()["detail"] == "Every edge endpoint must exist in this snapshot"
+    assert refused.json()["detail"] == "Every edge endpoint and policy principal must exist in this snapshot"
     delay.assert_not_called()
     # The session stays open: the client can replace the bad chunk and commit.
     assert put(client, upload_id, 1, ndjson(snapshot, nodes=False)).status_code == 200
@@ -237,7 +245,9 @@ def test_upload_sessions_are_tenant_scoped_bounded_and_expire(client, environmen
     start(client)
     with factory() as db:
         assert db.scalar(select(func.count()).select_from(UploadSession)) == 1
-    client.app.dependency_overrides[current_actor] = lambda: Actor("viewer", "tenant-a", frozenset({"viewer"}))
+    client.app.dependency_overrides[current_actor] = lambda: Actor(
+        "viewer", "tenant-a", frozenset({"viewer"})
+    )
     assert client.post("/api/v1/ingestions/uploads", json={}).status_code == 403
 
 
@@ -339,7 +349,9 @@ def test_legacy_source_documents_are_staged_on_next_publication(environment):
     factory, graph = environment
     legacy = GraphSnapshot(nodes=[Node(id="legacy", name="legacy", type=NodeType.BUCKET)])
     with factory() as db:
-        db.add(SourceSnapshot(tenant_id="tenant-a", source="aaa-legacy", payload=legacy.model_dump(mode="json")))
+        db.add(
+            SourceSnapshot(tenant_id="tenant-a", source="aaa-legacy", payload=legacy.model_dump(mode="json"))
+        )
         db.commit()
     publish(factory, "new", GraphSnapshot(nodes=[Node(id="fresh", name="fresh", type=NodeType.BUCKET)]))
     assert [n.id for n in graph.snapshot("tenant-a", current(factory)).nodes] == ["legacy", "fresh"]
