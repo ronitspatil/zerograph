@@ -27,7 +27,14 @@ from sqlalchemy.orm import Session
 
 from app.collectors.cloudtrail import Normalized
 from app.collectors.execution_audit import SERVICES
-from app.db.models import ObservedAccess, UsageCoverage, UsageStaged, UsageUpload, UsageUploadChunk
+from app.db.models import (
+    AccessDenial,
+    ObservedAccess,
+    UsageCoverage,
+    UsageStaged,
+    UsageUpload,
+    UsageUploadChunk,
+)
 
 SOURCE = "cloudtrail-export"
 WINDOW_DAYS = 90
@@ -58,9 +65,26 @@ def utc(value: datetime) -> datetime:
 
 
 def stage_chunk(db: Session, upload: UsageUpload, chunk: int, size: int, normalized: Normalized) -> None:
-    """Replace one file's staged aggregates and classification counts."""
-    for model in (UsageStaged, UsageUploadChunk):
+    """Replace one file's staged aggregates, denied attempts and classification counts."""
+    for model in (UsageStaged, UsageUploadChunk, AccessDenial):
         db.execute(delete(model).where(model.upload_id == upload.id, model.chunk == chunk))
+    denials = [
+        {
+            "upload_id": upload.id,
+            "chunk": chunk,
+            "tenant_id": upload.tenant_id,
+            "principal_id": principal,
+            "resource_id": resource,
+            "service": service,
+            "error_code": code,
+            "first_seen": first,
+            "last_seen": last,
+            "count": count,
+        }
+        for (principal, resource, service, code), (first, last, count) in normalized.denied_access.items()
+    ]
+    for start in range(0, len(denials), INSERT_BATCH):
+        db.execute(insert(AccessDenial), denials[start : start + INSERT_BATCH])
     batch = []
     for (principal, resource, action_class, service), (first, last, count) in normalized.access.items():
         batch.append(
@@ -189,7 +213,7 @@ def delete_upload(db: Session, tenant: str, upload_id: str) -> bool:
     upload = db.get(UsageUpload, upload_id)
     if upload is None or upload.tenant_id != tenant:
         return False
-    for model in (UsageStaged, UsageUploadChunk):
+    for model in (UsageStaged, UsageUploadChunk, AccessDenial):
         db.execute(delete(model).where(model.upload_id == upload_id))
     for model in (ObservedAccess, UsageCoverage):
         db.execute(delete(model).where(model.tenant_id == tenant, model.upload_id == upload_id))

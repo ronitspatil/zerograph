@@ -15,7 +15,10 @@ incomplete, and events outside the declared window are ignored.
   database, the Athena workgroup, the Lake Formation table, the RDS Data API resource,
   else the first ``resources[].ARN``. Records without one are counted as unresolved.
 * Records with an ``errorCode`` (for example ``AccessDenied``) are denied attempts:
-  counted, never treated as use.
+  counted, never treated as use. Denied attempts whose principal and resource resolve
+  are aggregated separately per (principal, resource, service, error code) with
+  first/last seen and a count (bounded per file), for the optimizer rollout's
+  AccessDenied watch after a least-privilege change is merged.
 """
 
 import gzip
@@ -29,6 +32,8 @@ from app.collectors.execution_audit import EVENTS, service_of
 MAX_DECOMPRESSED_BYTES = 64 * 2**20
 MAX_RECORDS = 500_000
 MAX_ID = 512
+MAX_DENIED_PAIRS = 20_000  # Distinct denied (principal, resource, service, code) per file.
+MAX_ERROR_CODE = 64
 
 
 class ExportError(ValueError):
@@ -153,6 +158,9 @@ class Normalized:
     # service -> records seen / unmapped (no verified IAM action mapping)
     service_events: dict[str, int] = field(default_factory=dict)
     service_unmapped: dict[str, int] = field(default_factory=dict)
+    # (principal, resource, service, error code) -> [first seen, last seen, count]; never use.
+    denied_access: dict[tuple[str, str, str, str], list] = field(default_factory=dict)
+    denied_unrecorded: int = 0
 
     def stats(self) -> dict:
         return {
@@ -167,6 +175,8 @@ class Normalized:
             "service_events": dict(sorted(self.service_events.items())),
             "service_unmapped": dict(sorted(self.service_unmapped.items())),
             "pairs": len(self.access),
+            "denied_pairs": len(self.denied_access),
+            "denied_unrecorded": self.denied_unrecorded,
         }
 
 
@@ -178,6 +188,31 @@ def _time(value) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo is not None else None
+
+
+def _record_denial(result: Normalized, record: dict, service: str, occurred: datetime) -> None:
+    """Aggregate a denied attempt by (principal, resource, service, error code); never use."""
+    code = record.get("errorCode")
+    principal = principal_of(record)
+    resource = resource_of(record, service, principal) if principal else ""
+    if (
+        not isinstance(code, str)
+        or not principal
+        or not resource
+        or len(principal) > MAX_ID
+        or len(resource) > MAX_ID
+    ):
+        result.denied_unrecorded += 1
+        return
+    key = (principal, resource, service, code[:MAX_ERROR_CODE])
+    row = result.denied_access.get(key)
+    if row is None:
+        if len(result.denied_access) >= MAX_DENIED_PAIRS:
+            result.denied_unrecorded += 1
+            return
+        result.denied_access[key] = [occurred, occurred, 1]
+        return
+    row[0], row[1], row[2] = min(row[0], occurred), max(row[1], occurred), row[2] + 1
 
 
 def normalize_export(records: list[dict], start: datetime, end: datetime) -> Normalized:
@@ -204,6 +239,7 @@ def normalize_export(records: list[dict], start: datetime, end: datetime) -> Nor
             continue
         if record.get("errorCode"):
             result.denied += 1
+            _record_denial(result, record, service, occurred)
             continue
         principal = principal_of(record)
         if not principal or len(principal) > MAX_ID:
