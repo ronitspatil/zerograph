@@ -1532,6 +1532,10 @@
   .proposal-detail {
     padding: 16px;
     font-size: 13px;
+    /* Fixed frame beside the list: opening a proposal or a simulation never resizes it. */
+    height: 760px;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
   }
   .proposal-detail h3 {
     margin: 4px 0 8px;
@@ -2095,6 +2099,10 @@
   @media (max-width: 900px) {
     .proposals-grid {
       grid-template-columns: minmax(0, 1fr);
+    }
+    .proposal-detail {
+      height: auto;
+      overflow-y: visible;
     }
     .proposal-metrics {
       grid-template-columns: minmax(0, 1fr);
