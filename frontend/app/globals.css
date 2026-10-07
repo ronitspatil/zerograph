@@ -1577,6 +1577,11 @@
   .proposal-simulation dl {
     margin-bottom: 0;
   }
+  .proposal-detail .proposal-sim-status {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .proposal-actions {
     display: flex;
     flex-wrap: wrap;

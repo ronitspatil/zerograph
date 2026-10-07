@@ -65,6 +65,7 @@ export function Proposals({ canAdmin }: { canAdmin: boolean }) {
   const [simulation, setSimulation] = useState<ProposalSimulation | null>(null);
   const [busy, setBusy] = useState(false);
   const [simulating, setSimulating] = useState(false);
+  const [simulationError, setSimulationError] = useState("");
   const [error, setError] = useState("");
   const [unavailable, setUnavailable] = useState("");
   const listRequest = useRef<AbortController | null>(null);
@@ -123,6 +124,7 @@ export function Proposals({ canAdmin }: { canAdmin: boolean }) {
   const open = async (proposal: Proposal) => {
     setSelected(proposal.id);
     setSimulation(null);
+    setSimulationError("");
     setError("");
     try {
       setDetail(
@@ -138,7 +140,7 @@ export function Proposals({ canAdmin }: { canAdmin: boolean }) {
   const simulate = async () => {
     if (!detail) return;
     setSimulating(true);
-    setError("");
+    setSimulationError("");
     try {
       setSimulation(
         await api<ProposalSimulation>("proposals/simulate", {
@@ -150,7 +152,8 @@ export function Proposals({ canAdmin }: { canAdmin: boolean }) {
         }),
       );
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Simulation failed");
+      // Shown inside the simulation box (one clamped line): the layout never moves.
+      setSimulationError(e instanceof Error ? e.message : "Simulation failed");
     } finally {
       setSimulating(false);
     }
@@ -378,6 +381,7 @@ export function Proposals({ canAdmin }: { canAdmin: boolean }) {
               topicLabel={topics.get(detail.proposal.topic_id)}
               simulation={simulation}
               simulating={simulating}
+              simulationError={simulationError}
               onSimulate={() => void simulate()}
               canAdmin={canAdmin}
               onDecide={(state) => void decide(state)}
@@ -408,6 +412,7 @@ function ProposalEvidence({
   topicLabel,
   simulation,
   simulating,
+  simulationError,
   onSimulate,
   canAdmin,
   onDecide,
@@ -416,6 +421,7 @@ function ProposalEvidence({
   topicLabel?: string;
   simulation: ProposalSimulation | null;
   simulating: boolean;
+  simulationError: string;
   onSimulate: () => void;
   canAdmin: boolean;
   onDecide: (state: "accepted" | "rejected" | "pending") => void;
@@ -548,6 +554,19 @@ function ProposalEvidence({
           </dd>
           <dt>Assets no longer reachable</dt>
           <dd>{whatif ? count(whatif.assets_removed_count) : "—"}</dd>
+          <dt>Status</dt>
+          <dd
+            className="proposal-sim-status"
+            title={simulationError || undefined}
+          >
+            {simulationError
+              ? `Failed: ${simulationError}`
+              : simulating
+                ? "Simulating"
+                : simulation
+                  ? "Simulated, not applied"
+                  : "Not run"}
+          </dd>
         </dl>
       </div>
       <span className="section-label">Review</span>
