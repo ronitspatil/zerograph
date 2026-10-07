@@ -142,12 +142,17 @@ def refine_with_usage(
     """
     from app.graph.clusters import louvain
 
-    pairs = [
-        (principal, item)
-        for principal in sorted(usage.data_used)
-        if principal not in hubs
-        for item in sorted(usage.data_used[principal])
-    ]
+    # Ordered by entity ID, not node index: the result must not depend on revision order.
+    ids = graph.ids
+    pairs = sorted(
+        (
+            (principal, item)
+            for principal, items in usage.data_used.items()
+            if principal not in hubs
+            for item in items
+        ),
+        key=lambda pair: (ids[pair[0]], ids[pair[1]]),
+    )
     if not pairs:
         return {"communities": 0, "named": 0, "relabeled": 0}
     local: dict[int, int] = {}

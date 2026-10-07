@@ -339,3 +339,18 @@ def test_unused_grants_do_not_vote_in_co_access_when_evidence_suffices():
         "coaccess",
         "co-access: 1 of 1 granted roles are lake",
     )
+
+
+def test_rows_do_not_depend_on_revision_order():
+    snapshot, _, planted = generate_topics(3000, seed=11)
+    observed = [(r, d, "read") for r, items in planted["role_data_used"].items() for d in items]
+    observed += [(i, r, "assume") for i, roles in planted["identity_role_used"].items() for r in roles]
+    shuffled = GraphSnapshot.model_construct(
+        nodes=list(reversed(snapshot.nodes)), edges=list(reversed(snapshot.edges)), warnings=[], policies=[]
+    )
+    rows = []
+    for item in (snapshot, shuffled):
+        graph = CompactGraph.from_snapshot(item)
+        result = compute_topics(graph, match_usage(graph, evidence(), observed))
+        rows.append(sorted(topics.member_rows(result, "t", "r"), key=lambda row: row[2]))
+    assert rows[0] == rows[1]
