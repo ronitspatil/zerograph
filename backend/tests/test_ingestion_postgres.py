@@ -852,6 +852,20 @@ def test_publication_copies_topic_rows_on_postgres(postgres_environment):
         assert stored == [tuple(row) for row in expected]
         rows = db.scalars(select(RevisionTopic).where(RevisionTopic.revision == revision)).all()
         assert len(rows) == summary.total_topics and all(isinstance(row.stats, dict) for row in rows)
+        # Proposals and their what-if model are copied in the same transaction.
+        from app.db.models import RevisionProposal
+        from app.graph import proposals
+
+        proposal_summary = proposals.stored_proposal_summary(db, "tenant", revision)
+        assert proposal_summary is not None and proposal_summary.totals["by_type"]["scope_wildcard"] == 3
+        stored_proposals = db.scalars(
+            select(RevisionProposal).where(RevisionProposal.revision == revision).order_by(RevisionProposal.ordinal)
+        ).all()
+        assert len(stored_proposals) == proposal_summary.total
+        assert all(isinstance(row.changes, list) and isinstance(row.evidence, dict) for row in stored_proposals)
+        assert [row.ordinal for row in stored_proposals] == list(range(proposal_summary.total))
+        model = proposals.load_model(db, "tenant", revision)
+        assert len(model.proposal_type) == proposal_summary.total
 
 
 def test_worker_topic_backfill_skips_a_publishing_tenant_then_fills_it(postgres_environment, monkeypatch):

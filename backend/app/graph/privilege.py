@@ -208,6 +208,13 @@ class PrivilegeContext:
     role_rows: dict[int, dict]
     identity_rows: dict[int, dict]
     holders: dict[int, frozenset[int]]  # every role and principal -> H(x)
+    # Peer baseline (filled by ``compute_privilege``): per (topic, data) non-hub holders granted and
+    # observed using it, and each holder's peer-needed grants.
+    granted_by: Counter = field(default_factory=Counter)
+    used_by: Counter = field(default_factory=Counter)
+    peer_needed: dict[int, frozenset[int]] = field(default_factory=dict)
+    # Non-holder nodes (pivots without grants) each start's hops pass through.
+    through: dict[int, frozenset[int]] = field(default_factory=dict)
 
 
 def _empty(row: dict, basis: str) -> None:
@@ -283,7 +290,7 @@ def compute_privilege(context: PrivilegeContext, usage: UsageInput | None) -> di
             and granted_by[(topic, item)]
             and used_by[(topic, item)] >= share * granted_by[(topic, item)]
         )
-    del granted_by, used_by
+    context.granted_by, context.used_by, context.peer_needed = granted_by, used_by, peer_needed
 
     def observed_reach(start: int) -> frozenset[int]:
         seen = {start}

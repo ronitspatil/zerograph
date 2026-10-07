@@ -451,3 +451,153 @@ export interface TopicDetail {
     notice: string;
   };
 }
+
+// Optimizer proposals (Phase 3): proposed, never applied.
+export type ProposalTier = "high" | "medium" | "low" | "inferred" | "manual";
+export type ProposalType =
+  | "remove_grant"
+  | "disable_identity"
+  | "disable_role"
+  | "merge_roles"
+  | "split_role"
+  | "scope_wildcard"
+  | "break_toxic_path";
+
+export interface ProposalDecision {
+  state: "accepted" | "rejected";
+  actor: string;
+  decided_at: string;
+  revision: string;
+  note: string;
+  /** The proposal changed since the decision (same ID, new evidence). */
+  stale: boolean;
+}
+
+export interface ProposalChange {
+  op: string;
+  source?: string;
+  target?: string;
+  node?: string;
+  edge_id?: string;
+  type?: string;
+  actions?: string[];
+  [key: string]: unknown;
+}
+
+export interface Proposal {
+  id: string;
+  ordinal: number;
+  type: ProposalType;
+  tier: ProposalTier;
+  base_tier: ProposalTier;
+  status: "proposed";
+  topic_id: string;
+  subject_id: string;
+  subject_name: string;
+  subject_type: string;
+  target_id: string;
+  target_name: string;
+  weight: number;
+  identities: number;
+  epi_before: number | null;
+  epi_after: number | null;
+  reasons: string[];
+  evidence: Record<string, unknown>;
+  changes: ProposalChange[];
+  decision: ProposalDecision | null;
+}
+
+export interface WhatIfSide {
+  granted_weight: number;
+  needed_weight: number;
+  granted_weight_excl_hubs: number;
+  needed_weight_excl_hubs: number;
+  epi: number | null;
+  epi_excl_hubs: number | null;
+}
+
+export interface WhatIfTotals {
+  rows: number;
+  before: WhatIfSide;
+  after: WhatIfSide;
+}
+
+export interface ProposalSummary {
+  revision: string;
+  total: number;
+  by_tier: Record<ProposalTier, number>;
+  by_type: Record<ProposalType, number>;
+  topics: Record<
+    string,
+    {
+      total: number;
+      by_tier: Record<ProposalTier, number>;
+      high_after: { roles?: WhatIfSide; identities?: WhatIfSide };
+    }
+  >;
+  high_tier: {
+    graph: { roles: WhatIfTotals; identities: WhatIfTotals };
+    counts: Record<string, number>;
+  };
+  evidence: UsageEvidence | { status: "none" };
+  never_auto: Record<string, string>;
+  decisions: { accepted: number; rejected: number };
+  notice: string;
+}
+
+export interface ProposalList {
+  revision: string;
+  proposals: Proposal[];
+  summary: Omit<ProposalSummary, "topics" | "never_auto" | "revision">;
+  view: {
+    total: number;
+    shown: number;
+    limit: number;
+    cursor: number | null;
+    next_cursor: number | null;
+  };
+  notice: string;
+}
+
+export interface ProposalDetail {
+  revision: string;
+  proposal: Proposal;
+  topic: { id: string; name: string; label: string; reason: string } | null;
+  resource: {
+    id: string;
+    name: string;
+    type: string;
+    sensitivity: string;
+    topic_id: string;
+    topic: string;
+    label_seed: string;
+    label_reason: string;
+  } | null;
+  evidence: Partial<UsageEvidence> & { status: string };
+  never_auto: Record<string, string>;
+  graph_delta: {
+    graph: { roles: WhatIfTotals; identities: WhatIfTotals };
+    counts: Record<string, number>;
+    applied: Record<string, number>;
+    skipped: Record<string, number>;
+  } | null;
+  notice: string;
+}
+
+export interface ProposalSimulation extends Simulation {
+  whatif?: {
+    after: Simulation;
+    risk_delta: number;
+    exposure_delta: number;
+    assets_removed: string[];
+    assets_removed_count: number;
+    nodes_removed_count: number;
+    overlay: {
+      applied: Record<string, number>;
+      skipped: Record<string, number>;
+      removed_edges: number;
+      disabled_nodes: number;
+    };
+    notice: string;
+  };
+}

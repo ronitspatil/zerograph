@@ -184,3 +184,29 @@ def calculate(
         includes_uncertain=include_uncertain,
         explanation=EXPLANATION,
     )
+
+
+def apply_overlay(
+    reach: Reach,
+    removed: set[tuple[str, str]] = frozenset(),
+    edge_ids: set[str] = frozenset(),
+    disabled: set[str] = frozenset(),
+) -> Reach:
+    """The neighborhood with edges removed (by ``(source, target)`` pair or edge ID) and nodes
+    disabled (no edges into or out of them).
+
+    Exact for what-if simulation: removal only shrinks reach, and every node the reduced
+    graph reaches within the hop bound was reached at the same or a smaller depth before,
+    so its out-edges are already in ``reach.edges``.
+    """
+    edges: dict[str, list[tuple[str, str]]] = {}
+    for node, relationships in reach.edges.items():
+        if node in disabled:
+            edges[node] = []
+            continue
+        edges[node] = [
+            (target, edge)
+            for target, edge in relationships
+            if target not in disabled and (node, target) not in removed and edge not in edge_ids
+        ]
+    return Reach(reach.source, reach.hops, reach.include_uncertain, edges, reach.kinds, reach.sensitivity)
