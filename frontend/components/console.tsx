@@ -9,6 +9,7 @@ import {
   CircleHelp,
   GitPullRequest,
   LayoutDashboard,
+  ListChecks,
   LoaderCircle,
   LogOut,
   Network,
@@ -37,6 +38,7 @@ import type {
 import { Button } from "@/components/ui/button";
 import { Simulator } from "@/components/simulator";
 import { RemediationHub } from "@/components/remediation-hub";
+import { Proposals } from "@/components/proposals";
 import { Sources } from "@/components/sources";
 import { ExcessPrivilegePanel } from "@/components/privilege";
 import { SensitivityChart } from "@/components/sensitivity-chart";
@@ -54,7 +56,8 @@ const GraphCanvas = dynamic(
     ),
   },
 );
-type View = "overview" | "graph" | "remediation" | "sources" | "activity";
+type View =
+  "overview" | "graph" | "proposals" | "remediation" | "sources" | "activity";
 const titles: Record<View, { title: string; description: string }> = {
   overview: {
     title: "Security overview",
@@ -65,6 +68,11 @@ const titles: Record<View, { title: string; description: string }> = {
     title: "Identity & data graph",
     description:
       "Explore effective access. Find the paths that put your data at risk.",
+  },
+  proposals: {
+    title: "Least-privilege proposals",
+    description:
+      "Proposed, not applied: what to remove, disable, merge or split, with the evidence and a what-if.",
   },
   remediation: {
     title: "Remediation hub",
@@ -84,6 +92,7 @@ const titles: Record<View, { title: string; description: string }> = {
 const nav = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
   { id: "graph", label: "Knowledge graph", icon: Network },
+  { id: "proposals", label: "Proposals", icon: ListChecks },
   { id: "remediation", label: "Remediation", icon: GitPullRequest },
   { id: "sources", label: "Data sources", icon: Unplug },
   { id: "activity", label: "Audit activity", icon: Activity },
@@ -1214,6 +1223,7 @@ export function Console({ demo }: { demo: boolean }) {
                   />
                 </>
               )}
+              {view === "proposals" && <Proposals canAdmin={canAdmin} />}
               {view === "remediation" && (
                 <RemediationHub
                   identities={identities}
