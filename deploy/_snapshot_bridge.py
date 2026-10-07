@@ -20,6 +20,7 @@ from app.db.models import (
     AuditEvent,
     IngestionJob,
     ObservedAccess,
+    ProposalDecision,
     Remediation,
     RevisionAnalysis,
     RevisionCluster,
@@ -29,6 +30,9 @@ from app.db.models import (
     RevisionFinding,
     RevisionPolicy,
     RevisionPolicyDocument,
+    RevisionProposal,
+    RevisionProposalModel,
+    RevisionProposalSummary,
     RevisionTopic,
     RevisionTopicLink,
     RevisionTopicMember,
@@ -174,10 +178,15 @@ def metadata():
                     RevisionTopicMember,
                     RevisionPolicyDocument,
                     RevisionPolicy,
-                    # Tenant usage evidence (observed access) carries forward across revisions.
+                    RevisionProposalSummary,
+                    RevisionProposal,
+                    RevisionProposalModel,
+                    # Tenant usage evidence (observed access) carries forward across revisions,
+                    # and so do accept/reject decisions on proposals (by stable proposal ID).
                     UsageUpload,
                     ObservedAccess,
                     UsageCoverage,
+                    ProposalDecision,
                 )
             },
         }

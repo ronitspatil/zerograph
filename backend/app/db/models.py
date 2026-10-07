@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, Index, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Float, Index, Integer, LargeBinary, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -433,3 +433,80 @@ class UsageCoverage(Base):
     events: Mapped[int] = mapped_column(Integer)
     unmapped: Mapped[int] = mapped_column(Integer)
     complete: Mapped[bool] = mapped_column(Boolean)
+
+
+class RevisionProposalSummary(Base):
+    """Optimizer proposals of a revision: counts by tier, type and topic, high-tier what-if
+    metrics and the usage evidence they rest on."""
+
+    __tablename__ = "revision_proposal_summary"
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    revision: Mapped[str] = mapped_column(String(64), primary_key=True)
+    proposal_version: Mapped[int] = mapped_column(Integer)
+    # Usage evidence the proposals were computed with (same as the revision's topics); "" = none.
+    usage_fingerprint: Mapped[str] = mapped_column(String(32), default="")
+    total: Mapped[int] = mapped_column(Integer)
+    totals: Mapped[dict[str, Any]] = mapped_column(JSON)
+    compute_ms: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class RevisionProposalModel(Base):
+    """Compressed what-if model of a revision (app.graph.whatif): grants, hops, closures and
+    each proposal's changes, so before/after metrics never load the revision's snapshot."""
+
+    __tablename__ = "revision_proposal_models"
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    revision: Mapped[str] = mapped_column(String(64), primary_key=True)
+    proposal_version: Mapped[int] = mapped_column(Integer)
+    model: Mapped[bytes] = mapped_column(LargeBinary)
+
+
+class RevisionProposal(Base):
+    """One proposed (never applied) least-privilege change, in its deterministic order (ordinal)."""
+
+    __tablename__ = "revision_proposals"
+    __table_args__ = (
+        Index("ux_revision_proposals_order", "tenant_id", "revision", "ordinal", unique=True),
+        Index("ix_revision_proposals_tier", "tenant_id", "revision", "tier", "ordinal"),
+        Index("ix_revision_proposals_type", "tenant_id", "revision", "type", "ordinal"),
+        Index("ix_revision_proposals_topic", "tenant_id", "revision", "topic_id", "ordinal"),
+        Index("ix_revision_proposals_subject", "tenant_id", "revision", "subject_id"),
+        Index("ix_revision_proposals_target", "tenant_id", "revision", "target_id"),
+    )
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    revision: Mapped[str] = mapped_column(String(64), primary_key=True)
+    proposal_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    ordinal: Mapped[int] = mapped_column(Integer)
+    type: Mapped[str] = mapped_column(String(32))
+    tier: Mapped[str] = mapped_column(String(16))
+    base_tier: Mapped[str] = mapped_column(String(16))
+    topic_id: Mapped[str] = mapped_column(String(32))
+    subject_id: Mapped[str] = mapped_column(String(512))
+    subject_name: Mapped[str] = mapped_column(String(256))
+    subject_type: Mapped[str] = mapped_column(String(32))
+    target_id: Mapped[str] = mapped_column(String(512))
+    target_name: Mapped[str] = mapped_column(String(256))
+    weight: Mapped[int] = mapped_column(Integer)
+    identities: Mapped[int] = mapped_column(Integer)
+    epi_before: Mapped[float | None] = mapped_column(Float, nullable=True)
+    epi_after: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reasons: Mapped[list[str]] = mapped_column(JSON)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON)
+    changes: Mapped[list[Any]] = mapped_column(JSON)
+    # Content hash: a decision made on other content (same ID, new evidence) reads as stale.
+    digest: Mapped[str] = mapped_column(String(16))
+
+
+class ProposalDecision(Base):
+    """A tenant's accept/reject decision on a proposal ID; carries forward across revisions."""
+
+    __tablename__ = "proposal_decisions"
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    proposal_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    state: Mapped[str] = mapped_column(String(16))
+    actor: Mapped[str] = mapped_column(String(256))
+    revision: Mapped[str] = mapped_column(String(64))
+    digest: Mapped[str] = mapped_column(String(16))
+    note: Mapped[str] = mapped_column(String(500), default="")
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
