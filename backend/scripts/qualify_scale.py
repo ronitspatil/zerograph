@@ -687,6 +687,8 @@ def qualify(
             legacy_overview = legacy.json()
         # Stored and computed-on-read analysis must agree (revision aside).
         stored_overview.pop("revision"), legacy_overview.pop("revision")
+        # The excess-privilege tile comes from stored topic rows; legacy reads have none.
+        stored_overview.pop("excess_privilege", None)
         result["stored_matches_compute_on_read"] = stored_overview == legacy_overview
         result["overview_counts"] = {
             key: stored_overview[key]
