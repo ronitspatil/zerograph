@@ -19,6 +19,7 @@ from app.db.session import audit, session_factory
 from app.graph.analysis import backfill_stale_samples, store_analysis
 from app.graph.clusters import backfill_missing, compute_clusters, load_previous, store_clusters
 from app.graph.demo import demo_snapshot
+from app.graph.privilege import load_usage
 from app.graph.repository import get_graph_store
 from app.graph.schema import GraphSnapshot
 from app.graph.topics import backfill_missing as backfill_missing_topics
@@ -73,7 +74,7 @@ def collect(source: str, payload: dict, tenant: str) -> GraphSnapshot | StagedUp
             aws_session_token=credentials["SessionToken"],
             region_name=settings.aws_region,
         )
-        return AWSCollector(session).collect()
+        return AWSCollector(session, access_advisor=settings.aws_access_advisor).collect()
     raise ValueError("Unsupported ingestion source")
 
 
@@ -259,8 +260,12 @@ def _publish_job(job_id: str, token: str, tenant: str, collected: GraphSnapshot 
         clusters = compute_clusters(published.graph, revision, load_previous(db, tenant, current))
         store_clusters(db, tenant, revision, clusters)
         del clusters
-        # Relationship topics and granted (structural) privilege analysis, same transaction.
-        topics = compute_topics(published.graph)
+        # Relationship topics, usage refinement and the excess-privilege index (granted vs
+        # needed, from the tenant's observed access by stable IDs), same transaction.
+        topics = compute_topics(
+            published.graph,
+            load_usage(db, tenant, published.graph, peer_share=get_settings().peer_baseline_share),
+        )
         published.graph = None
         store_topics(db, tenant, revision, topics)
         del topics

@@ -19,6 +19,7 @@ from app.collectors.staging import canonical_json
 from app.core.config import get_settings
 from app.db.models import StagedEntity
 from app.graph.compact import DATA, CompactGraph
+from app.graph.policies import PolicyBudgetExceeded, store_policies
 from app.graph.repository import EdgeRow, GraphStore, NodeRow
 from app.graph.schema import Edge, EdgeType, Node, NodeType
 
@@ -46,6 +47,7 @@ class PublishedRevision:
     edges: int
     analysis: object  # app.graph.analysis.ComputedAnalysis
     graph: CompactGraph  # For publish-time clustering; dropped by the caller after use.
+    policies: int = 0  # Policy attachments stored for the revision.
 
 
 def check_conflicts(db: Session, set_ids: list[str]) -> None:
@@ -208,5 +210,15 @@ def publish_sets(
     seen_edges.clear()
     analysis = compact.analyze()
     nodes, edge_count = compact.node_count, compact.edge_count
+    # Policy documents (SQL only, never node JSON): first attachment ID wins across sources.
+    try:
+        policies = store_policies(
+            db,
+            tenant,
+            revision,
+            ((entity_id, payload) for entity_id, _, _, _, payload in _stream(db, set_ids, "policy")),
+        )
+    except PolicyBudgetExceeded as exc:
+        raise RevisionTooLarge(str(exc)) from None
     graph.finish_revision(tenant, revision)
-    return PublishedRevision(nodes, edge_count, analysis, compact)
+    return PublishedRevision(nodes, edge_count, analysis, compact, policies)

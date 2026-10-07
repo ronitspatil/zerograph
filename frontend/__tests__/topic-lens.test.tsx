@@ -342,4 +342,109 @@ describe("topics lens", () => {
       boundary_edges: 5300,
     });
   });
+
+  it("shows excess privilege, its basis and evidence when usage evidence exists", async () => {
+    const aggregate = (epi: number, core: number, used = 10, inferred = 0) => ({
+      granted_weight: 1000,
+      needed_weight: Math.round(1000 * (1 - epi)),
+      granted_weight_excl_hubs: 400,
+      needed_weight_excl_hubs: Math.round(400 * (1 - core)),
+      epi,
+      epi_excl_hubs: core,
+      basis: { used, inferred, none: 0 },
+    });
+    const privilege = {
+      roles: aggregate(0.48, 0.45),
+      identities: aggregate(0.98, 0.63, 30, 10),
+      unused_grants: 97713,
+      unused_restricted_grants: 21000,
+      dormant_identities: 6097,
+      dormant_roles: 4,
+      dormant_role_hint_conflicts: 0,
+    };
+    const measured: TopicMap = {
+      ...map,
+      topics: [
+        topic("t000000000000001", "data-lake", {
+          privilege: { ...privilege, dormant_identities: 120 },
+        }),
+      ],
+      summary: {
+        ...map.summary,
+        privilege: {
+          ...privilege,
+          evidence: {
+            status: "attested",
+            window_start: "2026-07-01T00:00:00+00:00",
+            window_end: "2026-10-01T00:00:00+00:00",
+            sufficient_services: ["s3", "sts"],
+            sources: ["cloudtrail-export"],
+          },
+        },
+      },
+    };
+    const role = memberOf("role:etl", "role", {
+      reach_resources: 40,
+      reach_weight: 200,
+      reach_weight_excl_hubs: 200,
+      basis: "used",
+      needed_weight: 50,
+      needed_weight_excl_hubs: 50,
+      epi: 0.75,
+      epi_excl_hubs: 0.75,
+      used_resources: 9,
+      unused_grants: 31,
+      unused_restricted: 4,
+      flags: ["dormant"],
+    });
+    handler = (p) => {
+      if (p.startsWith("graph/clusters?")) return clusters;
+      if (p.startsWith("graph/topics?")) return measured;
+      return { ...detail("role", 0, [role], 1), topic: measured.topics[0] };
+    };
+    renderMap();
+    await screen.findByText(/top-level clusters/);
+    fireEvent.click(screen.getByRole("button", { name: "Topics" }));
+    await screen.findByText(/1 \/ 2 topics|2 \/ 2 topics/);
+    expect(
+      screen.getByText("Granted vs needed · attested usage evidence"),
+    ).toBeInTheDocument();
+    const panel = screen.getByRole("complementary", { name: "Topic details" });
+    expect(
+      within(panel).getByText("Identities (without hubs)").nextSibling,
+    ).toHaveTextContent("98% (63%)");
+    expect(
+      within(panel).getByText("Dormant identities").nextSibling,
+    ).toHaveTextContent("6,097");
+    expect(panel).toHaveTextContent(
+      "RoleLastUsed and Access Advisor are hints only",
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "data-lake · 4,500" }),
+    );
+    expect(within(panel).getByText("Roles EPI").nextSibling).toHaveTextContent(
+      "48%",
+    );
+    expect(
+      within(panel).getByText("Identities EPI").nextSibling,
+    ).toHaveTextContent("98%");
+    expect(panel).toHaveTextContent("30 used · 10 inferred");
+    fireEvent.click(within(panel).getByRole("button", { name: "Roles" }));
+    const button = await within(panel).findByRole("button", {
+      name: /role:etl/,
+    });
+    expect(button).toHaveTextContent(
+      "Dormant (no observed use) · EPI 75% used",
+    );
+    fireEvent.click(button);
+    expect(within(panel).getByText("EPI").nextSibling).toHaveTextContent(
+      "75% (75% without hubs)",
+    );
+    expect(
+      within(panel).getByText("Needed from").nextSibling,
+    ).toHaveTextContent("Used (attested evidence)");
+    expect(
+      within(panel).getByText("Unused own grants").nextSibling,
+    ).toHaveTextContent("31 (4 restricted)");
+  });
 });

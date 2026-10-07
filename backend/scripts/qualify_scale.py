@@ -197,9 +197,7 @@ def generate_topics(n: int = 100_000, seed: int = 11) -> tuple[GraphSnapshot, di
             node_id = f"{kind.value.lower()}:{i:07d}"
             topic = rng.choices(names, weights)[0]
             topic_of[node_id], kind_of[node_id] = topic, kind
-            account = (
-                f"{100000000000 + names.index(topic):012d}" if rng.random() < 0.7 else shared_account
-            )
+            account = f"{100000000000 + names.index(topic):012d}" if rng.random() < 0.7 else shared_account
             tags: list[str] = []
             sensitivity = Sensitivity.INTERNAL
             if kind in data_kinds:
@@ -344,7 +342,9 @@ def generate_topics(n: int = 100_000, seed: int = 11) -> tuple[GraphSnapshot, di
                 add(role, item, EdgeType.READ, list(_READ[kind]))
             else:
                 add(role, item, EdgeType.WRITE, list(_WRITE[kind]))
-    snapshot = GraphSnapshot.model_construct(nodes=nodes, edges=list(edges.values()), warnings=[], source="snapshot")
+    snapshot = GraphSnapshot.model_construct(
+        nodes=nodes, edges=list(edges.values()), warnings=[], source="snapshot"
+    )
     truth = {
         "seed": seed,
         "topics": names,
@@ -365,6 +365,147 @@ def generate_topics(n: int = 100_000, seed: int = 11) -> tuple[GraphSnapshot, di
         "identity_role_used": {i: sorted(assume_used[i]) for i in identities if assume_used[i]},
     }
     return snapshot, truth, usage
+
+
+# CloudTrail-shaped export of the planted usage (optimizer Phase 2).
+CLOUDTRAIL_ACCOUNT = "123456789012"
+CLOUDTRAIL_SERVICES = ("aoss", "rds-data", "s3", "sts")
+_EVENT = {
+    (NodeType.BUCKET, EdgeType.READ): ("s3.amazonaws.com", "GetObject", "AWS::S3::Bucket"),
+    (NodeType.BUCKET, EdgeType.WRITE): ("s3.amazonaws.com", "PutObject", "AWS::S3::Bucket"),
+    (NodeType.DATABASE, EdgeType.READ): ("rds-data.amazonaws.com", "ExecuteStatement", ""),
+    (NodeType.DATABASE, EdgeType.WRITE): ("rds-data.amazonaws.com", "BatchExecuteStatement", ""),
+    (NodeType.VECTOR, EdgeType.READ): ("aoss.amazonaws.com", "ReadDocument", "AWS::AOSS::Collection"),
+    (NodeType.VECTOR, EdgeType.WRITE): ("aoss.amazonaws.com", "WriteDocument", "AWS::AOSS::Collection"),
+}
+
+
+def cloudtrail_records(snapshot: GraphSnapshot, usage: dict, start: datetime, end: datetime, seed: int = 13):
+    """CloudTrail records (data events and STS AssumeRole) for the planted usage sidecar.
+
+    Every used (role, data) pair gets 1-3 events from an assumed-role session of the role
+    (S3 GetObject/PutObject, RDS Data API or OpenSearch Serverless by the asset's type and
+    the grant's kind; hub "admin" grants read), and every used (identity, role) pair 1-3
+    ``AssumeRole`` calls by the identity as an IAM user, spread over ``[start, end]``.
+    The synthetic graph's node IDs stand in for ARNs. A little realistic noise is added:
+    EC2 management events (an unattested service) and AccessDenied attempts on unused
+    grants, neither of which is use. Deterministic for the same inputs.
+    """
+    rng = random.Random(seed)
+    kinds = {node.id: node.type for node in snapshot.nodes}
+    grant_kind: dict[tuple[str, str], EdgeType] = {}
+    for edge in snapshot.edges:
+        if edge.type in (EdgeType.READ, EdgeType.WRITE):
+            grant_kind.setdefault((edge.source, edge.target), edge.type)
+    span = (end - start).total_seconds()
+
+    def when() -> str:
+        moment = start.timestamp() + rng.random() * span
+        return datetime.fromtimestamp(moment, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def session(role: str) -> dict:
+        name = role.rsplit(":", 1)[-1]
+        return {
+            "type": "AssumedRole",
+            "principalId": f"AROA{name.upper()}:session",
+            "arn": f"arn:aws:sts::{CLOUDTRAIL_ACCOUNT}:assumed-role/{name}/session",
+            "accountId": CLOUDTRAIL_ACCOUNT,
+            "sessionContext": {
+                "sessionIssuer": {
+                    "type": "Role",
+                    "principalId": f"AROA{name.upper()}",
+                    "arn": role,
+                    "accountId": CLOUDTRAIL_ACCOUNT,
+                    "userName": name,
+                },
+                "attributes": {"creationDate": when(), "mfaAuthenticated": "false"},
+            },
+        }
+
+    def record(identity: dict, source: str, name: str, request: dict, resources: list, data: bool) -> dict:
+        return {
+            "eventVersion": "1.09",
+            "userIdentity": identity,
+            "eventTime": when(),
+            "eventSource": source,
+            "eventName": name,
+            "awsRegion": "us-east-1",
+            "sourceIPAddress": "10.0.0.1",
+            "userAgent": "aws-sdk-python",
+            "requestParameters": request,
+            "responseElements": None,
+            "requestID": f"{rng.getrandbits(64):016x}",
+            "eventID": f"{rng.getrandbits(128):032x}",
+            "readOnly": name.startswith(("Get", "Read", "Execute", "List")),
+            "resources": resources,
+            "eventType": "AwsApiCall",
+            "managementEvent": not data,
+            "recipientAccountId": CLOUDTRAIL_ACCOUNT,
+            "eventCategory": "Data" if data else "Management",
+        }
+
+    def data_event(role: str, item: str, kind: EdgeType) -> dict:
+        source, name, resource_type = _EVENT[(kinds[item], kind)]
+        if source.startswith("s3"):
+            request = {"bucketName": item, "key": f"part-{rng.getrandbits(16):04x}"}
+            resources = [
+                {"type": "AWS::S3::Object", "ARN": f"{item}/{request['key']}"},
+                {"accountId": CLOUDTRAIL_ACCOUNT, "type": resource_type, "ARN": item},
+            ]
+        elif source.startswith("rds-data"):
+            request = {"resourceArn": item, "database": "app", "sql": "SELECT 1"}
+            resources = []
+        else:
+            request = {"collection": item}
+            resources = [{"accountId": CLOUDTRAIL_ACCOUNT, "type": resource_type, "ARN": item}]
+        return record(session(role), source, name, request, resources, True)
+
+    for role, items in usage["role_data_used"].items():
+        for item in items:
+            kind = grant_kind.get((role, item), EdgeType.READ)
+            for _ in range(1 + (rng.random() < 0.5) + (rng.random() < 0.2)):
+                yield data_event(role, item, kind)
+    for identity, roles in usage["identity_role_used"].items():
+        user = {
+            "type": "IAMUser",
+            "principalId": f"AIDA{identity.rsplit(':', 1)[-1]}",
+            "arn": identity,
+            "accountId": CLOUDTRAIL_ACCOUNT,
+            "userName": identity,
+        }
+        for role in roles:
+            for _ in range(1 + (rng.random() < 0.5) + (rng.random() < 0.2)):
+                yield record(
+                    user,
+                    "sts.amazonaws.com",
+                    "AssumeRole",
+                    {"roleArn": role, "roleSessionName": "session"},
+                    [{"accountId": CLOUDTRAIL_ACCOUNT, "type": "AWS::IAM::Role", "ARN": role}],
+                    False,
+                )
+    roles = sorted(usage["role_data_used"])
+    for _ in range(max(10, len(roles) // 50)):
+        role = rng.choice(roles)
+        yield record(session(role), "ec2.amazonaws.com", "DescribeInstances", {}, [], False)
+        denied = [item for (source, item) in grant_kind if source == role][:1]
+        if denied:
+            event = data_event(role, denied[0], grant_kind[(role, denied[0])])
+            event["errorCode"], event["errorMessage"] = "AccessDenied", "Access Denied"
+            yield event
+
+
+def cloudtrail_files(records, per_file: int = 25_000):
+    """Gzip-compressed ``{"Records": [...]}`` files of at most ``per_file`` records each."""
+    import gzip
+
+    batch = []
+    for item in records:
+        batch.append(item)
+        if len(batch) >= per_file:
+            yield gzip.compress(json.dumps({"Records": batch}).encode(), compresslevel=6)
+            batch = []
+    if batch:
+        yield gzip.compress(json.dumps({"Records": batch}).encode(), compresslevel=6)
 
 
 @contextmanager
@@ -546,6 +687,8 @@ def qualify(
             legacy_overview = legacy.json()
         # Stored and computed-on-read analysis must agree (revision aside).
         stored_overview.pop("revision"), legacy_overview.pop("revision")
+        # The excess-privilege tile comes from stored topic rows; legacy reads have none.
+        stored_overview.pop("excess_privilege", None)
         result["stored_matches_compute_on_read"] = stored_overview == legacy_overview
         result["overview_counts"] = {
             key: stored_overview[key]

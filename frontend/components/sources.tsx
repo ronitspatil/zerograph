@@ -6,6 +6,7 @@ import { api } from "@/lib/api";
 import { formatCount } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { byteLength, INLINE_LIMIT_BYTES, uploadSnapshot } from "@/lib/upload";
+import { UsageUpload } from "@/components/usage-upload";
 function readText(file: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -71,8 +72,8 @@ export function Sources({
         <div className="panel">
           <h3>AWS account</h3>
           <p>
-            Read-only IAM role and S3 metadata collection through an
-            administrator-configured role.
+            Read-only IAM role, user, group and S3 metadata collection through
+            an administrator-configured role.
           </p>
         </div>
         <div className="panel">
@@ -152,6 +153,7 @@ export function Sources({
           {busy ? "Queuing…" : "Queue ingestion"}
         </Button>
       </div>
+      <UsageUpload canAdmin={canAdmin} />
       <div className="panel history-panel">
         <div className="panel-heading">
           <h3>Collection history</h3>

@@ -932,3 +932,73 @@ def test_worker_sample_refresh_skips_a_publishing_tenant_then_refreshes_it(postg
         assert (row.sample_ids, row.sample_version) == (expected.sample_ids, SAMPLE_VERSION)
         assert analysis.stale_samples(db, 10) == []
     assert analysis.backfill_stale_samples() == []
+
+
+def test_usage_commit_aggregates_and_policies_copy_on_postgres(postgres_environment):
+    """INSERT ... SELECT of observed access and COPY of policy rows on real PostgreSQL."""
+    import json as json_
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import func
+
+    from app.collectors.cloudtrail import normalize_export
+    from app.db.models import (
+        ObservedAccess,
+        RevisionPolicy,
+        RevisionPolicyDocument,
+        UsageCoverage,
+        UsageUpload,
+    )
+    from app.graph import usage
+    from app.graph.policies import principal_policies, store_policies
+    from app.graph.schema import PolicyAttachment
+
+    factory, _ = postgres_environment
+    end = datetime.now(UTC)
+    record = {
+        "eventTime": (end - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "eventSource": "s3.amazonaws.com",
+        "eventName": "GetObject",
+        "userIdentity": {"type": "AssumedRole", "sessionContext": {"sessionIssuer": {"arn": "role:a"}}},
+        "requestParameters": {"bucketName": "b"},
+    }
+    with factory() as db:
+        upload = UsageUpload(
+            id="u1",
+            tenant_id="tenant",
+            actor="alice",
+            source=usage.SOURCE,
+            status="open",
+            revision="initial",
+            window_start=end - timedelta(days=95),
+            window_end=end,
+            attested_services=["s3"],
+            stats={},
+            expires_at=end + timedelta(days=1),
+        )
+        db.add(upload)
+        db.flush()
+        for chunk in (0, 1):
+            usage.stage_chunk(
+                db, upload, chunk, 10, normalize_export([record, record], end - timedelta(days=95), end)
+            )
+        stats = usage.commit(db, upload, end)
+        db.commit()
+        assert stats["pairs"] == 1
+        row = db.scalar(select(ObservedAccess))
+        assert (row.principal_id, row.resource_id, row.count, row.source) == (
+            "role:a",
+            "arn:aws:s3:::b",
+            4,
+            usage.SOURCE,
+        )
+        assert db.scalar(select(UsageCoverage)).complete
+        evidence = usage.evidence(db, "tenant", end)
+        assert evidence.status == "attested" and evidence.observed_pairs == 1
+        assert list(usage.observed(db, "tenant"))[0][-1] == 4
+        policy = PolicyAttachment(principal="role:a", kind="inline", name="p", document={"Statement": []})
+        store_policies(db, "tenant", "initial", [(policy.id, json_.dumps(policy.model_dump(mode="json")))])
+        db.commit()
+        assert db.scalar(select(func.count()).select_from(RevisionPolicy)) == 1
+        assert db.scalar(select(RevisionPolicyDocument.size_bytes)) > 0
+        assert principal_policies(db, "tenant", "initial", "role:a").policies[0].document == {"Statement": []}
