@@ -130,9 +130,11 @@ const detail: ProposalDetail = {
 
 let calls: { path: string; init?: RequestInit }[] = [];
 let decided: Proposal["decision"] = null;
+let changeId: string | null = null;
 beforeEach(() => {
   calls = [];
   decided = null;
+  changeId = null;
   vi.mocked(api).mockImplementation(async (path, init) => {
     calls.push({ path, init });
     if (path === "proposals/summary") return summary as never;
@@ -187,6 +189,22 @@ beforeEach(() => {
       };
       return {} as never;
     }
+    if (path.endsWith("/draft"))
+      return {
+        revision: "rev-1",
+        proposal_id: proposal.id,
+        pr_eligible: true,
+        reason: null,
+        text: "Remove the grant of lake-reader on payments-ledger.",
+        change_id: changeId,
+        notice: "",
+      } as never;
+    if (path === "rollout/changes") {
+      changeId = "c1";
+      return { id: "c1", subject_name: "lake-reader" } as never;
+    }
+    if (path === "rollout/changes/c1/pr")
+      return { url: "https://github.com/acme/policies/pull/7" } as never;
     if (path.startsWith("proposals/p"))
       return {
         ...detail,
@@ -202,7 +220,7 @@ describe("Proposals view", () => {
     await act(async () => {});
     expect(screen.getByText(/Proposed, not applied\./)).toBeInTheDocument();
     expect(
-      screen.getByText(/pull requests come in Phase 4/),
+      screen.getByText(/nothing is applied\s+by ZeroGraph/),
     ).toBeInTheDocument();
     expect(screen.getByText("98.3% → 97.9%")).toBeInTheDocument();
     expect(
@@ -254,6 +272,49 @@ describe("Proposals view", () => {
       revision: "rev-1",
     });
     expect(within(panel).getByText(/Accepted by alice/)).toBeInTheDocument();
+    // Accepted and eligible: Create PR stores the change and opens its draft pull request.
+    fireEvent.click(within(panel).getByRole("button", { name: "Create PR" }));
+    await act(async () => {});
+    const created = calls.find((c) => c.path === "rollout/changes");
+    expect(JSON.parse(String(created?.init?.body))).toEqual({
+      subject_id: "role:a",
+      revision: "rev-1",
+    });
+    expect(
+      within(panel).getByText(
+        /Draft pull request opened: https:\/\/github.com/,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(panel).getByRole("button", { name: "Create PR" }),
+    ).toBeDisabled();
+  });
+
+  it("shows a draft-only proposal without a pull request button", async () => {
+    const base = vi.mocked(api).getMockImplementation()!;
+    vi.mocked(api).mockImplementation(async (path, init) => {
+      if (path.endsWith("/draft"))
+        return {
+          revision: "rev-1",
+          proposal_id: proposal.id,
+          pr_eligible: false,
+          reason: "Rewriting a wildcard grant is always manual",
+          text: "Replace the wildcard grants of lake-reader.",
+          change_id: null,
+          notice: "",
+        } as never;
+      return base(path, init);
+    });
+    render(<Proposals canAdmin />);
+    await act(async () => {});
+    fireEvent.click(
+      screen.getByRole("button", { name: /Remove unused grant/ }),
+    );
+    await act(async () => {});
+    expect(
+      screen.getByText(/Draft only, no pull request: Rewriting a wildcard/),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Create PR" })).toBeNull();
   });
 
   it("keeps decisions read-only for non-administrators", async () => {
