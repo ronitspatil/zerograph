@@ -367,6 +367,117 @@ def generate_topics(n: int = 100_000, seed: int = 11) -> tuple[GraphSnapshot, di
     return snapshot, truth, usage
 
 
+SAFETY_CASES = (
+    "Optimizer never-auto cases planted on roles with cross-topic over-grants (or dormant identities): "
+    "break-glass, service-linked and seasonal roles, dormant break-glass humans, grants under a policy "
+    "Condition or a Deny statement, KMS keys, and exposed unauthenticated agents creating toxic paths."
+)
+
+
+def plant_safety_cases(snapshot: GraphSnapshot, truth: dict, usage: dict, per_case: int = 20, seed: int = 17):
+    """Mark planted never-auto cases on a ``generate_topics`` fixture, in place (optimizer Phase 3).
+
+    Returns ``{"subjects": {case: [node IDs]}, "pairs": {case: [[holder, data]]}}``: every
+    proposal whose subject is a listed subject, or that removes a listed pair, must be
+    ``manual``. Deterministic for the same fixture and seed.
+    """
+    from app.graph.schema import PolicyAttachment
+
+    rng = random.Random(seed)
+    nodes = {node.id: node for node in snapshot.nodes}
+    hubs = set(truth["hub_roles"])
+    used_items = {item for items in usage["role_data_used"].values() for item in items}
+    over: dict[str, list[str]] = {}
+    for role, item in truth["over_grants"]:
+        if role not in hubs:
+            over.setdefault(role, []).append(item)
+    pool = sorted(role for role in over if role not in truth.get("duplicate_of", {}))
+    rng.shuffle(pool)
+    count = max(1, min(per_case, len(pool) // 8))
+    picks = {
+        case: pool[i * count : (i + 1) * count]
+        for i, case in enumerate(("break_glass", "service_linked", "seasonal", "condition", "deny"))
+    }
+    subjects: dict[str, list[str]] = {}
+    pairs: dict[str, list[list[str]]] = {}
+    for role in picks["break_glass"]:
+        nodes[role].tags.append("purpose=break-glass")
+    for role in picks["service_linked"]:
+        nodes[role].metadata["scp_exempt_service_linked_role"] = True
+        nodes[role].name = "AWSServiceRoleFor" + nodes[role].name.replace("-", "")[:200]
+    for role in picks["seasonal"]:
+        nodes[role].tags.append("schedule=seasonal")
+    for case in ("break_glass", "service_linked", "seasonal"):
+        subjects[case] = sorted(picks[case])
+    grants: dict[str, list[tuple[str, list[str]]]] = {}
+    for edge in snapshot.edges:
+        if edge.type in (EdgeType.READ, EdgeType.WRITE):
+            grants.setdefault(edge.source, []).append((edge.target, edge.actions))
+    for case in ("condition", "deny"):
+        pairs[case] = []
+        for role in picks[case]:
+            flagged = sorted(over[role])[:2]
+            plain = [(item, actions) for item, actions in grants[role] if item not in flagged]
+            statements = []
+            if plain:
+                statements.append(
+                    {
+                        "Effect": "Allow",
+                        "Action": sorted({a for _, actions in plain for a in actions}),
+                        "Resource": sorted(item for item, _ in plain),
+                    }
+                )
+            special = [(item, actions) for item, actions in grants[role] if item in flagged]
+            allow = {
+                "Effect": "Allow",
+                "Action": sorted({a for _, actions in special for a in actions}),
+                "Resource": [item for item, _ in special],
+            }
+            if case == "condition":
+                allow["Condition"] = {"Bool": {"aws:SecureTransport": "true"}}
+                statements.append(allow)
+            else:
+                statements.append(allow)
+                statements.append(
+                    {
+                        "Effect": "Deny",
+                        "Action": allow["Action"],
+                        "Resource": allow["Resource"],
+                        "Condition": {"StringNotEquals": {"aws:RequestedRegion": "us-east-1"}},
+                    }
+                )
+            snapshot.policies.append(
+                PolicyAttachment(
+                    principal=role,
+                    kind="inline",
+                    name=f"{case}-policy",
+                    document={"Version": "2012-10-17", "Statement": statements},
+                )
+            )
+            pairs[case] += [[role, item] for item in flagged]
+    # KMS keys: unused over-granted assets of other roles become KMS keys (service "kms").
+    taken = {role for roles in picks.values() for role in roles}
+    keys = sorted(
+        {item for role in pool if role not in taken for item in over[role] if item not in used_items}
+    )
+    rng.shuffle(keys)
+    keys = sorted(keys[:count])
+    for item in keys:
+        nodes[item].metadata["service"] = "kms"
+    pairs["kms"] = sorted([role, item] for role, items in over.items() for item in items if item in set(keys))
+    # Dormant humans marked break-glass (disable proposals must be manual).
+    humans = sorted(i for i in truth["dormant_identities"] if nodes[i].type == NodeType.HUMAN)
+    subjects["break_glass_identities"] = humans[:count]
+    for identity in subjects["break_glass_identities"]:
+        nodes[identity].tags.append("role=emergency-access")
+    # Exposed, unauthenticated agents: toxic paths to break.
+    agents = sorted(i for i in nodes if nodes[i].type == NodeType.AGENT)[:3]
+    for agent in agents:
+        nodes[agent].internet_exposed, nodes[agent].authenticated = True, False
+    truth["safety_cases"] = {"subjects": subjects, "pairs": pairs, "exposed_agents": agents}
+    return truth["safety_cases"]
+
+
 # CloudTrail-shaped export of the planted usage (optimizer Phase 2).
 CLOUDTRAIL_ACCOUNT = "123456789012"
 CLOUDTRAIL_SERVICES = ("aoss", "rds-data", "s3", "sts")
@@ -624,6 +735,11 @@ def qualify(
                 patch.object(tasks, "load_previous", measured(spent, "load", tasks.load_previous)),
                 patch.object(tasks, "compute_topics", measured(topics, "compute", tasks.compute_topics)),
                 patch.object(tasks, "store_topics", measured(topics, "store", tasks.store_topics)),
+                patch.object(
+                    tasks,
+                    "compute_proposals_and_store",
+                    measured(topics, "proposals", tasks.compute_proposals_and_store),
+                ),
             ):
                 elapsed = publish(tenant)
             runs["clustering"].append(sum(spent.values()))

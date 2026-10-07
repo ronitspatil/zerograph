@@ -24,6 +24,7 @@ from app.db.session import audit, session_factory
 from app.graph.analysis import delete_analysis
 from app.graph.clusters import delete_clusters
 from app.graph.policies import delete_policies
+from app.graph.proposals import delete_proposals
 from app.graph.repository import RevisionMetadata, _validate_retention_bounds, get_graph_store
 from app.graph.topics import delete_topics
 
@@ -137,6 +138,7 @@ def prune_revisions(
                 delete_analysis(db, tenant, revision.revision)
                 delete_clusters(db, tenant, revision.revision)
                 delete_topics(db, tenant, revision.revision)
+                delete_proposals(db, tenant, revision.revision)
                 delete_policies(db, tenant, revision.revision)
                 audit(db, Actor(actor, tenant, frozenset()), "graph.revision_deleted", detail)
             else:

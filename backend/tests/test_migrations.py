@@ -41,6 +41,10 @@ def test_initial_migration_is_repeatable_and_versioned(tmp_path, monkeypatch):
         "usage_staged",
         "observed_access",
         "usage_coverage",
+        "revision_proposal_summary",
+        "revision_proposal_models",
+        "revision_proposals",
+        "proposal_decisions",
         "alembic_version",
     }
     engine.dispose()

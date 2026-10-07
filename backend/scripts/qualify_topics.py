@@ -71,6 +71,7 @@ timed(tasks, "store_clusters", "clusters_store")
 if sys.argv[2] == "without":
     tasks.compute_topics = lambda *args, **kwargs: None
     tasks.store_topics = lambda *args: None
+    tasks.compute_proposals_and_store = lambda *args, **kwargs: None  # Proposals need topics.
 else:
     timed(tasks, "compute_topics", "topics_compute")
     timed(tasks, "store_topics", "topics_store")

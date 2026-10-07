@@ -14,6 +14,7 @@ import { formatCount } from "@/lib/format";
 import type {
   ClusterLink,
   ClusterSummary,
+  ProposalSummary,
   TopicDetail,
   TopicMap,
   TopicMember,
@@ -131,6 +132,7 @@ export function TopicLens({
   statusSizer?: ReactNode;
 }) {
   const [map, setMap] = useState<TopicMap | null>(null);
+  const [proposals, setProposals] = useState<ProposalSummary | null>(null);
   const [unavailable, setUnavailable] = useState("");
   const [hovered, setHovered] = useState<TopicSummary | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -153,6 +155,16 @@ export function TopicLens({
       });
       if (controller.signal.aborted) return;
       setMap(result);
+      setProposals(null);
+      // Proposal counts and EPI after the high tier; absent until the worker builds them.
+      api<ProposalSummary>(
+        `proposals/summary?revision=${encodeURIComponent(result.revision)}`,
+        { signal: controller.signal },
+      )
+        .then((found) => {
+          if (!controller.signal.aborted && found?.topics) setProposals(found);
+        })
+        .catch(() => {});
       setUnavailable("");
       setSelected(null);
       setDetail(null);
@@ -384,7 +396,12 @@ export function TopicLens({
             <TopicFacts topic={hovered} measured={measured} hint />
           ) : focus ? (
             <>
-              <TopicFacts topic={focus} measured={measured} />
+              <TopicFacts
+                topic={focus}
+                measured={measured}
+                proposals={proposals?.topics[focus.id] ?? null}
+                proposalsReady={proposals !== null}
+              />
               <span className="section-label">Most over-privileged roles</span>
               {detail && detail.topic.id === focus.id ? (
                 detail.top_roles.length ? (
@@ -547,10 +564,14 @@ function TopicFacts({
   topic,
   hint,
   measured,
+  proposals,
+  proposalsReady,
 }: {
   topic: TopicSummary;
   hint?: boolean;
   measured?: boolean;
+  proposals?: ProposalSummary["topics"][string] | null;
+  proposalsReady?: boolean;
 }) {
   const privilege = topic.privilege;
   return (
@@ -600,6 +621,30 @@ function TopicFacts({
             </dd>
             <dt>Dormant identities</dt>
             <dd>{count(privilege.dormant_identities)}</dd>
+          </dl>
+        </>
+      )}
+      {proposalsReady && !hint && (
+        <>
+          <span className="section-label">
+            Proposals (proposed, not applied)
+          </span>
+          <dl className="topic-proposals">
+            <dt>Proposals</dt>
+            <dd>{count(proposals?.total ?? 0)}</dd>
+            <dt>High / manual tier</dt>
+            <dd>
+              {count(proposals?.by_tier.high ?? 0)} /{" "}
+              {count(proposals?.by_tier.manual ?? 0)}
+            </dd>
+            <dt>Identity EPI after high tier</dt>
+            <dd>
+              {epiText(proposals?.high_after.identities?.epi)} (
+              {epiText(proposals?.high_after.identities?.epi_excl_hubs)} without
+              hubs)
+            </dd>
+            <dt>Role EPI after high tier</dt>
+            <dd>{epiText(proposals?.high_after.roles?.epi)}</dd>
           </dl>
         </>
       )}

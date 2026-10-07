@@ -34,9 +34,10 @@ from app.db.models import (
 )
 from app.db.session import audit, get_db
 from app.engine.analysis_index import WEIGHTS
-from app.engine.blast_radius import BlastRadius
+from app.engine.blast_radius import BlastRadius, apply_overlay
 from app.engine.blast_radius import simulate as simulate_reach
 from app.engine.toxic_combos import Finding
+from app.graph import proposals as optimizer
 from app.graph import usage
 from app.graph.analysis import (
     UnknownCursor,
@@ -548,6 +549,29 @@ def findings(
     return JSONResponse(page, headers=headers)
 
 
+PROPOSAL_ID = r"^p[0-9a-f]{19}$"
+ProposalId = Annotated[str, Field(pattern=PROPOSAL_ID)]
+EntityId = Annotated[str, Field(min_length=1, max_length=512)]
+
+
+class OverlayEdge(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source: EntityId
+    target: EntityId
+
+
+class SimulationOverlay(BaseModel):
+    """What-if changes: proposals of the pinned revision and/or explicit edges and nodes."""
+
+    model_config = ConfigDict(extra="forbid")
+    proposal_ids: list[ProposalId] = Field(default_factory=list, max_length=200)
+    edges: list[OverlayEdge] = Field(default_factory=list, max_length=2000)
+    edge_ids: list[Annotated[str, Field(min_length=1, max_length=64)]] = Field(
+        default_factory=list, max_length=2000
+    )
+    disabled_nodes: list[EntityId] = Field(default_factory=list, max_length=500)
+
+
 class SimulationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     node_id: str = Field(min_length=1, max_length=512)
@@ -555,6 +579,27 @@ class SimulationRequest(BaseModel):
     include_uncertain: bool = False
     # Optional revision the caller is viewing: a different current revision is 409.
     revision: str | None = Field(default=None, max_length=128)
+    # Optional what-if overlay: the response adds the blast radius with it applied.
+    overlay: SimulationOverlay | None = None
+
+
+class WhatIf(BaseModel):
+    after: BlastRadius
+    risk_delta: int
+    exposure_delta: float
+    assets_removed: list[str]
+    assets_removed_count: int
+    nodes_removed_count: int
+    # Applied proposals by type, skipped ones (merge/split restructure roles; not simulated),
+    # removed edge pairs and disabled nodes.
+    overlay: dict
+    notice: str = optimizer.NOTICE
+
+
+class SimulationResult(BlastRadius):
+    """The current blast radius; with an overlay, ``whatif`` holds the result with it applied."""
+
+    whatif: WhatIf | None = None
 
 
 def revision_scale(db: Session, graph: GraphStore, tenant: str, revision: str) -> tuple[int, int]:
@@ -571,34 +616,315 @@ def revision_scale(db: Session, graph: GraphStore, tenant: str, revision: str) -
     return len(snapshot.nodes), weight
 
 
-@router.post("/simulate", response_model=BlastRadius)
-def simulate(request: SimulationRequest, response: Response, db: DB, graph: Graph, actor: Analyst):
-    """Blast radius from the source's bounded neighborhood; never loads the whole revision."""
-    revision = expected_revision(db, actor.tenant_id, request.revision)
+def _overlay(db: Session, tenant: str, revision: str, request: SimulationOverlay) -> optimizer.Overlay:
+    """Resolve proposals (in the pinned revision) and explicit changes into one overlay."""
+    overlay = optimizer.Overlay()
+    if request.proposal_ids:
+        model = optimizer.load_model(db, tenant, revision)
+        if model is None:
+            raise _proposals_missing()
+        try:
+            ordinals = optimizer.selected_ordinals(
+                db, tenant, revision, request.proposal_ids, None, None, model
+            )
+        except optimizer.ProposalNotFound as exc:
+            raise HTTPException(404, f"Proposal not found in this revision: {exc}") from None
+        overlay = optimizer.overlay_from(model, ordinals)
+    overlay.removed.update((edge.source, edge.target) for edge in request.edges)
+    overlay.edge_ids.update(request.edge_ids)
+    overlay.disabled.update(request.disabled_nodes)
+    return overlay
+
+
+def _whatif(reach, overlay: optimizer.Overlay, before: BlastRadius, total_nodes: int, weight: int) -> WhatIf:
+    after = simulate_reach(
+        apply_overlay(reach, overlay.removed, overlay.edge_ids, overlay.disabled), total_nodes, weight
+    )
+    removed_assets = sorted(set(before.affected_assets) - set(after.affected_assets))
+    return WhatIf(
+        after=after,
+        risk_delta=after.risk_score - before.risk_score,
+        exposure_delta=round(after.sensitivity_exposure - before.sensitivity_exposure, 4),
+        assets_removed=removed_assets[:500],
+        assets_removed_count=len(removed_assets),
+        nodes_removed_count=len(set(before.affected_nodes) - set(after.affected_nodes)),
+        overlay={
+            "applied": dict(sorted(overlay.applied.items())),
+            "skipped": dict(sorted(overlay.skipped.items())),
+            "removed_edges": len(overlay.removed) + len(overlay.edge_ids),
+            "disabled_nodes": len(overlay.disabled),
+        },
+    )
+
+
+def run_simulation(
+    db: Session,
+    graph: GraphStore,
+    actor: Actor,
+    revision: str,
+    node_id: str,
+    max_hops: int,
+    include_uncertain: bool,
+    overlay: SimulationOverlay | None,
+) -> SimulationResult:
+    resolved = _overlay(db, actor.tenant_id, revision, overlay) if overlay is not None else None
     try:
-        reach = graph.reach(
-            actor.tenant_id, revision, request.node_id, request.max_hops, request.include_uncertain
-        )
+        reach = graph.reach(actor.tenant_id, revision, node_id, max_hops, include_uncertain)
     except RevisionUnavailable:
         raise _unavailable() from None
     if reach is None:
         raise HTTPException(404, "Identity not found")
     total_nodes, total_asset_weight = revision_scale(db, graph, actor.tenant_id, revision)
-    result = simulate_reach(reach, total_nodes, total_asset_weight)
+    result = SimulationResult(**simulate_reach(reach, total_nodes, total_asset_weight).model_dump())
+    detail = {
+        "node_id": node_id,
+        "max_hops": max_hops,
+        "include_uncertain": include_uncertain,
+        "risk_score": result.risk_score,
+    }
+    if resolved is not None:
+        result.whatif = _whatif(reach, resolved, result, total_nodes, total_asset_weight)
+        detail["whatif"] = {
+            "proposals": len(overlay.proposal_ids),
+            "risk_after": result.whatif.after.risk_score,
+            **result.whatif.overlay,
+        }
+    audit(db, actor, "simulation.run", detail)
+    db.commit()
+    return result
+
+
+@router.post("/simulate", response_model=SimulationResult, response_model_exclude_none=True)
+def simulate(request: SimulationRequest, response: Response, db: DB, graph: Graph, actor: Analyst):
+    """Blast radius from the source's bounded neighborhood; never loads the whole revision.
+
+    With ``overlay`` (proposal IDs of the pinned revision and/or explicit edges and disabled
+    nodes), ``whatif`` holds the blast radius with those changes applied and the risk delta.
+    """
+    revision = expected_revision(db, actor.tenant_id, request.revision)
+    result = run_simulation(
+        db,
+        graph,
+        actor,
+        revision,
+        request.node_id,
+        request.max_hops,
+        request.include_uncertain,
+        request.overlay,
+    )
+    response.headers["X-Graph-Revision"] = revision
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Optimizer proposals (proposed, never applied)
+
+PROPOSALS_UNAVAILABLE = (
+    "Proposals are not computed for this revision yet; the worker builds them within a few minutes"
+)
+
+
+def _proposals_missing() -> HTTPException:
+    return HTTPException(404, PROPOSALS_UNAVAILABLE, headers={"Retry-After": CLUSTERS_RETRY_AFTER})
+
+
+def _proposal_summary(db: Session, tenant: str, revision: str):
+    summary = optimizer.stored_proposal_summary(db, tenant, revision)
+    if summary is None:
+        raise _proposals_missing()
+    return summary
+
+
+@router.get("/proposals", response_model=optimizer.ProposalListResponse)
+def list_proposals(
+    db: DB,
+    actor: Viewer,
+    response: Response,
+    tier: Literal[optimizer.TIERS] | None = None,
+    type: Literal[optimizer.TYPES] | None = None,
+    topic: Annotated[str | None, Query(pattern=TOPIC_ID)] = None,
+    subject: Annotated[str | None, Query(min_length=1, max_length=512)] = None,
+    state: Literal["pending", "accepted", "rejected"] | None = None,
+    cursor: Annotated[int | None, Query(ge=-1, le=10_000_000)] = None,
+    limit: Annotated[int, Query(ge=1, le=optimizer.MAX_PAGE)] = 50,
+    revision: str | None = None,
+):
+    """Least-privilege proposals of the pinned revision in their deterministic order (tier, type,
+    weight, ID), filtered by tier, type, topic, role (subject or target) or decision state.
+    Proposed, not applied."""
+    current = expected_revision(db, actor.tenant_id, revision)
+    summary = _proposal_summary(db, actor.tenant_id, current)
+    response.headers["X-Graph-Revision"] = current
+    return optimizer.proposal_page(
+        db,
+        summary,
+        tier=tier,
+        kind=type,
+        topic=topic,
+        subject=subject,
+        state=state,
+        cursor=cursor,
+        limit=limit,
+    )
+
+
+@router.get("/proposals/summary")
+def proposals_summary(db: DB, actor: Viewer, revision: str | None = None):
+    """Counts by tier, type and topic, high-tier excess privilege after, and decision counts."""
+    current = expected_revision(db, actor.tenant_id, revision)
+    summary = _proposal_summary(db, actor.tenant_id, current)
+    totals = summary.totals if isinstance(summary.totals, dict) else json.loads(summary.totals)
+    return {
+        "revision": current,
+        **totals,
+        "decisions": optimizer.decision_counts(db, actor.tenant_id, current),
+    }
+
+
+class MetricsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    proposal_ids: list[ProposalId] = Field(default_factory=list, max_length=optimizer.MAX_SELECTED)
+    tier: Literal[optimizer.TIERS] | None = None
+    # "accepted": every proposal of the revision the tenant accepted (carried forward by ID).
+    decision: Literal["accepted", "rejected"] | None = None
+    revision: str | None = Field(default=None, max_length=128)
+
+
+@router.post("/proposals/metrics")
+def proposal_metrics(request: MetricsRequest, db: DB, actor: Viewer, response: Response):
+    """Excess privilege (graph, per topic, roles and identities, with and without hubs) and
+    counts before and after applying a set of proposals: explicit IDs, a whole tier and/or the
+    accepted ones. Evaluated on the revision's stored what-if model, never its snapshot."""
+    current = expected_revision(db, actor.tenant_id, request.revision)
+    _proposal_summary(db, actor.tenant_id, current)
+    model = optimizer.load_model(db, actor.tenant_id, current)
+    if model is None:
+        raise _proposals_missing()
+    try:
+        ordinals = optimizer.selected_ordinals(
+            db, actor.tenant_id, current, request.proposal_ids, request.tier, request.decision, model
+        )
+    except optimizer.ProposalNotFound as exc:
+        raise HTTPException(404, f"Proposal not found in this revision: {exc}") from None
+    response.headers["X-Graph-Revision"] = current
+    return {
+        "revision": current,
+        "selected": len(ordinals),
+        **model.evaluate(model.selection(ordinals)),
+        "notice": optimizer.NOTICE,
+    }
+
+
+class ProposalSimulationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    proposal_ids: list[ProposalId] = Field(min_length=1, max_length=200)
+    # Source of the blast radius; default: the first proposal's subject.
+    node_id: str | None = Field(default=None, min_length=1, max_length=512)
+    max_hops: int = Field(default=5, ge=1, le=5)
+    # Granted access includes conditional edges (AWS edges are conditional).
+    include_uncertain: bool = True
+    revision: str | None = Field(default=None, max_length=128)
+
+
+@router.post("/proposals/simulate", response_model=SimulationResult, response_model_exclude_none=True)
+def simulate_proposals(
+    request: ProposalSimulationRequest, response: Response, db: DB, graph: Graph, actor: Viewer
+):
+    """Blast radius before and after one or more proposals of the pinned revision (simulated only)."""
+    current = expected_revision(db, actor.tenant_id, request.revision)
+    _proposal_summary(db, actor.tenant_id, current)
+    node_id = request.node_id
+    if node_id is None:
+        try:
+            node_id = optimizer.proposal_row(db, actor.tenant_id, current, request.proposal_ids[0]).subject_id
+        except optimizer.ProposalNotFound:
+            raise HTTPException(404, "Proposal not found in this revision") from None
+    result = run_simulation(
+        db,
+        graph,
+        actor,
+        current,
+        node_id,
+        request.max_hops,
+        request.include_uncertain,
+        SimulationOverlay(proposal_ids=request.proposal_ids),
+    )
+    response.headers["X-Graph-Revision"] = current
+    return result
+
+
+@router.get("/proposals/{proposal_id}", response_model=optimizer.ProposalDetailResponse)
+def get_proposal(
+    db: DB,
+    actor: Viewer,
+    response: Response,
+    proposal_id: Annotated[str, Path(pattern=PROPOSAL_ID)],
+    revision: str | None = None,
+):
+    """One proposal with its evidence (window, sources, coverage, peers, last-used hint), topic
+    and label reason, affected identities, exact edges changed and the graph-wide EPI delta."""
+    current = expected_revision(db, actor.tenant_id, revision)
+    summary = _proposal_summary(db, actor.tenant_id, current)
+    response.headers["X-Graph-Revision"] = current
+    try:
+        return optimizer.proposal_detail(db, summary, proposal_id)
+    except optimizer.ProposalNotFound:
+        raise HTTPException(404, "Proposal not found in this revision") from None
+
+
+class DecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # "pending" clears an earlier decision.
+    state: Literal["accepted", "rejected", "pending"]
+    note: str = Field(default="", max_length=500)
+    revision: str | None = Field(default=None, max_length=128)
+
+
+@router.post("/proposals/{proposal_id}/decision")
+def decide_proposal(
+    request: DecisionRequest,
+    db: DB,
+    actor: Admin,
+    proposal_id: Annotated[str, Path(pattern=PROPOSAL_ID)],
+):
+    """Accept or reject a proposal (nothing is applied; pull requests come in Phase 4). The
+    decision is stored per tenant by the proposal's stable ID and carries forward."""
+    current = expected_revision(db, actor.tenant_id, request.revision)
+    _proposal_summary(db, actor.tenant_id, current)
+    try:
+        row = optimizer.proposal_row(db, actor.tenant_id, current, proposal_id)
+        optimizer.decide(
+            db, actor.tenant_id, current, proposal_id, request.state, actor.subject, request.note
+        )
+    except optimizer.ProposalNotFound:
+        raise HTTPException(404, "Proposal not found in this revision") from None
+    action = {"accepted": "proposal.accepted", "rejected": "proposal.rejected"}.get(
+        request.state, "proposal.cleared"
+    )
     audit(
         db,
         actor,
-        "simulation.run",
+        action,
         {
-            "node_id": request.node_id,
-            "max_hops": request.max_hops,
-            "include_uncertain": request.include_uncertain,
-            "risk_score": result.risk_score,
+            "proposal_id": proposal_id,
+            "revision": current,
+            "type": row.type,
+            "tier": row.tier,
+            "subject": row.subject_id,
+            "target": row.target_id,
+            "digest": row.digest,
+            "note": request.note,
         },
     )
     db.commit()
-    response.headers["X-Graph-Revision"] = revision
-    return result
+    decision = db.get(optimizer.ProposalDecision, (actor.tenant_id, proposal_id))
+    return {
+        "revision": current,
+        "proposal_id": proposal_id,
+        "state": request.state,
+        "decision": optimizer._decision(decision, row.digest) if decision is not None else None,
+        "notice": optimizer.NOTICE,
+    }
 
 
 class IngestionRequest(BaseModel):

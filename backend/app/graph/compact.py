@@ -14,6 +14,7 @@ a 100k revision adds only a few MB.
 """
 
 import hashlib
+import re
 from array import array
 
 from app.engine.analysis_index import WEIGHTS
@@ -36,6 +37,46 @@ EDGE_CODE = {kind: code for code, kind in enumerate(EDGE_KINDS)}
 # Metadata keys kept as topic hints (string values only), in priority order.
 HINT_KEYS = ("topic", "app", "application", "project", "workload", "team", "service", "data_category")
 NO_STRINGS: tuple[str, ...] = ()
+# Edge certainty codes (``CompactGraph.edge_certainty``): recomputing an edge ID needs the value.
+CERTAINTIES = ("confirmed", "conditional", "declared")
+CERTAINTY_CODE = {value: code for code, value in enumerate(CERTAINTIES)}
+# Optimizer safety flags per node (``CompactGraph.safety``, sparse bitmask): identities and
+# resources whose access changes are never recommended automatically (``app.graph.proposals``).
+SERVICE_LINKED, BREAK_GLASS, EXEMPT, KMS = 1, 2, 4, 8
+_BREAK_GLASS = re.compile(
+    r"break[-_ ]?glass|emergency|disaster[-_ ]?recovery|(?:^|[^a-z0-9])dr(?:[^a-z0-9]|$)", re.IGNORECASE
+)
+# Scheduled or seasonal identities need a longer window than the attested one, or an exemption.
+_EXEMPT = re.compile(
+    r"^(?:zg[-_]?optimizer[=:]\s*(?:exempt|skip|manual)|(?:schedule|cadence)[=:]\s*"
+    r"(?:seasonal|scheduled|quarterly|annual|yearly|monthly)|seasonal(?:[=:]\s*true)?|scheduled(?:[=:]\s*true)?)$",
+    re.IGNORECASE,
+)
+SERVICE_LINKED_TAG = re.compile(r"^(?:aws[-_:])?service[-_]linked(?:[=:]\s*true)?$", re.IGNORECASE)
+
+
+def safety_flags(node: dict) -> int:
+    """Never-auto categories of a node from its ID, name, tags and metadata (deterministic)."""
+    node_id, name = node["id"], node.get("name") or ""
+    tags = node.get("tags") or ()
+    metadata = node.get("metadata") or {}
+    flags = 0
+    if (
+        ":role/aws-service-role/" in node_id
+        or metadata.get("scp_exempt_service_linked_role") is True
+        or any(SERVICE_LINKED_TAG.match(tag.strip()) for tag in tags)
+    ):
+        flags |= SERVICE_LINKED
+    if any(_BREAK_GLASS.search(value) for value in (node_id, name, *tags)):
+        flags |= BREAK_GLASS
+    if metadata.get("optimizer_exempt") is True or any(_EXEMPT.match(tag.strip()) for tag in tags):
+        flags |= EXEMPT
+    service = metadata.get("service")
+    if ":kms:" in node_id or (isinstance(service, str) and service.strip().lower() == "kms"):
+        flags |= KMS
+    return flags
+
+
 RECOMMENDATION = (
     "Authenticate the entry point, restrict role trust and tool scope, and review data access permissions."
 )
@@ -108,6 +149,8 @@ class CompactGraph:
         # Last-used hints (sparse): ``RoleLastUsed`` ISO date from metadata. Hints only.
         self.last_used: dict[int, str] = {}
         self._tuples: dict[tuple[str, ...], tuple[str, ...]] = {}
+        # Optimizer safety flags (sparse bitmask, see ``safety_flags``).
+        self.safety: dict[int, int] = {}
         self.edge_source = array("l")
         self.edge_target = array("l")
         self.edge_traversal = bytearray()
@@ -115,6 +158,7 @@ class CompactGraph:
         self.edge_evidence: list[tuple[str, ...]] = []
         self.edge_kind = bytearray()  # EDGE_CODE of the edge type
         self.edge_actions: list[tuple[str, ...]] = []
+        self.edge_certainty = bytearray()  # CERTAINTY_CODE
         self._csr: Csr | None = None
         self._csr_edges = -1
 
@@ -144,6 +188,9 @@ class CompactGraph:
         self.account.append(self._interned.setdefault(account, account))
         self.names.append(node.get("name") or node_id)
         self.tags.append(self._tuple(node.get("tags") or ()))
+        flags = safety_flags(node)
+        if flags:
+            self.safety[len(self.ids) - 1] = flags
         provider = node.get("provider") or ""
         self.provider.append(self._interned.setdefault(provider, provider))
         metadata = node.get("metadata") or {}
@@ -180,6 +227,16 @@ class CompactGraph:
         self.edge_evidence.append(tuple(edge.get("evidence", ())) if traversal else ())
         self.edge_kind.append(EDGE_CODE.get(edge["type"], 255))
         self.edge_actions.append(self._tuple(edge.get("actions") or ()))
+        self.edge_certainty.append(CERTAINTY_CODE.get(edge.get("certainty", "confirmed"), 0))
+
+    def edge_id(self, edge: int) -> str:
+        """The edge's stable ID, as ``app.graph.schema.Edge.id`` computes it."""
+        content = (
+            f"{self.ids[self.edge_source[edge]]}\0{EDGE_KINDS[self.edge_kind[edge]]}\0"
+            f"{self.ids[self.edge_target[edge]]}\0{','.join(sorted(self.edge_actions[edge]))}\0"
+            f"{CERTAINTIES[self.edge_certainty[edge]]}"
+        )
+        return hashlib.sha256(content.encode()).hexdigest()[:24]
 
     @property
     def node_count(self) -> int:

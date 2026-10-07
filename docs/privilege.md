@@ -10,7 +10,7 @@ excess-privilege index:
 0 means everything granted is needed; 1 means nothing granted is needed. The index is
 computed at publish time with the relationship topics ([topics.md](topics.md)) and
 recomputed by the worker when usage evidence changes. It never removes or proposes
-removing access by itself; proposals are Phase 3.
+removing access by itself; proposals are Phase 3 ([proposals.md](proposals.md)).
 
 ## Granted, used, inferred
 

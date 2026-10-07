@@ -215,6 +215,11 @@ class ComputedTopics:
     links: dict[tuple[int, int], int]
     summary: dict
     compute_ms: int
+    # Structures the optimizer proposals reuse (``app.graph.proposals``): grants, hops, hubs,
+    # holder sets and peer statistics, plus the usage the analysis read.
+    context: PrivilegeContext | None = None
+    usage: UsageInput | None = None
+    wildcard: frozenset[int] = frozenset()
 
 
 def compute_topics(graph: CompactGraph, usage: UsageInput | None = None) -> ComputedTopics:
@@ -405,6 +410,8 @@ def compute_topics(graph: CompactGraph, usage: UsageInput | None = None) -> Comp
     del label
 
     # 5. Profiles per distinct grant-holder set (role level; identities derive from it).
+    through: dict[int, frozenset[int]] = {}  # start -> non-holder nodes its hops pass through
+
     def holder_set(start: int) -> tuple[frozenset[int], bool]:
         """Grant holders reachable over role/tool hops (the data hop counts toward MAX_HOPS),
         and whether a privileged node is reached."""
@@ -420,7 +427,10 @@ def compute_topics(graph: CompactGraph, usage: UsageInput | None = None) -> Comp
             if not following:
                 break
             frontier = following
-        return frozenset(node for node in seen if node in direct), not privileged_nodes.isdisjoint(seen)
+        holders = frozenset(node for node in seen if node in direct)
+        if len(seen) > len(holders) + 1:
+            through[start] = frozenset(node for node in seen if node not in direct and node != start)
+        return holders, not privileged_nodes.isdisjoint(seen)
 
     privileged_nodes = {i for i in range(n) if graph.privileged[i]} | wildcard
     by_size = {holder: len(items) for holder, items in direct.items()}
@@ -580,13 +590,11 @@ def compute_topics(graph: CompactGraph, usage: UsageInput | None = None) -> Comp
     cache.clear()
 
     # 5b. Excess-privilege index (needed vs granted), role level first.
-    timings = compute_privilege(
-        PrivilegeContext(
-            graph, direct, hops, hubs, weight, is_restricted, role_rows, identity_rows, holders_of
-        ),
-        usage,
+    context = PrivilegeContext(
+        graph, direct, hops, hubs, weight, is_restricted, role_rows, identity_rows, holders_of
     )
-    del holders_of
+    context.through = through
+    timings = compute_privilege(context, usage)
     for rows in (role_rows, identity_rows):
         for row in rows.values():
             if row["dormant"]:
@@ -750,6 +758,9 @@ def compute_topics(graph: CompactGraph, usage: UsageInput | None = None) -> Comp
         dict(links),
         summary,
         round((time.perf_counter() - started) * 1000),
+        context,
+        usage,
+        frozenset(wildcard),
     )
 
 
@@ -1291,6 +1302,11 @@ def backfill(tenant: str, wait: bool = True) -> dict:
             graph, load_usage(db, tenant, graph, peer_share=get_settings().peer_baseline_share)
         )
         store_topics(db, tenant, revision, computed)
+        # Proposals rest on the same evidence: recompute them in the same transaction.
+        from app.graph.proposals import compute_and_store, delete_proposals, stored_findings
+
+        delete_proposals(db, tenant, revision)
+        compute_and_store(db, tenant, revision, computed, stored_findings(db, tenant, revision))
         db.commit()
         return {
             "tenant": tenant,
