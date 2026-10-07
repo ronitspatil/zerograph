@@ -889,7 +889,7 @@ def decide_proposal(
     actor: Admin,
     proposal_id: Annotated[str, Path(pattern=PROPOSAL_ID)],
 ):
-    """Accept or reject a proposal (nothing is applied; pull requests come in Phase 4). The
+    """Accept or reject a proposal (nothing is applied; see /rollout for pull requests). The
     decision is stored per tenant by the proposal's stable ID and carries forward."""
     current = expected_revision(db, actor.tenant_id, request.revision)
     _proposal_summary(db, actor.tenant_id, current)

@@ -4,8 +4,8 @@ Optimizer Phase 3. From each revision's relationship topics ([topics.md](topics.
 excess-privilege index ([privilege.md](privilege.md)) and the tenant's observed access
 ([usage-evidence.md](usage-evidence.md)), ZeroGraph proposes changes that move the
 identity graph toward least privilege. **Proposals are proposed, never applied**: nothing
-changes a grant, accepting one only records a review decision, and pull requests come in
-Phase 4. Code: `app/graph/proposals.py`, `app/graph/whatif.py`.
+changes a grant, and accepting one only records a review decision; accepted proposals become
+draft pull requests through the rollout ([rollout.md](rollout.md)). Code: `app/graph/proposals.py`, `app/graph/whatif.py`.
 
 ## Types
 
