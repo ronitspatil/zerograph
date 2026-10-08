@@ -265,9 +265,9 @@ export function GlobalMap({
     return seen.size;
   };
 
-  // Status line text. The top-level line is the longest of the three, and an invisible
-  // copy of it always sizes the bar (here and in the Topics lens), so drilling in or
-  // switching lenses never changes the bar height and never moves the canvas below.
+  // Status line text. An invisible copy of the top-level line (usually the longest) always
+  // sizes the bar, here and in the Topics lens, so drilling in or switching lenses never
+  // changes the bar height and never moves the canvas below; a longer level line is clipped.
   const topStatus = map
     ? `${count(map.view.shown_clusters)} / ${count(map.view.clusters)} top-level clusters · ` +
       `${count(map.view.total_nodes)} entities · ${count(map.view.total_edges)} relationships · ` +
