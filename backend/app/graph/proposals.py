@@ -40,13 +40,15 @@ stored per tenant by ID, carry forward to later revisions.
 """
 
 import argparse
+import gc
 import hashlib
 import json
 import math
 import threading
 import time
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -250,11 +252,19 @@ def compute_proposals(
             ):
                 unexplained.add(item)
 
+    reaching_users: dict[int, set[int]] = {}
+
     def protected(holder: int, item: int) -> bool:
         """Removing ``holder``'s grant on ``item`` could remove observed access."""
         if item in unexplained:
             return True
-        return any(holder in holders_of.get(user, ()) or holder == user for user in users_of.get(item, ()))
+        # Holders through which some observed user of ``item`` reaches it (or the user itself).
+        found = reaching_users.get(item)
+        if found is None:
+            found = reaching_users[item] = set(users_of.get(item, ()))
+            for user in users_of.get(item, ()):
+                found.update(holders_of.get(user, ()))
+        return holder in found
 
     # Wildcard grant pairs and every edge per (source, target) needed for listed changes.
     wildcard_pairs: set[tuple[int, int]] = set()
@@ -1031,10 +1041,25 @@ def stored_proposal_summary(db: Session, tenant: str, revision: str) -> Revision
     )
 
 
+@contextmanager
+def _without_cycle_collection() -> Iterator[None]:
+    """Pause the cyclic garbage collector: with a revision's graph and topics in memory, its
+    full passes re-scan millions of live objects while proposals allocate (~a third of the
+    proposal phase at 100k). The phase builds no reference cycles worth collecting early."""
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if enabled:
+            gc.enable()
+
+
 def compute_and_store(db: Session, tenant: str, revision: str, computed, findings) -> ComputedProposals:
     """Proposals for a revision whose topics were just computed, in the caller's transaction."""
-    result = compute_proposals(computed, findings, policy_index(db, tenant, revision))
-    store_proposals(db, tenant, revision, result, computed)
+    with _without_cycle_collection():
+        result = compute_proposals(computed, findings, policy_index(db, tenant, revision))
+        store_proposals(db, tenant, revision, result, computed)
     return result
 
 
