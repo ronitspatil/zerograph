@@ -1215,17 +1215,24 @@ def _decisions(db: Session, tenant: str, proposal_ids: list[str]) -> dict[str, P
 
 def decision_counts(db: Session, tenant: str, revision: str) -> dict:
     """Accepted and rejected proposals of the revision (decisions carried forward by ID)."""
-    rows = db.execute(
-        select(ProposalDecision.state, func.count())
-        .join(
-            RevisionProposal,
-            (RevisionProposal.tenant_id == ProposalDecision.tenant_id)
-            & (RevisionProposal.proposal_id == ProposalDecision.proposal_id),
-        )
-        .where(ProposalDecision.tenant_id == tenant, RevisionProposal.revision == revision)
-        .group_by(ProposalDecision.state)
+    states = dict(
+        db.execute(
+            select(ProposalDecision.proposal_id, ProposalDecision.state).where(
+                ProposalDecision.tenant_id == tenant
+            )
+        ).all()
     )
-    found = dict(rows.all())
+    found: Counter = Counter()
+    decided = sorted(states)
+    for start in range(0, len(decided), DECIDED_BATCH):
+        for proposal_id_ in db.scalars(
+            select(RevisionProposal.proposal_id).where(
+                RevisionProposal.tenant_id == tenant,
+                RevisionProposal.revision == revision,
+                RevisionProposal.proposal_id.in_(decided[start : start + DECIDED_BATCH]),
+            )
+        ):
+            found[states[proposal_id_]] += 1
     return {state: found.get(state, 0) for state in DECISION_STATES}
 
 
@@ -1377,22 +1384,34 @@ def selected_ordinals(
     if decision is not None:
         if decision not in DECISION_STATES:
             raise ValueError("Unknown decision state")
-        chosen.update(
-            db.scalars(
-                select(RevisionProposal.ordinal)
-                .join(
-                    ProposalDecision,
-                    (ProposalDecision.tenant_id == RevisionProposal.tenant_id)
-                    & (ProposalDecision.proposal_id == RevisionProposal.proposal_id),
-                )
-                .where(
-                    RevisionProposal.tenant_id == tenant,
-                    RevisionProposal.revision == revision,
-                    ProposalDecision.state == decision,
+        decided = _decided_ids(db, tenant, decision)
+        for start in range(0, len(decided), DECIDED_BATCH):
+            chosen.update(
+                db.scalars(
+                    select(RevisionProposal.ordinal).where(
+                        RevisionProposal.tenant_id == tenant,
+                        RevisionProposal.revision == revision,
+                        RevisionProposal.proposal_id.in_(decided[start : start + DECIDED_BATCH]),
+                    )
                 )
             )
-        )
     return sorted(chosen)
+
+
+DECIDED_BATCH = 1000
+
+
+def _decided_ids(db: Session, tenant: str, state: str | None = None) -> list[str]:
+    """The tenant's decided proposal IDs (optionally of one state).
+
+    Read first and then looked up in the revision by primary key: a join of the two tables
+    is planned as repeated scans of the revision's proposals while the decision table's
+    statistics are stale (e.g. right after a bulk decision), which took seconds at 100k.
+    """
+    query = select(ProposalDecision.proposal_id).where(ProposalDecision.tenant_id == tenant)
+    if state is not None:
+        query = query.where(ProposalDecision.state == state)
+    return sorted(db.scalars(query))
 
 
 @dataclass

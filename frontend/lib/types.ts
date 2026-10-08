@@ -671,3 +671,77 @@ export interface ProposalDraft {
   change_id: string | null;
   notice: string;
 }
+
+// Optimizer Phase 5: current vs optimized views (what-if only, never applied).
+export interface SelectionCounts {
+  grants_removed: number;
+  restricted_grants_removed: number;
+  hops_cut: number;
+  disabled_nodes: number;
+}
+
+export interface SliceOverlay {
+  revision: string;
+  selected: number;
+  removed_edges: { source: string; target: string; kind: "grant" | "hop" }[];
+  disabled_nodes: string[];
+  slice: {
+    nodes: number;
+    outside_model: number;
+    grants_removed: number;
+    hops_cut: number;
+    disabled_nodes: number;
+  };
+  totals: SelectionCounts;
+  applied: Record<string, number>;
+  skipped: Record<string, number>;
+  notice: string;
+}
+
+export interface TopicWhatIf {
+  topic_id: string;
+  name: string;
+  roles?: WhatIfTotals;
+  identities?: WhatIfTotals;
+}
+
+export interface TopicLinkRemovals {
+  revision: string;
+  selected: number;
+  links: { source: string; target: string; removed: number }[];
+  topics: TopicWhatIf[];
+  graph: { roles: WhatIfTotals; identities: WhatIfTotals };
+  counts: Record<string, number>;
+  skipped: Record<string, number>;
+  notice: string;
+}
+
+export type TopicGroup = "role" | "identity" | "resource" | "outside";
+
+export interface TopicSubgraph extends GraphData {
+  topic_id: string;
+  groups: Record<string, TopicGroup>;
+  view: {
+    shown: Record<TopicGroup, number>;
+    totals: Record<"role" | "identity" | "resource", number>;
+    edge_limit: number;
+    truncated: boolean;
+  };
+}
+
+export interface OptimizerOverview {
+  revision: string;
+  evidence: Partial<UsageEvidence> & { status: string };
+  now: { roles: WhatIfSide; identities: WhatIfSide };
+  after_accepted: { roles: WhatIfSide; identities: WhatIfSide };
+  after_high: { roles: WhatIfSide; identities: WhatIfSide };
+  accepted: { selected: number; counts: Record<string, number> };
+  high: { selected: number; counts: Record<string, number> };
+  decisions: { accepted: number; rejected: number };
+  dormant_identities: number;
+  dormant_roles: number;
+  unused_grants: number;
+  unused_restricted_grants: number;
+  rollout: Record<RolloutState | "canary_watching", number>;
+  notice: string;
+}

@@ -130,3 +130,40 @@ the topics when usage evidence changes (topic sweep), backfilled by a 60 s worke
 (`backfill-proposals`; `python -m app.graph.proposals --tenant T` by hand) for current
 revisions without proposals of `PROPOSAL_VERSION` (1), deleted by retention with their
 revision, and carried by the PostgreSQL backup (decisions too).
+
+## Current vs optimized views
+
+Every "Optimized" view draws what one proposal set would change, from the revision's
+stored what-if model; nothing is applied and no snapshot is loaded. The set is shared by
+all views: the whole **high tier**, the tenant's **accepted** proposals, or a **custom
+set** (the proposals shown in the queue, "Use as custom set", at most 2,000).
+
+| View | What changes in Optimized |
+|---|---|
+| Identity & data explorer (initial view, neighborhoods) | Grants the set removes are drawn red dashed, disabled identities and roles grey, within the visible slice; the status line gives in-view and graph-wide counts. |
+| Topics lens (global map) | Topics are coloured by identity EPI after the set (without hub roles, which put almost every topic above 90%), links thin by the cross-topic grants the set removes, and the topic panel shows EPI before → after. |
+| Topic page | The topic's bounded subgraph (its most over-privileged roles, the assets and identities connected to them, and the other topics' assets they have removal proposals on) with the same overlay; granted vs used per role, EPI with top contributors and the hub breakdown, label reasons, proposals by tier and members. |
+| Overview | Graph-wide identity EPI now → after accepted and → after high tier (with and without hubs), dormant identities, unused grants on restricted data, rollout states. |
+
+API (viewer-readable, pinned with `revision`, 409 when it moved, 404 with `Retry-After`
+while proposals are computed):
+
+- `POST /proposals/overlay` — `tier` / `decision: "accepted"` / `proposal_ids` and
+  `node_ids` (1–500 entity IDs on screen): the removed grants and cut hops with both ends
+  in the slice, the disabled nodes in it, and the set's graph-wide totals (equal to
+  `/proposals/metrics` counts).
+- `POST /proposals/links` — removed cross-topic grants per topic link (counted like the
+  map's links) and per-topic EPI before/after.
+- `GET /graph/topics/{id}/subgraph` — the topic's bounded subgraph (at most 60 roles,
+  60 identities, 120 assets, 160 other-topic assets; 2,000 relationships).
+- `GET /graph/topics/{id}?sort=excess` — roles or identities by granted minus needed
+  weight (top EPI contributors).
+- `GET /proposals/overview` — the overview tiles.
+- `POST /proposals/decisions` (admin) — accept, reject or clear up to 500 proposals at
+  once, all of one tier and one topic; manual-tier proposals are accepted one at a time.
+  Each decision is audited like a single one.
+
+The proposal queue is the primary remediation entry point (Remediation → Proposals,
+Rollout); the single pasted-policy tool remains under Remediation → Advanced.
+`scripts/qualify_optimized_view.py` qualifies the endpoints and the overlay's
+correctness at 100k on Memgraph.
