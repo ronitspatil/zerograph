@@ -14,6 +14,7 @@ import {
 import type {
   Proposal,
   ProposalDetail,
+  ProposalDraft,
   ProposalList,
   ProposalSimulation,
   ProposalSummary,
@@ -22,6 +23,7 @@ import type {
   TopicMap,
 } from "@/lib/types";
 import { Button } from "@/components/ui/button";
+import { Rollout } from "@/components/rollout";
 
 const PAGE = 50;
 const count = formatCount;
@@ -47,9 +49,47 @@ function query(filters: Filters, cursor: number | null, revision?: string) {
 /**
  * Least-privilege proposals of the current revision: filters by tier, type, topic and
  * decision, the evidence behind one proposal, a before/after blast-radius simulation
- * and accept/reject (recorded only; nothing is applied, pull requests come in Phase 4).
+ * and accept/reject; accepted, eligible proposals become draft pull requests (Create PR) and
+ * the Rollout tab tracks them. Nothing is applied by ZeroGraph.
  */
 export function Proposals({ canAdmin }: { canAdmin: boolean }) {
+  const [tab, setTab] = useState<"proposals" | "rollout">("proposals");
+  const [rolloutKey, setRolloutKey] = useState(0);
+  return (
+    <>
+      <div
+        className="graph-view-switch"
+        role="group"
+        aria-label="Proposals or rollout"
+      >
+        <button
+          type="button"
+          aria-pressed={tab === "proposals"}
+          onClick={() => setTab("proposals")}
+        >
+          Proposals
+        </button>
+        <button
+          type="button"
+          aria-pressed={tab === "rollout"}
+          onClick={() => {
+            setRolloutKey((k) => k + 1);
+            setTab("rollout");
+          }}
+        >
+          Rollout
+        </button>
+      </div>
+      {tab === "rollout" ? (
+        <Rollout canAdmin={canAdmin} refreshKey={rolloutKey} />
+      ) : (
+        <ProposalQueue canAdmin={canAdmin} />
+      )}
+    </>
+  );
+}
+
+function ProposalQueue({ canAdmin }: { canAdmin: boolean }) {
   const [summary, setSummary] = useState<ProposalSummary | null>(null);
   const [topics, setTopics] = useState<Map<string, string>>(new Map());
   const [filters, setFilters] = useState<Filters>({
@@ -63,6 +103,9 @@ export function Proposals({ canAdmin }: { canAdmin: boolean }) {
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<ProposalDetail | null>(null);
   const [simulation, setSimulation] = useState<ProposalSimulation | null>(null);
+  const [draft, setDraft] = useState<ProposalDraft | null>(null);
+  const [prStatus, setPrStatus] = useState("");
+  const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
   const [simulating, setSimulating] = useState(false);
   const [simulationError, setSimulationError] = useState("");
@@ -126,12 +169,17 @@ export function Proposals({ canAdmin }: { canAdmin: boolean }) {
     setSimulation(null);
     setSimulationError("");
     setError("");
+    setDraft(null);
+    setPrStatus("");
     try {
-      setDetail(
-        await api<ProposalDetail>(
+      const [found, text] = await Promise.all([
+        api<ProposalDetail>(
           `proposals/${proposal.id}?revision=${list?.revision ?? ""}`,
         ),
-      );
+        api<ProposalDraft>(`proposals/${proposal.id}/draft`).catch(() => null),
+      ]);
+      setDetail(found);
+      setDraft(text);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Proposal failed");
     }
@@ -182,6 +230,44 @@ export function Proposals({ canAdmin }: { canAdmin: boolean }) {
     }
   };
 
+  const createPr = async (scope: "role" | "topic") => {
+    if (!detail) return;
+    setCreating(true);
+    setPrStatus("");
+    try {
+      const p = detail.proposal;
+      const change = await api<{ id: string; subject_name: string }>(
+        "rollout/changes",
+        {
+          method: "POST",
+          body: JSON.stringify(
+            scope === "role"
+              ? { subject_id: p.subject_id, revision: detail.revision }
+              : { topic_id: p.topic_id, revision: detail.revision },
+          ),
+        },
+      );
+      try {
+        const opened = await api<{ url: string }>(
+          `rollout/changes/${change.id}/pr`,
+          { method: "POST" },
+        );
+        setPrStatus(`Draft pull request opened: ${opened.url}`);
+      } catch (e) {
+        setPrStatus(
+          `Change saved as a draft. ${e instanceof Error ? e.message : ""}`,
+        );
+      }
+      setDraft(
+        await api<ProposalDraft>(`proposals/${p.id}/draft`).catch(() => draft),
+      );
+    } catch (e) {
+      setPrStatus(e instanceof Error ? e.message : "Create PR failed");
+    } finally {
+      setCreating(false);
+    }
+  };
+
   const set = (patch: Partial<Filters>) => {
     setSelected(null);
     setDetail(null);
@@ -201,9 +287,10 @@ export function Proposals({ canAdmin }: { canAdmin: boolean }) {
   return (
     <section className="proposals-page">
       <div className="notice proposal-notice">
-        <b>Proposed, not applied.</b> Accept and reject record a review decision
-        only; pull requests come in Phase 4. No proposal removes access that was
-        observed used.
+        <b>Proposed, not applied.</b> Accepted, eligible proposals become draft
+        pull requests in your policy repository (Create PR); nothing is applied
+        by ZeroGraph and merging happens there. No proposal removes access that
+        was observed used.
       </div>
       <div className="proposal-metrics">
         <div className="metric-card">
@@ -385,6 +472,10 @@ export function Proposals({ canAdmin }: { canAdmin: boolean }) {
               onSimulate={() => void simulate()}
               canAdmin={canAdmin}
               onDecide={(state) => void decide(state)}
+              draft={draft}
+              prStatus={prStatus}
+              creating={creating}
+              onCreatePr={(scope) => void createPr(scope)}
             />
           ) : (
             <div className="proposal-placeholder">
@@ -416,6 +507,10 @@ function ProposalEvidence({
   onSimulate,
   canAdmin,
   onDecide,
+  draft,
+  prStatus,
+  creating,
+  onCreatePr,
 }: {
   detail: ProposalDetail;
   topicLabel?: string;
@@ -425,6 +520,10 @@ function ProposalEvidence({
   onSimulate: () => void;
   canAdmin: boolean;
   onDecide: (state: "accepted" | "rejected" | "pending") => void;
+  draft: ProposalDraft | null;
+  prStatus: string;
+  creating: boolean;
+  onCreatePr: (scope: "role" | "topic") => void;
 }) {
   const p = detail.proposal;
   const evidence = p.evidence;
@@ -597,9 +696,57 @@ function ProposalEvidence({
           ? `${p.decision.state === "accepted" ? "Accepted" : "Rejected"} by ${p.decision.actor}${p.decision.stale ? " (evidence changed since)" : ""}. `
           : ""}
         {canAdmin
-          ? "Decisions carry forward to later revisions. PR comes in Phase 4."
-          : "Administrators record decisions. PR comes in Phase 4."}
+          ? "Decisions carry forward to later revisions."
+          : "Administrators record decisions and open pull requests."}
       </small>
+      <span className="section-label">Pull request</span>
+      <div className="proposal-pr">
+        {draft === null ? (
+          <p className="proposal-pr-text">Loading</p>
+        ) : draft.pr_eligible ? (
+          <>
+            <div className="proposal-actions">
+              <Button
+                disabled={
+                  !canAdmin ||
+                  creating ||
+                  p.decision?.state !== "accepted" ||
+                  draft.change_id !== null
+                }
+                onClick={() => onCreatePr("role")}
+              >
+                Create PR
+              </Button>
+              <Button
+                variant="outline"
+                disabled={
+                  !canAdmin ||
+                  creating ||
+                  !p.topic_id ||
+                  p.decision?.state !== "accepted" ||
+                  draft.change_id !== null
+                }
+                onClick={() => onCreatePr("topic")}
+              >
+                Bundle topic
+              </Button>
+            </div>
+            <p className="proposal-pr-text" title={prStatus || undefined}>
+              {prStatus ||
+                (draft.change_id
+                  ? "In a rollout change; see the Rollout tab."
+                  : p.decision?.state === "accepted"
+                    ? "Create PR opens one draft pull request for this role with all its accepted proposals; Bundle topic covers the topic's roles."
+                    : "Accept the proposal first.")}
+            </p>
+          </>
+        ) : (
+          <p className="proposal-pr-text">
+            Draft only, no pull request: {draft.reason}
+          </p>
+        )}
+        {draft && <pre className="proposal-draft">{draft.text}</pre>}
+      </div>
     </>
   );
 }

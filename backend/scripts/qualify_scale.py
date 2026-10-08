@@ -479,6 +479,71 @@ def plant_safety_cases(snapshot: GraphSnapshot, truth: dict, usage: dict, per_ca
 
 
 # CloudTrail-shaped export of the planted usage (optimizer Phase 2).
+ROLE_POLICIES = (
+    "Optimizer Phase 4: one inline identity policy per non-hub role mirroring its grant edges (Allow statements "
+    "grouped by action set, or one per asset for 30% of roles; 30% of buckets also list their object ARN 'id/*'); "
+    "10% add an unrelated Deny on iam:* and 20% an unrelated Allow logs:CreateLogStream on '*'. Roles that "
+    "already carry a planted Condition/Deny policy keep it. Seeded, deterministic."
+)
+
+
+def plant_role_policies(snapshot: GraphSnapshot, truth: dict | None = None, seed: int = 19) -> int:
+    """Attach an inline identity policy to every role that grants data, in place (optimizer Phase 4).
+
+    The documents grant exactly the role's READ/WRITE edges (so the graph and the stored
+    policies agree, as the AWS collector derives grants from policies); hub roles (wildcard
+    actions over thousands of assets) are left without one. Returns the number planted.
+    """
+    from app.graph.schema import PolicyAttachment
+
+    rng = random.Random(seed)
+    hubs = set((truth or {}).get("hub_roles", ()))
+    names = {node.id: node.name for node in snapshot.nodes}
+    kinds = {node.id: node.type for node in snapshot.nodes}
+    existing = {policy.principal for policy in snapshot.policies}
+    grants: dict[str, list[tuple[str, tuple[str, ...]]]] = {}
+    for edge in snapshot.edges:
+        if edge.type in (EdgeType.READ, EdgeType.WRITE) and kinds.get(edge.source) == NodeType.ROLE:
+            grants.setdefault(edge.source, []).append((edge.target, tuple(edge.actions)))
+    planted = 0
+    for role in sorted(grants):
+        if role in hubs or role in existing or any("*" in a for _, actions in grants[role] for a in actions):
+            continue
+        per_asset = rng.random() < 0.3
+        groups: dict[tuple[str, ...], list[str]] = {}
+        for target, actions in sorted(grants[role]):
+            groups.setdefault(tuple(sorted(actions)), []).append(target)
+        statements = []
+        for actions, targets in sorted(groups.items()):
+            resources_of = []
+            for target in targets:
+                entries = [target]
+                if kinds.get(target) == NodeType.BUCKET and rng.random() < 0.3:
+                    entries.append(target + "/*")
+                resources_of.append(entries)
+            if per_asset:
+                for entries in resources_of:
+                    statements.append({"Effect": "Allow", "Action": list(actions), "Resource": entries})
+            else:
+                statements.append(
+                    {"Effect": "Allow", "Action": list(actions), "Resource": [e for es in resources_of for e in es]}
+                )
+        if rng.random() < 0.1:
+            statements.append({"Effect": "Deny", "Action": "iam:*", "Resource": "*"})
+        if rng.random() < 0.2:
+            statements.append({"Effect": "Allow", "Action": "logs:CreateLogStream", "Resource": "*"})
+        snapshot.policies.append(
+            PolicyAttachment(
+                principal=role,
+                kind="inline",
+                name=f"{names.get(role, role)[:200]}-access",
+                document={"Version": "2012-10-17", "Statement": statements},
+            )
+        )
+        planted += 1
+    return planted
+
+
 CLOUDTRAIL_ACCOUNT = "123456789012"
 CLOUDTRAIL_SERVICES = ("aoss", "rds-data", "s3", "sts")
 _EVENT = {

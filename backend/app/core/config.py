@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     git_base_branch: str = "main"
     git_token: SecretStr = SecretStr("")
     git_policy_prefix: str = "security/zerograph"
+    # Optimizer rollout: canary watch window after a change is marked merged, and the
+    # AccessDenied events (per change, inside the window) that flag it for revert.
+    rollout_watch_days: int = Field(default=7, ge=1, le=90)
+    rollout_denied_threshold: int = Field(default=1, ge=1, le=1_000_000)
 
     @model_validator(mode="after")
     def secure_configuration(self) -> "Settings":
