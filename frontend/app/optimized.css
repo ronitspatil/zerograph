@@ -142,9 +142,8 @@
   white-space: nowrap;
 }
 .topic-page .metric-card small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 18px;
+  overflow-wrap: anywhere;
 }
 .topic-graph-sidebar p {
   font-size: 13px;
@@ -426,6 +425,9 @@
   }
 }
 @media (max-width: 600px) {
+  .topic-page .metric-grid.topic-tiles {
+    grid-template-columns: minmax(0, 1fr);
+  }
   .optimized-bar {
     padding: var(--space-2) var(--space-3);
   }
