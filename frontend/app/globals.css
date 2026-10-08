@@ -829,6 +829,12 @@
   .simulation-note:not([data-active]) {
     visibility: hidden;
   }
+  /* Room for counts up to 9,999,999 so the note wraps the same way for any result. */
+  .simulation-count {
+    display: inline-block;
+    min-width: 9ch;
+    font-variant-numeric: tabular-nums;
+  }
   .exploration-status .button {
     margin-left: 4px;
   }

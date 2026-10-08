@@ -910,14 +910,18 @@ export function Console({ demo }: { demo: boolean }) {
                             : "Last role page."}
                         </span>
                       )}
-                      {/* Always rendered so a simulation result never re-wraps this bar. */}
+                      {/* Always rendered, and the count sits last in a fixed-width box, so a
+                          simulation result (of any size) never re-wraps this bar. */}
                       <span
                         className="simulation-note"
                         data-active={simulation ? "true" : undefined}
                         aria-hidden={simulation ? undefined : true}
                       >
-                        Server-side simulation: {simulation ? outsideView : 0}{" "}
-                        affected nodes outside the visible view.
+                        Server-side simulation, affected nodes outside the
+                        visible view:{" "}
+                        <span className="simulation-count">
+                          {formatCount(simulation ? outsideView : 0)}
+                        </span>
                       </span>
                     </div>
                     <OptimizedBar
