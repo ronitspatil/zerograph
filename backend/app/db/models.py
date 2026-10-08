@@ -510,3 +510,61 @@ class ProposalDecision(Base):
     digest: Mapped[str] = mapped_column(String(16))
     note: Mapped[str] = mapped_column(String(500), default="")
     decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class AccessDenial(Base):
+    """Denied attempts (CloudTrail ``errorCode``) of a usage upload file, by stable entity IDs.
+
+    Never usage: only the optimizer rollout's AccessDenied watch reads them, and only for
+    committed uploads. Deleted with their upload.
+    """
+
+    __tablename__ = "access_denials"
+    __table_args__ = (Index("ix_access_denials_principal", "tenant_id", "principal_id"),)
+    upload_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    chunk: Mapped[int] = mapped_column(Integer, primary_key=True)
+    principal_id: Mapped[str] = mapped_column(String(512), primary_key=True)
+    resource_id: Mapped[str] = mapped_column(String(512), primary_key=True)
+    service: Mapped[str] = mapped_column(String(32), primary_key=True)
+    error_code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(128))
+    first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    count: Mapped[int] = mapped_column(Integer)
+
+
+class RolloutChange(Base):
+    """One least-privilege change (a pull request for one role, or a topic bundle) built from
+    accepted proposals, and its rollout state. Per tenant; carries forward across revisions
+    by proposal ID. States: draft -> pr_open -> merged (canary watch) -> verified, or
+    -> revert_open -> rolled_back. Nothing is applied by ZeroGraph."""
+
+    __tablename__ = "rollout_changes"
+    __table_args__ = (Index("ix_rollout_changes_topic", "tenant_id", "topic_id", "created_at"),)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(128), index=True)
+    scope: Mapped[str] = mapped_column(String(16))  # "role" or "topic" (bundle)
+    topic_id: Mapped[str] = mapped_column(String(32))
+    subject_id: Mapped[str] = mapped_column(String(512))
+    subject_name: Mapped[str] = mapped_column(String(256))
+    proposal_ids: Mapped[list[str]] = mapped_column(JSON)
+    state: Mapped[str] = mapped_column(String(16), default="draft")
+    canary: Mapped[bool] = mapped_column(Boolean, default=False)
+    revision: Mapped[str] = mapped_column(String(64))
+    remediation_ids: Mapped[list[str]] = mapped_column(JSON)
+    files: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
+    summary: Mapped[dict[str, Any]] = mapped_column(JSON)
+    watch_days: Mapped[int] = mapped_column(Integer)
+    gitops_scope: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    pr_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    merged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    flagged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    flag: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    revert_scope: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    revert_pr_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revert_error: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    rolled_back_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    actor: Mapped[str] = mapped_column(String(256))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)

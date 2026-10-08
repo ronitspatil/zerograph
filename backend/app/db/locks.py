@@ -56,3 +56,16 @@ def acquire_pointer_gate(db: Session, tenant: str) -> None:
             text("SELECT pg_advisory_xact_lock(:namespace, hashtext(:tenant))"),
             {"namespace": POINTER_GATE_NAMESPACE, "tenant": tenant},
         )
+
+
+# Optimizer rollout: serializes canary gating and change creation per tenant (short,
+# never held across Git provider calls).
+ROLLOUT_LOCK_NAMESPACE = 0x5A49
+
+
+def acquire_rollout_lock(db: Session, tenant: str) -> None:
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(
+            text("SELECT pg_advisory_xact_lock(:namespace, hashtext(:tenant))"),
+            {"namespace": ROLLOUT_LOCK_NAMESPACE, "tenant": tenant},
+        )

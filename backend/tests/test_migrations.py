@@ -45,6 +45,8 @@ def test_initial_migration_is_repeatable_and_versioned(tmp_path, monkeypatch):
         "revision_proposal_models",
         "revision_proposals",
         "proposal_decisions",
+        "access_denials",
+        "rollout_changes",
         "alembic_version",
     }
     engine.dispose()

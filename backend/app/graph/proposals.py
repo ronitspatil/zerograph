@@ -113,7 +113,8 @@ NEVER_AUTO = {
     "structure": "Changes role or tool relationships (who can invoke or inherit what)",
 }
 NOTICE = (
-    "Proposed, not applied. Every proposal is reviewed by a person; pull requests come in Phase 4. "
+    "Proposed, not applied. Every proposal is reviewed by a person; accepted ones become draft pull requests "
+    "in your repository (ZeroGraph never merges or applies them). "
     "No proposal removes access that was observed used."
 )
 GRANT_CODES = frozenset({EDGE_CODE[EdgeType.READ.value], EDGE_CODE[EdgeType.WRITE.value]})

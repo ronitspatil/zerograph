@@ -601,3 +601,73 @@ export interface ProposalSimulation extends Simulation {
     notice: string;
   };
 }
+
+/** Optimizer rollout (draft pull requests in the customer's repository; nothing applied). */
+export type RolloutState =
+  "draft" | "pr_open" | "merged" | "verified" | "revert_open" | "rolled_back";
+
+export interface RolloutFile {
+  path: string;
+  principal: string;
+  op: "rewrite" | "add";
+  policy_kind: string;
+  policy_name: string;
+  remediation_id?: string;
+}
+
+export interface RolloutChange {
+  id: string;
+  scope: "role" | "topic";
+  topic_id: string;
+  subject_id: string;
+  subject_name: string;
+  state: RolloutState;
+  canary: boolean;
+  held: boolean;
+  held_reason: string;
+  revision: string;
+  proposal_ids: string[];
+  proposal_count: number;
+  draft_count: number;
+  principals: string[];
+  files: RolloutFile[];
+  pr_url: string | null;
+  pr_requested: boolean;
+  merged_at: string | null;
+  watch_days: number;
+  watch_ends: string | null;
+  watch_remaining_days: number | null;
+  verified_at: string | null;
+  flagged_at: string | null;
+  flag: {
+    events: number;
+    pairs: { principal: string; resource: string; count: number }[];
+  } | null;
+  revert_pr_url: string | null;
+  revert_requested: boolean;
+  revert_error: string | null;
+  rolled_back_at: string | null;
+  created_at: string;
+}
+
+export interface RolloutList {
+  changes: RolloutChange[];
+  canaries: Record<
+    string,
+    { change_id: string; subject_name: string; state: RolloutState } | null
+  >;
+  watch_days: number;
+  denied_threshold: number;
+  gitops_configured: boolean;
+  notice: string;
+}
+
+export interface ProposalDraft {
+  revision: string;
+  proposal_id: string;
+  pr_eligible: boolean;
+  reason: string | null;
+  text: string;
+  change_id: string | null;
+  notice: string;
+}
