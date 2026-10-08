@@ -119,6 +119,7 @@ export function ClusterCanvas({
   legend,
   label = "Global map",
   unit = "clusters",
+  restyle = null,
 }: {
   clusters: ClusterSummary[];
   links: ClusterLink[];
@@ -136,6 +137,15 @@ export function ClusterCanvas({
   /** Accessible name prefix and unit ("Topics map", "topics"). */
   label?: string;
   unit?: string;
+  /**
+   * In-place recolouring and link reweighting (the topics lens "Optimized" view): circle
+   * colors and link weights by ID (`source~target`), applied without rebuilding or moving
+   * anything. Links reweighted to 0 fade out.
+   */
+  restyle?: {
+    colors?: Map<string, string>;
+    weights?: Map<string, number>;
+  } | null;
 }) {
   const container = useRef<HTMLDivElement>(null);
   const cy = useRef<Core | null>(null);
@@ -254,6 +264,7 @@ export function ClusterCanvas({
         selector: "edge.hovered",
         css: { opacity: 0.85, "line-color": "#b7c7d8" },
       },
+      { selector: "edge.link-removed", css: { opacity: 0.06 } },
     ];
     const { cy: instance, renderer: kind } = createGraph(
       {
@@ -270,6 +281,9 @@ export function ClusterCanvas({
                 : (nodeColors[c.dominant_type] ?? "#73849a"),
               diameter: clusterDiameter(c.size, largest),
               size: c.size,
+              baseColor: colorOf
+                ? colorOf(c)
+                : (nodeColors[c.dominant_type] ?? "#73849a"),
             },
             position: { x: positions[i].x, y: positions[i].y },
           })),
@@ -279,6 +293,7 @@ export function ClusterCanvas({
               source: l.source,
               target: l.target,
               width: linkWidth(l.weight, heaviest),
+              weight: l.weight,
             },
           })),
         ],
@@ -777,6 +792,27 @@ export function ClusterCanvas({
     // The element set is rebuilt only when the clusters or links change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clusters, links]);
+  useEffect(() => {
+    const instance = cy.current;
+    if (!instance || instance.destroyed()) return;
+    const heaviest = Math.max(1, ...links.map((l) => l.weight));
+    instance.batch(() => {
+      instance.nodes().forEach((n) => {
+        if (n.hasClass("member")) return;
+        const color = restyle?.colors?.get(n.id()) ?? n.data("baseColor");
+        if (color && n.data("color") !== color) n.data("color", color);
+      });
+      instance.edges().forEach((e) => {
+        if (e.hasClass("member-edge")) return;
+        const base = e.data("weight") as number | undefined;
+        if (base === undefined) return;
+        const weight = restyle?.weights?.get(e.id()) ?? base;
+        e.data("width", linkWidth(weight, heaviest));
+        if (weight <= 0) e.addClass("link-removed");
+        else e.removeClass("link-removed");
+      });
+    });
+  }, [restyle, clusters, links]);
   useEffect(() => {
     sync.current(expansions);
   }, [expansions]);

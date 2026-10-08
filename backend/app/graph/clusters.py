@@ -31,6 +31,7 @@ from array import array
 from collections import Counter, deque
 from dataclasses import dataclass, field
 
+from psycopg.copy import QueuedLibpqWriter
 from pydantic import BaseModel
 from sqlalchemy import delete, insert, select, text
 from sqlalchemy.orm import Session
@@ -630,14 +631,27 @@ def compute_clusters(
     )
 
 
-def _bulk_insert(db: Session, model, columns: list[str], rows) -> None:
-    """COPY on PostgreSQL (one round trip per table); batched executemany elsewhere."""
+def _bulk_insert(db: Session, model, columns: list[str], rows, json_columns: tuple[int, ...] = ()) -> None:
+    """COPY on PostgreSQL (one round trip per table); batched executemany elsewhere.
+
+    The COPY data is sent from a writer thread, so the server ingests (heap and index inserts)
+    while this thread is still building and encoding the next rows. ``json_columns`` names the
+    positions holding JSON values, when the caller knows them (no per-value type checks).
+    """
     if db.get_bind().dialect.name == "postgresql":
         raw = db.connection().connection.driver_connection
         with raw.cursor() as cursor:
-            with cursor.copy(f"COPY {model.__tablename__} ({', '.join(columns)}) FROM STDIN") as copy:
-                for row in rows:
-                    copy.write_row([json.dumps(v) if isinstance(v, (dict, list)) else v for v in row])
+            statement = f"COPY {model.__tablename__} ({', '.join(columns)}) FROM STDIN"
+            with cursor.copy(statement, writer=QueuedLibpqWriter(cursor)) as copy:
+                if json_columns:
+                    for row in rows:
+                        row = list(row)
+                        for position in json_columns:
+                            row[position] = json.dumps(row[position])
+                        copy.write_row(row)
+                else:
+                    for row in rows:
+                        copy.write_row([json.dumps(v) if isinstance(v, (dict, list)) else v for v in row])
         return
     batch = []
     for row in rows:

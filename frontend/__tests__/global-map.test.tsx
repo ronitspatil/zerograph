@@ -11,6 +11,8 @@ import type {
   GraphNode,
   GraphView,
 } from "@/lib/types";
+// The status bar keeps an invisible copy of the top-level line as its sizer.
+const VISIBLE = { ignore: "script, style, [aria-hidden=true] *" };
 vi.mock("@/lib/api", async () => ({
   ...(await vi.importActual<typeof import("@/lib/api")>("@/lib/api")),
   api: vi.fn(),
@@ -192,7 +194,10 @@ describe("global map", () => {
         onOpenNeighborhood={open}
       />,
     );
-    const status = await screen.findByText(/2 \/ 2 top-level clusters/);
+    const status = await screen.findByText(
+      /2 \/ 2 top-level clusters/,
+      VISIBLE,
+    );
     expect(status).toHaveTextContent("12,040 entities");
     expect(status).toHaveTextContent("5,000 relationships");
     expect(status).toHaveTextContent("1 / 1 cluster links");
@@ -234,6 +239,15 @@ describe("global map", () => {
     // A leaf larger than the budget opens as a member level (canvas renderer, at most 500 shown).
     fireEvent.click(screen.getByRole("button", { name: "Group cc · 7,000" }));
     const members = await screen.findByText(/2 \/ 7,000 members/);
+    // The bar stays sized by the top-level line, with the level line clipped over it.
+    const bar = members.closest(".global-map-status")!;
+    expect(bar.querySelector(".sizer")).toHaveTextContent(
+      "2 / 2 top-level clusters",
+    );
+    expect(bar).toHaveAttribute(
+      "title",
+      expect.stringMatching(/^2 \/ 7,000 members .*Partial cluster\. Clusters/),
+    );
     expect(members).toHaveTextContent("0 / 900 relationships inside");
     expect(members).toHaveTextContent("Partial cluster");
     // Breadcrumb: back to the parent, or to the top level.
@@ -245,7 +259,7 @@ describe("global map", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open neighborhood" }));
     expect(open).toHaveBeenCalledWith("role:a", "rev-1");
     fireEvent.click(screen.getByRole("button", { name: "Global map" }));
-    await screen.findByText(/2 \/ 2 top-level clusters/);
+    await screen.findByText(/2 \/ 2 top-level clusters/, VISIBLE);
   });
 
   it("explains a revision without computed clusters and reports other errors", async () => {
@@ -290,7 +304,7 @@ describe("global map", () => {
       await screen.findByText(/checks again every 30 seconds/);
       computed = true;
       await vi.advanceTimersByTimeAsync(UNAVAILABLE_RETRY_MS);
-      await screen.findByText(/2 \/ 2 top-level clusters/);
+      await screen.findByText(/2 \/ 2 top-level clusters/, VISIBLE);
       retrying.unmount();
     } finally {
       vi.useRealTimers();
@@ -350,7 +364,7 @@ describe("global map", () => {
       "aria-pressed",
       "true",
     );
-    await screen.findByText(/2 \/ 2 top-level clusters/);
+    await screen.findByText(/2 \/ 2 top-level clusters/, VISIBLE);
     expect(
       screen.getByRole("heading", { name: "Global map" }),
     ).toBeInTheDocument();

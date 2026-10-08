@@ -17,6 +17,7 @@ import {
 } from "@/lib/graph-layout";
 import { formatCount } from "@/lib/format";
 import { overlayObstacles } from "@/lib/overlay-obstacles";
+import { edgeRemoved, type OverlaySets } from "@/lib/optimized";
 import { createGraph, WEBGL_MIN_NODES } from "@/lib/renderer";
 import type { GraphData, GraphNode, Simulation } from "@/lib/types";
 
@@ -37,12 +38,21 @@ export function GraphCanvas({
   riskNodes,
   simulation,
   onSelect,
+  overlay = null,
+  legendExtra,
+  outside,
 }: {
   graph: GraphData & { view?: { mode: "sample" | "neighborhood" | "roles" } };
   selected: string | null;
   riskNodes: Set<string>;
   simulation: Simulation | null;
   onSelect: (node: GraphNode) => void;
+  /** Optimized view: edges a proposal set removes (red dashed) and nodes it disables (grey). */
+  overlay?: OverlaySets | null;
+  /** Extra legend entries (e.g. the topic page's group rings). */
+  legendExtra?: { text: string; className: string }[];
+  /** Nodes drawn lighter (the topic page: assets of other topics). */
+  outside?: Set<string>;
 }) {
   const container = useRef<HTMLDivElement>(null);
   const cy = useRef<Core | null>(null);
@@ -50,6 +60,8 @@ export function GraphCanvas({
   selectedRef.current = selected;
   const riskRef = useRef(riskNodes);
   riskRef.current = riskNodes;
+  const outsideRef = useRef<Set<string> | undefined>(undefined);
+  outsideRef.current = outside;
   const applyFocus = useRef<() => void>(() => {});
   const fitView = useRef<() => void>(() => {});
   const callback = useRef(onSelect);
@@ -196,6 +208,32 @@ export function GraphCanvas({
         },
       },
       { selector: ".dimmed", css: { opacity: 0.16 } },
+      {
+        // Optimized view (what-if): removals red dashed, disabled nodes greyed out.
+        selector: "edge.removed",
+        css: {
+          "line-color": "#ef7f8a",
+          "line-style": "dashed",
+          "line-dash-pattern": [5, 3],
+          "target-arrow-color": "#ef7f8a",
+          opacity: 1,
+          width: 1.6,
+          "z-index": 2,
+        },
+      },
+      { selector: "edge.removed.focus-muted", css: { opacity: 0.3 } },
+      {
+        selector: "node.disabled",
+        css: {
+          "background-color": "#3c4757",
+          "border-width": 1,
+          "border-style": "dashed",
+          "border-color": "#8796a8",
+          opacity: 0.6,
+        },
+      },
+      { selector: "node.disabled.focus-muted", css: { opacity: 0.13 } },
+      { selector: "node.outside", css: { "background-opacity": 0.55 } },
     ];
     // Detail views (at most 500 nodes) keep the canvas renderer for the sharpest labels.
     cy.current = createGraph(
@@ -209,6 +247,7 @@ export function GraphCanvas({
               color: nodeColors[n.type],
               type: n.type,
             },
+            classes: outsideRef.current?.has(n.id) ? "outside" : "",
             position: { x: positions[i].x, y: positions[i].y },
           })),
           ...graph.edges.map((e) => ({
@@ -397,12 +436,29 @@ export function GraphCanvas({
   useEffect(() => {
     const instance = cy.current;
     if (!instance) return;
-    instance.elements().removeClass("selected risk affected dimmed");
+    instance
+      .elements()
+      .removeClass("selected risk affected dimmed removed disabled");
     applyFocus.current();
     instance.nodes().forEach((n) => {
       if (riskNodes.has(n.id())) n.addClass("risk");
       if (n.id() === selected) n.addClass("selected");
     });
+    if (overlay) {
+      instance.edges().forEach((e) => {
+        if (
+          edgeRemoved(overlay, {
+            source: e.data("source"),
+            target: e.data("target"),
+            type: e.data("type"),
+          })
+        )
+          e.addClass("removed");
+      });
+      instance.nodes().forEach((n) => {
+        if (overlay.disabled.has(n.id())) n.addClass("disabled");
+      });
+    }
     if (simulation) {
       const affected = new Set([
         simulation.source,
@@ -416,7 +472,7 @@ export function GraphCanvas({
         e.addClass(edges.has(e.id()) ? "affected" : "dimmed");
       });
     }
-  }, [selected, riskNodes, simulation, graph]);
+  }, [selected, riskNodes, simulation, graph, overlay]);
   function zoom(factor: number) {
     const c = cy.current;
     if (c)
@@ -485,6 +541,24 @@ export function GraphCanvas({
           <i className="risk-dot" />
           Risk path
         </span>
+        {legendExtra?.map((entry) => (
+          <span key={entry.text}>
+            <i className={entry.className} />
+            {entry.text}
+          </span>
+        ))}
+        {overlay && (
+          <>
+            <span>
+              <i className="legend-removed" />
+              Removed (what-if)
+            </span>
+            <span>
+              <i className="legend-disabled" />
+              Disabled (what-if)
+            </span>
+          </>
+        )}
       </div>
     </div>
   );

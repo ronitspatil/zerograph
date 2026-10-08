@@ -1216,35 +1216,51 @@ def topic_map(
 MEMBER_KINDS = ("resource", "role", "identity")
 
 
-def _members(db: Session, tenant: str, revision: str, topic: str, kind: str, offset: int, limit: int):
-    return [
-        _member(row)
-        for row in db.scalars(
-            select(RevisionTopicMember)
-            .where(
-                RevisionTopicMember.tenant_id == tenant,
-                RevisionTopicMember.revision == revision,
-                RevisionTopicMember.topic_id == topic,
-                RevisionTopicMember.kind == kind,
-                RevisionTopicMember.ordinal >= offset,
+MEMBER_ORDERS = ("rank", "excess")
+
+
+def _members(
+    db: Session, tenant: str, revision: str, topic: str, kind: str, offset: int, limit: int, order: str = "rank"
+):
+    scope = select(RevisionTopicMember).where(
+        RevisionTopicMember.tenant_id == tenant,
+        RevisionTopicMember.revision == revision,
+        RevisionTopicMember.topic_id == topic,
+        RevisionTopicMember.kind == kind,
+    )
+    if order == "excess":
+        # Largest granted-but-not-needed weight first (top EPI contributors); stable by rank.
+        query = (
+            scope.order_by(
+                (RevisionTopicMember.reach_weight - RevisionTopicMember.needed_weight).desc(),
+                RevisionTopicMember.ordinal,
             )
-            .order_by(RevisionTopicMember.ordinal)
+            .offset(offset)
             .limit(limit)
         )
-    ]
+    else:
+        query = (
+            scope.where(RevisionTopicMember.ordinal >= offset).order_by(RevisionTopicMember.ordinal).limit(limit)
+        )
+    return [_member(row) for row in db.scalars(query)]
 
 
 def topic_detail(
-    db: Session, tenant: str, revision: str, topic: str, kind: str, offset: int, limit: int
+    db: Session, tenant: str, revision: str, topic: str, kind: str, offset: int, limit: int, order: str = "rank"
 ) -> TopicDetailResponse:
     """One topic with a page of its assets, roles or identities, and its top over-privileged roles."""
-    if kind not in MEMBER_KINDS or not 1 <= limit <= MAX_PAGE or not 0 <= offset <= 1_000_000:
+    if (
+        kind not in MEMBER_KINDS
+        or order not in MEMBER_ORDERS
+        or not 1 <= limit <= MAX_PAGE
+        or not 0 <= offset <= 1_000_000
+    ):
         raise ValueError("Topic page outside supported bounds")
     row = db.get(RevisionTopic, (tenant, revision, topic))
     if not isinstance(row, RevisionTopic):
         raise TopicNotFound(topic)
     total = {"resource": row.resources, "role": row.roles, "identity": row.identities}[kind]
-    members = _members(db, tenant, revision, topic, kind, offset, limit)
+    members = _members(db, tenant, revision, topic, kind, offset, limit, order)
     top_roles = _members(db, tenant, revision, topic, "role", 0, TOP_ROLES)
     end = offset + len(members)
     return TopicDetailResponse(

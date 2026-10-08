@@ -57,16 +57,20 @@ export const UNAVAILABLE_RETRY_MS = 30_000;
  * its sub-groups as a new level. Members hand off to the bounded neighborhood
  * explorer.
  */
+let rememberedLens: "structure" | "topics" = "structure";
+
 export function GlobalMap({
   reloadKey,
   stale,
   onError,
   onOpenNeighborhood,
+  onOpenTopicPage,
 }: {
   reloadKey: number;
   stale: boolean;
   onError: (e: unknown) => void;
   onOpenNeighborhood: (nodeId: string, revision: string) => void;
+  onOpenTopicPage?: (topicId: string, revision: string) => void;
 }) {
   const [map, setMap] = useState<ClusterMap | null>(null);
   const [detail, setDetail] = useState<ClusterDetail | null>(null);
@@ -77,7 +81,14 @@ export function GlobalMap({
   const [expansions, setExpansions] = useState<MapExpansion[]>([]);
   const [expanding, setExpanding] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
-  const [lens, setLens] = useState<"structure" | "topics">("structure");
+  // Remembered across mounts: back from a topic page lands on the Topics lens again.
+  const [lens, setLensState] = useState<"structure" | "topics">(
+    () => rememberedLens,
+  );
+  const setLens = (next: "structure" | "topics") => {
+    rememberedLens = next;
+    setLensState(next);
+  };
   const request = useRef<AbortController | null>(null);
   const expandRequest = useRef<AbortController | null>(null);
   const begin = () => {
@@ -254,45 +265,34 @@ export function GlobalMap({
     return seen.size;
   };
 
-  // The structural status line; the Topics lens lays an invisible copy under its own
-  // so switching lenses never changes the bar height.
-  const statusLine = map ? (
-    <>
-      <span>
-        {!detail ? (
-          <>
-            {count(map.view.shown_clusters)} / {count(map.view.clusters)}{" "}
-            top-level clusters · {count(map.view.total_nodes)} entities ·{" "}
-            {count(map.view.total_edges)} relationships ·{" "}
-            {count(map.view.shown_links)} / {count(map.view.links)} cluster
-            links
-            {map.view.truncated ? " · Partial map" : " · Complete map"}
-          </>
-        ) : detail.view.mode === "clusters" ? (
-          <>
-            {count(detail.view.shown_children)} /{" "}
-            {count(detail.view.total_children)} child clusters ·{" "}
-            {count(detail.cluster.size)} entities ·{" "}
-            {count(detail.view.shown_links)} / {count(detail.view.total_links)}{" "}
-            links between them
-            {detail.view.truncated ? " · Partial level" : " · Complete level"}
-          </>
-        ) : (
-          <>
-            {count(detail.view.shown_members)} /{" "}
-            {count(detail.view.total_members)} members ·{" "}
-            {count(detail.view.shown_member_edges)} /{" "}
-            {count(detail.view.total_member_edges)} relationships inside ·{" "}
-            {count(detail.cluster.boundary_edges)} leave this cluster
-            {detail.view.truncated
-              ? " · Partial cluster"
-              : " · Complete cluster"}
-          </>
-        )}
-      </span>
-      <span className="global-map-notice">{map.view.notice}</span>
-    </>
-  ) : null;
+  // Status line text. An invisible copy of the top-level line (usually the longest) always
+  // sizes the bar, here and in the Topics lens, so drilling in or switching lenses never
+  // changes the bar height and never moves the canvas below; a longer level line is clipped.
+  const topStatus = map
+    ? `${count(map.view.shown_clusters)} / ${count(map.view.clusters)} top-level clusters · ` +
+      `${count(map.view.total_nodes)} entities · ${count(map.view.total_edges)} relationships · ` +
+      `${count(map.view.shown_links)} / ${count(map.view.links)} cluster links` +
+      (map.view.truncated ? " · Partial map" : " · Complete map")
+    : "";
+  const levelStatus = !detail
+    ? topStatus
+    : detail.view.mode === "clusters"
+      ? `${count(detail.view.shown_children)} / ${count(detail.view.total_children)} child clusters · ` +
+        `${count(detail.cluster.size)} entities · ` +
+        `${count(detail.view.shown_links)} / ${count(detail.view.total_links)} links between them` +
+        (detail.view.truncated ? " · Partial level" : " · Complete level")
+      : `${count(detail.view.shown_members)} / ${count(detail.view.total_members)} members · ` +
+        `${count(detail.view.shown_member_edges)} / ${count(detail.view.total_member_edges)} relationships inside · ` +
+        `${count(detail.cluster.boundary_edges)} leave this cluster` +
+        (detail.view.truncated ? " · Partial cluster" : " · Complete cluster");
+  const statusSpans = (text: string) =>
+    map ? (
+      <>
+        <span>{text}</span>
+        <span className="global-map-notice">{map.view.notice}</span>
+      </>
+    ) : null;
+  const statusSizer = statusSpans(topStatus);
   const lensSwitch = (
     <span className="global-map-lens" role="group" aria-label="Map lens">
       <button
@@ -323,7 +323,8 @@ export function GlobalMap({
           stale={stale}
           onError={onError}
           onOpenNeighborhood={onOpenNeighborhood}
-          statusSizer={statusLine}
+          onOpenTopicPage={onOpenTopicPage}
+          statusSizer={statusSizer}
         />
       </div>
     );
@@ -376,8 +377,19 @@ export function GlobalMap({
         ))}
         {lensSwitch}
       </nav>
-      <div className="exploration-status global-map-status" role="status">
-        {statusLine}
+      {/* The level line sits over a top-level sizer and is clipped to it; the full
+          text stays available on hover and to assistive technology. */}
+      <div
+        className="exploration-status global-map-status stacked reserved"
+        role="status"
+        title={
+          map.view.notice ? `${levelStatus}. ${map.view.notice}` : levelStatus
+        }
+      >
+        <div className="status-layer">{statusSpans(levelStatus)}</div>
+        <div className="status-layer sizer" aria-hidden="true">
+          {statusSizer}
+        </div>
       </div>
       <div className="graph-body">
         <div className="graph-main">

@@ -538,6 +538,75 @@ def test_retention_and_sweep_lifecycle(client, environment):
         assert db.scalar(select(func.count()).select_from(RevisionProposal)) == 0
 
 
+def test_filtered_pages_match_a_scan_of_the_stored_rows(client, environment):
+    """Tier and type filters read ordinal ranges from the summary counts; every filter's
+    pages and total must equal a plain filter of the revision's stored rows."""
+    from test_privilege import upload_usage
+
+    from app.graph.topics import backfill_missing
+
+    factory, _ = environment
+    snapshot, _, usage = generate_topics(2000, seed=11)
+    publish(client, snapshot)
+    upload_usage(client, snapshot, usage)
+    backfill_missing()
+    with factory() as db:
+        revision = db.get(TenantState, "tenant-a").revision
+        summary = P.stored_proposal_summary(db, "tenant-a", revision)
+        rows = list(
+            db.scalars(
+                select(RevisionProposal)
+                .where(RevisionProposal.tenant_id == "tenant-a", RevisionProposal.revision == revision)
+                .order_by(RevisionProposal.ordinal)
+            )
+        )
+        assert summary.total == len(rows) > 50
+        assert {r.tier for r in rows} >= {"high", "manual"} and len({r.type for r in rows}) >= 3
+        topics = sorted({r.topic_id for r in rows if r.topic_id})[:3] + ["t-missing"]
+        states = {r.proposal_id: ("accepted", "rejected")[n % 2] for n, r in enumerate(rows[::7])}
+        states["p-not-in-revision"] = "accepted"
+        for proposal_id_, state_ in states.items():
+            db.add(
+                ProposalDecision(
+                    tenant_id="tenant-a", proposal_id=proposal_id_, state=state_, actor="t", revision=revision, digest=""
+                )
+            )
+        db.flush()
+        # Ranges are contiguous blocks that cover the revision exactly once.
+        assert P.ordinal_ranges(summary.totals, None, None) == [(0, len(rows))]
+        filters = [{}]
+        filters += [{"tier": t} for t in P.TIERS]
+        filters += [{"kind": k} for k in P.TYPES]
+        filters += [{"tier": t, "kind": k} for t in P.TIERS for k in P.TYPES]
+        filters += [{"topic": t, **extra} for t in topics for extra in ({}, {"tier": "high"}, {"kind": "remove_grant"})]
+        filters += [{"tier": "high", "subject": rows[0].subject_id}]
+        filters += [
+            {"state": state_, **extra}
+            for state_ in ("pending", "accepted", "rejected")
+            for extra in ({}, {"tier": "high"}, {"kind": "remove_grant"}, {"topic": topics[0]},
+                          {"topic": topics[0], "kind": "remove_grant"}, {"subject": rows[0].subject_id})
+        ]  # fmt: skip
+        for chosen in filters:
+            expected = [
+                r.proposal_id
+                for r in rows
+                if chosen.get("tier") in (None, r.tier)
+                and chosen.get("kind") in (None, r.type)
+                and chosen.get("topic") in (None, r.topic_id)
+                and chosen.get("subject") in (None, r.subject_id, r.target_id)
+                and chosen.get("state") in (None, states.get(r.proposal_id, "pending"))
+            ]
+            found, cursor = [], None
+            while True:
+                page = P.proposal_page(db, summary, cursor=cursor, limit=37, **chosen)
+                assert page.view.total == len(expected), chosen
+                found += [p.id for p in page.proposals]
+                if page.view.next_cursor is None:
+                    break
+                cursor = page.view.next_cursor
+            assert found == expected, chosen
+
+
 def test_changes_of_reads_view_changes():
     removed, cut, disabled = changes_of(
         [

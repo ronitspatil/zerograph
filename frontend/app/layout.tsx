@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import "./global-map.css";
+import "./optimized.css";
 /** Bump when the icon artwork changes so browsers drop cached tab icons. */
 const ICON_VERSION = "5";
 export const metadata: Metadata = {

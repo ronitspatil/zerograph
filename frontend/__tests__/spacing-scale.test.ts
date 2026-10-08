@@ -8,7 +8,7 @@ const allowed = (selector: string, px: number) =>
   px === 0 || px === 1 || (px === 2 && selector.includes(".graph-view-switch"));
 
 describe("Spacing scale", () => {
-  it.each(["app/globals.css", "app/global-map.css"])(
+  it.each(["app/globals.css", "app/global-map.css", "app/optimized.css"])(
     "keeps every margin, padding and gap in %s on 4px steps",
     (file) => {
       const css = readFileSync(resolve(file), "utf8");

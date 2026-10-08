@@ -114,7 +114,10 @@ revert PR / Mark reverted / Discard.
 `scripts/qualify_rollout.py` (planted 100k on Memgraph and PostgreSQL, Git through the local
 fake provider `tests/fake_git.py`; no network): diff correctness by re-evaluating every
 grant edge of each touched principal, the canary flow, a byte-for-byte revert, an
-AccessDenied-triggered revert, and a re-ingest round trip against the what-if model.
+AccessDenied-triggered revert, and a re-ingest round trip against the what-if model. The
+accepted sample is deterministic for a seed (stable IDs only, never the run date) and is
+topped up round-robin across topics until at least `--min-scopings` (500) resource
+scopings are accepted.
 
 ## Limits
 

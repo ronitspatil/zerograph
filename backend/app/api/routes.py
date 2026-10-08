@@ -24,6 +24,8 @@ from app.db.models import (
     IngestionJob,
     Remediation,
     RevisionAnalysis,
+    RevisionProposal,
+    RevisionTopic,
     RolloutChange,
     StagedEntity,
     TenantState,
@@ -38,8 +40,8 @@ from app.engine.analysis_index import WEIGHTS
 from app.engine.blast_radius import BlastRadius, apply_overlay
 from app.engine.blast_radius import simulate as simulate_reach
 from app.engine.toxic_combos import Finding
+from app.graph import optimized, usage
 from app.graph import proposals as optimizer
-from app.graph import usage
 from app.graph.analysis import (
     UnknownCursor,
     compute_analysis,
@@ -402,10 +404,13 @@ def graph_topic(
     kind: Literal["resource", "role", "identity"] = "resource",
     offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
     limit: Annotated[int, Query(ge=1, le=MAX_PAGE)] = 50,
+    sort: Literal["rank", "excess"] = "rank",
     revision: str | None = None,
 ):
     """One topic with a page of its data assets, roles or identities (profiles and flags) and
-    its most over-privileged roles. Granted (structural) access, not needed access."""
+    its most over-privileged roles. Granted (structural) access, not needed access.
+    ``sort=excess`` orders roles and identities by granted minus needed weight (the topic's
+    top excess-privilege contributors)."""
     current = expected_revision(db, actor.tenant_id, revision)
     _topic_summary(db, actor.tenant_id, current)
     try:
@@ -413,9 +418,88 @@ def graph_topic(
     except RevisionUnavailable:
         raise _unavailable() from None
     try:
-        return topic_detail(db, actor.tenant_id, current, topic_id, kind, offset, limit)
+        return topic_detail(db, actor.tenant_id, current, topic_id, kind, offset, limit, sort)
     except TopicNotFound:
         raise HTTPException(404, "Topic not found in this revision") from None
+
+
+class TopicSubgraphView(BaseModel):
+    # Entities shown per group and the topic's totals: its roles, identities and data
+    # assets, and the outside assets its shown roles have removal proposals on.
+    shown: dict[str, int]
+    totals: dict[str, int]
+    edge_limit: int
+    truncated: bool
+
+
+class TopicSubgraphResponse(BaseModel):
+    revision: str
+    topic_id: str
+    nodes: list[Node]
+    edges: list[dict]
+    # Entity ID -> "role", "identity", "resource" or "outside" (an asset of another topic).
+    groups: dict[str, str]
+    warnings: list[str]
+    view: TopicSubgraphView
+
+
+@router.get("/graph/topics/{topic_id}/subgraph", response_model=TopicSubgraphResponse)
+def graph_topic_subgraph(
+    db: DB,
+    graph: Graph,
+    actor: Viewer,
+    topic_id: Annotated[str, Path(pattern=TOPIC_ID)],
+    roles: Annotated[int, Query(ge=0, le=optimized.SLICE_LIMITS["role"])] = 40,
+    identities: Annotated[int, Query(ge=0, le=optimized.SLICE_LIMITS["identity"])] = 40,
+    resources: Annotated[int, Query(ge=0, le=optimized.SLICE_LIMITS["resource"])] = 80,
+    outside: Annotated[int, Query(ge=0, le=optimized.SLICE_LIMITS["outside"])] = 120,
+    edge_limit: Annotated[int, Query(ge=1, le=2000)] = 2000,
+    revision: str | None = None,
+):
+    """A topic's bounded subgraph for the explorer canvas: its first roles, identities and data
+    assets (by their topic rank), the assets of other topics its shown roles have removal
+    proposals on, and the relationships among them (at most 500 entities). Overlay a proposal
+    set with POST /proposals/overlay. Granted (structural) access, not needed access."""
+    current = expected_revision(db, actor.tenant_id, revision)
+    _topic_summary(db, actor.tenant_id, current)
+    row = db.get(RevisionTopic, (actor.tenant_id, current, topic_id))
+    if not isinstance(row, RevisionTopic):
+        raise HTTPException(404, "Topic not found in this revision")
+    groups = optimized.topic_slice(
+        db,
+        actor.tenant_id,
+        current,
+        topic_id,
+        {"role": roles, "identity": identities, "resource": resources, "outside": outside},
+        optimizer.load_model(db, actor.tenant_id, current),
+    )
+    kind_of: dict[str, str] = {}
+    for kind in ("role", "identity", "resource", "outside"):
+        for entity in groups[kind]:
+            kind_of.setdefault(entity, kind)
+    try:
+        found = graph.cluster_members(actor.tenant_id, current, list(kind_of), edge_limit)
+    except RevisionUnavailable:
+        raise _unavailable() from None
+    edges = found.edges[:edge_limit]
+    present = {node.id for node in found.nodes}
+    return TopicSubgraphResponse(
+        revision=current,
+        topic_id=topic_id,
+        nodes=found.nodes,
+        edges=[{**edge.model_dump(mode="json"), "id": edge.id} for edge in edges],
+        groups={entity: kind for entity, kind in kind_of.items() if entity in present},
+        warnings=found.warnings,
+        view=TopicSubgraphView(
+            shown={kind: sum(1 for e in groups[kind] if kind_of[e] == kind and e in present) for kind in groups},
+            totals={"role": row.roles, "identity": row.identities, "resource": row.resources},
+            edge_limit=edge_limit,
+            truncated=len(found.edges) > edge_limit
+            or len(groups["role"]) < row.roles
+            or len(groups["identity"]) < row.identities
+            or len(groups["resource"]) < row.resources,
+        ),
+    )
 
 
 @router.get("/graph/policies", response_model=PrincipalPoliciesResponse)
@@ -813,6 +897,210 @@ def proposal_metrics(request: MetricsRequest, db: DB, actor: Viewer, response: R
         "revision": current,
         "selected": len(ordinals),
         **model.evaluate(model.selection(ordinals)),
+        "notice": optimizer.NOTICE,
+    }
+
+
+def _selected(db: Session, tenant: str, revision: str, request: "MetricsRequest"):
+    """(model, selection key, selection) of a proposal set of the pinned revision."""
+    model = optimizer.load_model(db, tenant, revision)
+    if model is None:
+        raise _proposals_missing()
+    try:
+        ordinals = optimizer.selected_ordinals(
+            db, tenant, revision, request.proposal_ids, request.tier, request.decision, model
+        )
+    except optimizer.ProposalNotFound as exc:
+        raise HTTPException(404, f"Proposal not found in this revision: {exc}") from None
+    key = optimized.selection_key(tenant, revision, ordinals)
+    return model, key, ordinals, optimized.selection_of(model, key, ordinals)
+
+
+class OverlayRequest(MetricsRequest):
+    # The visible slice: entity IDs on screen (explorer view, neighborhood or topic subgraph).
+    node_ids: list[Annotated[str, Field(min_length=1, max_length=512)]] = Field(
+        min_length=1, max_length=optimized.MAX_SLICE
+    )
+
+
+@router.post("/proposals/overlay")
+def proposal_overlay(request: OverlayRequest, db: DB, actor: Viewer, response: Response):
+    """The optimized view of a visible slice: the grants a proposal set (explicit IDs, a tier
+    and/or the accepted ones) would remove, the role or tool hops it would cut and the nodes
+    it would disable, restricted to edges and nodes inside the slice, with the set's
+    graph-wide counts (as /proposals/metrics reports them). Simulated, never applied."""
+    current = expected_revision(db, actor.tenant_id, request.revision)
+    _proposal_summary(db, actor.tenant_id, current)
+    model, _, ordinals, chosen = _selected(db, actor.tenant_id, current, request)
+    found = optimized.slice_overlay(model, chosen, request.node_ids)
+    response.headers["X-Graph-Revision"] = current
+    return {
+        "revision": current,
+        "selected": len(ordinals),
+        "removed_edges": [{"source": a, "target": b, "kind": "grant"} for a, b in found.removed]
+        + [{"source": a, "target": b, "kind": "hop"} for a, b in found.cut],
+        "disabled_nodes": found.disabled,
+        "slice": {
+            "nodes": len(set(request.node_ids)),
+            "outside_model": found.unknown,
+            "grants_removed": len(found.removed),
+            "hops_cut": len(found.cut),
+            "disabled_nodes": len(found.disabled),
+        },
+        "totals": optimized.selection_totals(model, chosen),
+        "applied": dict(sorted(chosen.applied.items())),
+        "applied_tiers": dict(sorted(chosen.tiers.items())),
+        "skipped": dict(sorted(chosen.skipped.items())),
+        "notice": optimizer.NOTICE,
+    }
+
+
+@router.post("/proposals/links")
+def proposal_links(request: MetricsRequest, db: DB, actor: Viewer, response: Response):
+    """The optimized topics map: cross-topic grants a proposal set would remove per topic link
+    (counted like the map's links) and each topic's excess privilege before and after."""
+    current = expected_revision(db, actor.tenant_id, request.revision)
+    _topic_summary(db, actor.tenant_id, current)
+    _proposal_summary(db, actor.tenant_id, current)
+    model, key, ordinals, chosen = _selected(db, actor.tenant_id, current, request)
+    assets = optimized.resource_topics(db, actor.tenant_id, current, model)
+    evaluated = optimized.evaluation_of(model, key, chosen)
+    response.headers["X-Graph-Revision"] = current
+    return {
+        "revision": current,
+        "selected": len(ordinals),
+        "links": optimized.link_removals(model, assets, chosen),
+        "topics": evaluated["topics"],
+        "graph": evaluated["graph"],
+        "counts": evaluated["counts"],
+        "skipped": evaluated["skipped"],
+        "notice": optimizer.NOTICE,
+    }
+
+
+@router.get("/proposals/overview")
+def proposals_overview(db: DB, actor: Viewer, response: Response, revision: str | None = None):
+    """Overview tiles: graph-wide excess privilege now, after the accepted proposals and after
+    the high tier (with and without hubs), dormant identities, unused grants on restricted
+    data, decisions, and rollout changes by state (pull requests open, canaries watching,
+    verified, rolled back). What-if only: nothing is applied."""
+    current = expected_revision(db, actor.tenant_id, revision)
+    summary = _proposal_summary(db, actor.tenant_id, current)
+    totals = summary.totals if isinstance(summary.totals, dict) else json.loads(summary.totals)
+    model, key, ordinals, chosen = _selected(
+        db, actor.tenant_id, current, MetricsRequest(decision="accepted", revision=current)
+    )
+    accepted = optimized.evaluation_of(model, key, chosen)
+    if rollout.refresh(db, actor.tenant_id):
+        db.commit()
+    states = dict(
+        db.execute(
+            select(RolloutChange.state, func.count())
+            .where(RolloutChange.tenant_id == actor.tenant_id)
+            .group_by(RolloutChange.state)
+        ).all()
+    )
+    watching = db.scalar(
+        select(func.count())
+        .select_from(RolloutChange)
+        .where(
+            RolloutChange.tenant_id == actor.tenant_id,
+            RolloutChange.state == "merged",
+            RolloutChange.canary.is_(True),
+        )
+    )
+    privilege = stored_privilege(db, actor.tenant_id, current) or {}
+    response.headers["X-Graph-Revision"] = current
+    return {
+        "revision": current,
+        "evidence": totals.get("evidence", {"status": "none"}),
+        "now": {kind: accepted["graph"][kind]["before"] for kind in ("roles", "identities")},
+        "after_accepted": {kind: accepted["graph"][kind]["after"] for kind in ("roles", "identities")},
+        "after_high": {kind: totals["high_tier"]["graph"][kind]["after"] for kind in ("roles", "identities")},
+        "accepted": {"selected": len(ordinals), "counts": accepted["counts"]},
+        "high": {"selected": totals["by_tier"].get("high", 0), "counts": totals["high_tier"]["counts"]},
+        "decisions": optimizer.decision_counts(db, actor.tenant_id, current),
+        "dormant_identities": privilege.get("dormant_identities", 0),
+        "dormant_roles": privilege.get("dormant_roles", 0),
+        "unused_grants": privilege.get("unused_grants", 0),
+        "unused_restricted_grants": privilege.get("unused_restricted_grants", 0),
+        "rollout": {
+            **{state: states.get(state, 0) for state in rollout.STATES},
+            "canary_watching": watching or 0,
+        },
+        "notice": optimizer.NOTICE,
+    }
+
+
+BULK_MAX = 500
+
+
+class BulkDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    proposal_ids: list[ProposalId] = Field(min_length=1, max_length=BULK_MAX)
+    state: Literal["accepted", "rejected", "pending"]
+    # Bulk decisions stay within one tier and one topic (safety model): every proposal must match.
+    tier: Literal[optimizer.TIERS]
+    topic_id: Annotated[str, Field(pattern=TOPIC_ID)]
+    note: str = Field(default="", max_length=500)
+    revision: str | None = Field(default=None, max_length=128)
+
+
+@router.post("/proposals/decisions")
+def decide_proposals(request: BulkDecisionRequest, db: DB, actor: Admin):
+    """Accept, reject or clear up to 500 proposals at once, all of one tier and one topic
+    (manual-tier proposals are decided one at a time). Each decision is audited like a single
+    one; nothing is applied."""
+    if request.tier == "manual" and request.state == "accepted":
+        raise HTTPException(422, "Manual-tier proposals are accepted one at a time")
+    current = expected_revision(db, actor.tenant_id, request.revision)
+    _proposal_summary(db, actor.tenant_id, current)
+    ids = sorted(set(request.proposal_ids))
+    rows = list(
+        db.scalars(
+            select(RevisionProposal).where(
+                RevisionProposal.tenant_id == actor.tenant_id,
+                RevisionProposal.revision == current,
+                RevisionProposal.proposal_id.in_(ids),
+            )
+        )
+    )
+    missing = sorted(set(ids) - {row.proposal_id for row in rows})
+    if missing:
+        raise HTTPException(404, f"Proposal not found in this revision: {','.join(missing[:5])}")
+    if any(row.tier != request.tier or row.topic_id != request.topic_id for row in rows):
+        raise HTTPException(422, "Bulk decisions are limited to proposals of one tier and one topic")
+    action = {"accepted": "proposal.accepted", "rejected": "proposal.rejected"}.get(
+        request.state, "proposal.cleared"
+    )
+    for row in sorted(rows, key=lambda r: r.ordinal):
+        optimizer.decide(
+            db, actor.tenant_id, current, row.proposal_id, request.state, actor.subject, request.note
+        )
+        audit(
+            db,
+            actor,
+            action,
+            {
+                "proposal_id": row.proposal_id,
+                "revision": current,
+                "type": row.type,
+                "tier": row.tier,
+                "subject": row.subject_id,
+                "target": row.target_id,
+                "digest": row.digest,
+                "note": request.note,
+                "bulk": {"tier": request.tier, "topic_id": request.topic_id, "count": len(rows)},
+            },
+        )
+    db.commit()
+    return {
+        "revision": current,
+        "state": request.state,
+        "decided": len(rows),
+        "tier": request.tier,
+        "topic_id": request.topic_id,
+        "decisions": optimizer.decision_counts(db, actor.tenant_id, current),
         "notice": optimizer.NOTICE,
     }
 
