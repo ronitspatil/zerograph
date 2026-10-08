@@ -288,10 +288,12 @@
 .global-map-status.reserved {
   position: relative;
 }
+/* Absolutely positioned in the sizer's grid cell (explicit end lines: an auto end would
+   reach the padding edge), so it covers exactly the sizer's box. */
 .global-map-status.reserved > .status-layer:not(.sizer) {
+  grid-area: 1 / 1 / 2 / 2;
   position: absolute;
   inset: 0;
-  padding: inherit;
   align-content: flex-start;
   overflow: hidden;
 }
