@@ -103,6 +103,12 @@ export const REFINE_ITERATIONS = 240;
 const SPRING = 46; // Ideal relationship length (layout units).
 
 /**
+ * Unique numeric key for an integer grid cell. Exact for |row| < 2^25 and
+ * |column| < 2^27, far beyond any reachable coordinate / cutoff.
+ */
+const cellKey = (column: number, row: number) => column * 2 ** 26 + row;
+
+/**
  * Bounded Fruchterman-Reingold refinement, in place. Repulsion acts within
  * 3 x SPRING through a spatial hash (no all-pairs pass), relationships are
  * springs, members are tethered (reciprocally) to their community's role,
@@ -153,9 +159,10 @@ function refine(
   for (let iteration = 0; iteration < REFINE_ITERATIONS; iteration++) {
     dx.fill(0);
     dy.fill(0);
-    const grid = new Map<string, number[]>();
+    // Spatial hash on numeric cell keys (string keys dominated the run time).
+    const grid = new Map<number, number[]>();
     for (let i = 0; i < count; i++) {
-      const key = `${Math.floor(x[i] / cutoff)}:${Math.floor(y[i] / cutoff)}`;
+      const key = cellKey(Math.floor(x[i] / cutoff), Math.floor(y[i] / cutoff));
       const cell = grid.get(key);
       if (cell) cell.push(i);
       else grid.set(key, [i]);
@@ -165,7 +172,7 @@ function refine(
         gy = Math.floor(y[i] / cutoff);
       for (let ox = -1; ox <= 1; ox++)
         for (let oy = -1; oy <= 1; oy++) {
-          const cell = grid.get(`${gx + ox}:${gy + oy}`);
+          const cell = grid.get(cellKey(gx + ox, gy + oy));
           if (!cell) continue;
           for (const j of cell) {
             if (j <= i) continue;
