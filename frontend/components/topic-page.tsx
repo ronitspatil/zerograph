@@ -262,7 +262,6 @@ export function TopicPage({
   const measured = !!summary && summary.evidence.status !== "none";
   const proposals = summary?.topics[topicId];
   const after = whatif?.topics.find((t) => t.topic_id === topicId);
-  const widest = Math.max(1, ...roles.map((r) => r.reach_weight));
   return (
     <section className="topic-page" aria-label="Topic">
       <div className="topic-page-head">
@@ -492,7 +491,7 @@ export function TopicPage({
           </div>
           <div className="role-bars">
             {roles.map((r) => (
-              <RoleBar key={r.id} role={r} widest={widest} />
+              <RoleBar key={r.id} role={r} />
             ))}
             {detail && !roles.length && (
               <p className="empty-line">No roles in this topic.</p>
@@ -502,7 +501,8 @@ export function TopicPage({
             <span className="role-bar-key">
               <i className="needed" aria-hidden="true" /> Needed (used or
               inferred)
-              <i className="excess" aria-hidden="true" /> Granted, not needed
+              <i className="excess" aria-hidden="true" /> Granted, not needed ·
+              share of each role&apos;s granted weight
             </span>
             <Button
               variant="outline"
@@ -694,11 +694,12 @@ function TierRow({
 }
 
 /** Granted weight split into needed and not needed (compact stacked bar). */
-function RoleBar({ role, widest }: { role: TopicMember; widest: number }) {
+function RoleBar({ role }: { role: TopicMember }) {
   const granted = role.reach_weight;
   const needed = Math.min(granted, role.needed_weight ?? 0);
   const measured = role.basis === "used" || role.basis === "inferred";
-  const scale = (value: number) => `${(value / widest) * 100}%`;
+  // Each bar is the role's own granted weight (hub roles would flatten a shared scale).
+  const scale = (value: number) => `${granted ? (value / granted) * 100 : 0}%`;
   return (
     <div className="role-bar">
       <div className="role-bar-label">

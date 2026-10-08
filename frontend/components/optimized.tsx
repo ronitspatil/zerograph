@@ -176,9 +176,11 @@ export function overlayStatus(
   if (!overlay.selected)
     return `${setDescription(set)}: no proposals selected, nothing would change.`;
   const { slice, totals } = overlay;
+  const n = (value: number, one: string, many: string) =>
+    `${count(value)} ${value === 1 ? one : many}`;
   return (
-    `${setDescription(set)} · in view: ${count(slice.grants_removed + slice.hops_cut)} edges removed, ` +
-    `${count(slice.disabled_nodes)} nodes disabled · whole graph: ${count(totals.grants_removed)} grants, ` +
-    `${count(totals.hops_cut)} hops, ${count(totals.disabled_nodes)} nodes · simulated, not applied`
+    `${setDescription(set)} · in view: ${n(slice.grants_removed + slice.hops_cut, "edge", "edges")} removed, ` +
+    `${n(slice.disabled_nodes, "node", "nodes")} disabled · whole graph: ${n(totals.grants_removed, "grant", "grants")}, ` +
+    `${n(totals.hops_cut, "hop", "hops")}, ${n(totals.disabled_nodes, "node", "nodes")} · simulated, not applied`
   );
 }
