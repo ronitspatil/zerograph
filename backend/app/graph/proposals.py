@@ -51,7 +51,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from pydantic import BaseModel
-from sqlalchemy import delete, false, func, or_, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import Session
 
 from app.db.locks import acquire_publication_lock, try_publication_lock
@@ -935,8 +935,12 @@ def _changes(proposal: Proposal, computed, edges: dict) -> list[dict]:
     return changes
 
 
+# json.dumps(row, sort_keys=True, default=str), without building an encoder per row.
+_DIGEST_JSON = json.JSONEncoder(sort_keys=True, default=str).encode
+
+
 def _digest(row: tuple) -> str:
-    return hashlib.sha256(json.dumps(row, sort_keys=True, default=str).encode()).hexdigest()[:16]
+    return hashlib.sha256(_DIGEST_JSON(row).encode()).hexdigest()[:16]
 
 
 PROPOSAL_COLUMNS = [
@@ -1205,13 +1209,9 @@ def proposal_page(
     tenant, revision = summary.tenant_id, summary.revision
     totals = summary.totals if isinstance(summary.totals, dict) else json.loads(summary.totals)
     scope = [RevisionProposal.tenant_id == tenant, RevisionProposal.revision == revision]
-    ranges = None
-    if tier or kind:
-        # Rows are stored tier first, then type: the filter is a few ordinal ranges, read
-        # through the order index (no per-tier or per-type index is kept).
-        ranges = ordinal_ranges(totals, tier, kind)
-        bounds = [RevisionProposal.ordinal.between(low, high - 1) for low, high in ranges]
-        scope.append(or_(*bounds) if bounds else false())
+    # Rows are stored tier first, then type: a tier or type filter is a few ordinal ranges,
+    # each read through the order index (no per-tier or per-type index is kept).
+    ranges = ordinal_ranges(totals, tier, kind) if tier or kind else None
     if tier:
         scope.append(RevisionProposal.tier == tier)
     if kind:
@@ -1220,21 +1220,45 @@ def proposal_page(
         scope.append(RevisionProposal.topic_id == topic)
     if subject:
         scope.append((RevisionProposal.subject_id == subject) | (RevisionProposal.target_id == subject))
+    ordinal = RevisionProposal.ordinal
+    total = None if subject else summary_count(totals, tier, kind, topic, ranges)
+    if state and total is not None:
+        # Decided proposals of the filter, looked up by primary key (decisions are few).
+        decided_ = _decided_ids(db, tenant, None if state == "pending" else state)
+        found = 0
+        for start_ in range(0, len(decided_), DECIDED_BATCH):
+            batch = decided_[start_ : start_ + DECIDED_BATCH]
+            found += db.scalar(
+                select(func.count())
+                .select_from(RevisionProposal)
+                .where(*scope, RevisionProposal.proposal_id.in_(batch))
+            )
+        total = total - found if state == "pending" else found
     if state:
         decided = select(ProposalDecision.proposal_id).where(ProposalDecision.tenant_id == tenant)
         if state == "pending":
             scope.append(RevisionProposal.proposal_id.not_in(decided))
         else:
             scope.append(RevisionProposal.proposal_id.in_(decided.where(ProposalDecision.state == state)))
-    total = None
-    if not (subject or state):
-        total = summary_count(totals, tier, kind, topic, ranges)
     if total is None:
-        total = db.scalar(select(func.count()).select_from(RevisionProposal).where(*scope))
-    query = select(RevisionProposal).where(*scope)
-    if cursor is not None:
-        query = query.where(RevisionProposal.ordinal > cursor)
-    rows = list(db.scalars(query.order_by(RevisionProposal.ordinal).limit(limit)))
+        total = sum(
+            db.scalar(
+                select(func.count())
+                .select_from(RevisionProposal)
+                .where(*scope, *([ordinal >= low, ordinal < high] if high is not None else []))
+            )
+            for low, high in (ranges if ranges is not None else [(0, None)])
+        )
+    start = 0 if cursor is None else cursor + 1
+    rows: list[RevisionProposal] = []
+    for low, high in ranges if ranges is not None else [(0, None)]:
+        if high is not None and high <= start:
+            continue
+        bounded = [ordinal >= max(low, start)] + ([ordinal < high] if high is not None else [])
+        query = select(RevisionProposal).where(*scope, *bounded).order_by(ordinal).limit(limit - len(rows))
+        rows += db.scalars(query)
+        if len(rows) == limit:
+            break
     decisions = _decisions(db, tenant, [row.proposal_id for row in rows])
     return ProposalListResponse(
         revision=revision,

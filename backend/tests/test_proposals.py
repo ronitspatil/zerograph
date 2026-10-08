@@ -563,6 +563,15 @@ def test_filtered_pages_match_a_scan_of_the_stored_rows(client, environment):
         assert summary.total == len(rows) > 50
         assert {r.tier for r in rows} >= {"high", "manual"} and len({r.type for r in rows}) >= 3
         topics = sorted({r.topic_id for r in rows if r.topic_id})[:3] + ["t-missing"]
+        states = {r.proposal_id: ("accepted", "rejected")[n % 2] for n, r in enumerate(rows[::7])}
+        states["p-not-in-revision"] = "accepted"
+        for proposal_id_, state_ in states.items():
+            db.add(
+                ProposalDecision(
+                    tenant_id="tenant-a", proposal_id=proposal_id_, state=state_, actor="t", revision=revision, digest=""
+                )
+            )
+        db.flush()
         # Ranges are contiguous blocks that cover the revision exactly once.
         assert P.ordinal_ranges(summary.totals, None, None) == [(0, len(rows))]
         filters = [{}]
@@ -570,7 +579,13 @@ def test_filtered_pages_match_a_scan_of_the_stored_rows(client, environment):
         filters += [{"kind": k} for k in P.TYPES]
         filters += [{"tier": t, "kind": k} for t in P.TIERS for k in P.TYPES]
         filters += [{"topic": t, **extra} for t in topics for extra in ({}, {"tier": "high"}, {"kind": "remove_grant"})]
-        filters += [{"tier": "high", "subject": rows[0].subject_id}, {"kind": "remove_grant", "state": "pending"}]
+        filters += [{"tier": "high", "subject": rows[0].subject_id}]
+        filters += [
+            {"state": state_, **extra}
+            for state_ in ("pending", "accepted", "rejected")
+            for extra in ({}, {"tier": "high"}, {"kind": "remove_grant"}, {"topic": topics[0]},
+                          {"topic": topics[0], "kind": "remove_grant"}, {"subject": rows[0].subject_id})
+        ]  # fmt: skip
         for chosen in filters:
             expected = [
                 r.proposal_id
@@ -579,6 +594,7 @@ def test_filtered_pages_match_a_scan_of_the_stored_rows(client, environment):
                 and chosen.get("kind") in (None, r.type)
                 and chosen.get("topic") in (None, r.topic_id)
                 and chosen.get("subject") in (None, r.subject_id, r.target_id)
+                and chosen.get("state") in (None, states.get(r.proposal_id, "pending"))
             ]
             found, cursor = [], None
             while True:
