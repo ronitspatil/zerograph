@@ -223,6 +223,13 @@ def test_topic_subgraph_is_bounded_and_grouped(client, environment, optimized_te
     )
     assert client.get(f"/api/v1/graph/topics/{topic}/subgraph", params={"roles": 61}).status_code == 422
     assert client.get("/api/v1/graph/topics/t000000000000000/subgraph").status_code == 404
+    # Top excess-privilege contributors: roles by granted minus needed weight.
+    excess = client.get(
+        f"/api/v1/graph/topics/{topic}", params={"kind": "role", "sort": "excess", "limit": 20}
+    ).json()
+    gaps = [m["reach_weight"] - m["needed_weight"] for m in excess["members"]]
+    assert gaps == sorted(gaps, reverse=True) and len(gaps) == min(20, excess["view"]["total"])
+    assert client.get(f"/api/v1/graph/topics/{topic}", params={"sort": "bogus"}).status_code == 422
     assert client.get(f"/api/v1/graph/topics/{topic}/subgraph", params={"revision": "old"}).status_code == 409
 
 

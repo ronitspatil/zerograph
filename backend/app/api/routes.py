@@ -471,6 +471,7 @@ def graph_topic_subgraph(
         current,
         topic_id,
         {"role": roles, "identity": identities, "resource": resources, "outside": outside},
+        optimizer.load_model(db, actor.tenant_id, current),
     )
     kind_of: dict[str, str] = {}
     for kind in ("role", "identity", "resource", "outside"):

@@ -190,8 +190,45 @@ def link_removals(model: WhatIfModel, assets: dict[int, int], chosen: Selection)
     ]
 
 
-def topic_slice(db: Session, tenant: str, revision: str, topic: str, limits: dict[str, int]) -> dict:
-    """Entity IDs of a topic's bounded subgraph, grouped: role, identity, resource, outside."""
+def _connected(
+    model: WhatIfModel, assets: dict[int, int], topic: str, roles: list[str], limits: dict
+) -> dict:
+    """The topic's data assets the shown roles grant directly and its identities that can
+    assume (or invoke, inherit) them, so the subgraph is connected rather than a sample."""
+    by_id, primary = indexes(model)
+    position = next((i for i, (topic_id, _) in enumerate(model.topics) if topic_id == topic), -1)
+    shown = [by_id[role] for role in roles if role in by_id]
+    targets = set(shown)
+    resources: list[str] = []
+    for role in shown:
+        for item in sorted(model.direct.get(role, ())):
+            if assets.get(item) == position and model.ids[item] not in resources:
+                resources.append(model.ids[item])
+                if len(resources) >= limits.get("resource", 0):
+                    break
+        if len(resources) >= limits.get("resource", 0):
+            break
+    identities = sorted(
+        model.ids[source]
+        for source, following in model.hops.items()
+        if source not in targets and primary.get(source) == position and not targets.isdisjoint(following)
+    )[: limits.get("identity", 0)]
+    return {"resource": resources, "identity": identities}
+
+
+def topic_slice(
+    db: Session,
+    tenant: str,
+    revision: str,
+    topic: str,
+    limits: dict[str, int],
+    model: WhatIfModel | None = None,
+) -> dict:
+    """Entity IDs of a topic's bounded subgraph, grouped: role, identity, resource, outside.
+
+    Roles are the topic's first by rank (most over-privileged first). With the what-if
+    model, assets and identities connected to those roles come first, then the topic's
+    remaining ranked members fill the limits."""
     if any(not 0 <= limits.get(kind, 0) <= SLICE_LIMITS[kind] for kind in SLICE_LIMITS):
         raise ValueError("Topic subgraph limits outside supported bounds")
     groups: dict[str, list[str]] = {}
@@ -209,6 +246,13 @@ def topic_slice(db: Session, tenant: str, revision: str, topic: str, limits: dic
                 .limit(limits.get(kind, 0))
             )
         )
+    if model is not None and groups["role"]:
+        connected = _connected(
+            model, resource_topics(db, tenant, revision, model), topic, groups["role"], limits
+        )
+        for kind in ("resource", "identity"):
+            merged = list(dict.fromkeys(connected[kind] + groups[kind]))
+            groups[kind] = merged[: limits.get(kind, 0)]
     groups["outside"] = []
     if groups["role"] and limits.get("outside", 0):
         shown = set(groups["resource"])
