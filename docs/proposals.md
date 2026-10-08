@@ -131,6 +131,15 @@ the topics when usage evidence changes (topic sweep), backfilled by a 60 s worke
 revisions without proposals of `PROPOSAL_VERSION` (1), deleted by retention with their
 revision, and carried by the PostgreSQL backup (decisions too).
 
+Storage is kept cheap because it is on the publish path (~92k rows at 100k nodes). Rows
+are stored in their order (tier, then type, ...). That makes a tier or type filter a few
+ordinal ranges, computed from the summary's `by_type_tier` counts and read through the
+order index, so there is no tier or type index (migration `0013`). Totals for filters
+without a role filter also come from the summary. Decision-state totals count the
+tenant's decided proposals by primary key. The opaque ID columns compare byte-wise
+(`COLLATE "C"`). COPY data streams from a writer thread while rows are encoded, and the
+cyclic garbage collector is paused for the proposal phase.
+
 ## Current vs optimized views
 
 Every "Optimized" view draws what one proposal set would change, from the revision's

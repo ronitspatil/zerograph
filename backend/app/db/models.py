@@ -5,6 +5,12 @@ from sqlalchemy import JSON, Boolean, DateTime, Float, Index, Integer, LargeBina
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
+def byte_string(length: int) -> String:
+    """An opaque ID column compared byte-wise ("C" collation) on PostgreSQL: index inserts and
+    lookups skip locale-aware comparison. Only equality is ever asked of these columns."""
+    return String(length).with_variant(String(length, collation="C"), "postgresql")
+
+
 def now() -> datetime:
     return datetime.now(UTC)
 
@@ -468,24 +474,22 @@ class RevisionProposal(Base):
     __tablename__ = "revision_proposals"
     __table_args__ = (
         Index("ux_revision_proposals_order", "tenant_id", "revision", "ordinal", unique=True),
-        Index("ix_revision_proposals_tier", "tenant_id", "revision", "tier", "ordinal"),
-        Index("ix_revision_proposals_type", "tenant_id", "revision", "type", "ordinal"),
         Index("ix_revision_proposals_topic", "tenant_id", "revision", "topic_id", "ordinal"),
         Index("ix_revision_proposals_subject", "tenant_id", "revision", "subject_id"),
         Index("ix_revision_proposals_target", "tenant_id", "revision", "target_id"),
     )
-    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    revision: Mapped[str] = mapped_column(String(64), primary_key=True)
-    proposal_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(byte_string(128), primary_key=True)
+    revision: Mapped[str] = mapped_column(byte_string(64), primary_key=True)
+    proposal_id: Mapped[str] = mapped_column(byte_string(32), primary_key=True)
     ordinal: Mapped[int] = mapped_column(Integer)
     type: Mapped[str] = mapped_column(String(32))
     tier: Mapped[str] = mapped_column(String(16))
     base_tier: Mapped[str] = mapped_column(String(16))
-    topic_id: Mapped[str] = mapped_column(String(32))
-    subject_id: Mapped[str] = mapped_column(String(512))
+    topic_id: Mapped[str] = mapped_column(byte_string(32))
+    subject_id: Mapped[str] = mapped_column(byte_string(512))
     subject_name: Mapped[str] = mapped_column(String(256))
     subject_type: Mapped[str] = mapped_column(String(32))
-    target_id: Mapped[str] = mapped_column(String(512))
+    target_id: Mapped[str] = mapped_column(byte_string(512))
     target_name: Mapped[str] = mapped_column(String(256))
     weight: Mapped[int] = mapped_column(Integer)
     identities: Mapped[int] = mapped_column(Integer)
@@ -502,8 +506,8 @@ class ProposalDecision(Base):
     """A tenant's accept/reject decision on a proposal ID; carries forward across revisions."""
 
     __tablename__ = "proposal_decisions"
-    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    proposal_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(byte_string(128), primary_key=True)
+    proposal_id: Mapped[str] = mapped_column(byte_string(32), primary_key=True)
     state: Mapped[str] = mapped_column(String(16))
     actor: Mapped[str] = mapped_column(String(256))
     revision: Mapped[str] = mapped_column(String(64))

@@ -40,13 +40,15 @@ stored per tenant by ID, carry forward to later revisions.
 """
 
 import argparse
+import gc
 import hashlib
 import json
 import math
 import threading
 import time
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -250,11 +252,19 @@ def compute_proposals(
             ):
                 unexplained.add(item)
 
+    reaching_users: dict[int, set[int]] = {}
+
     def protected(holder: int, item: int) -> bool:
         """Removing ``holder``'s grant on ``item`` could remove observed access."""
         if item in unexplained:
             return True
-        return any(holder in holders_of.get(user, ()) or holder == user for user in users_of.get(item, ()))
+        # Holders through which some observed user of ``item`` reaches it (or the user itself).
+        found = reaching_users.get(item)
+        if found is None:
+            found = reaching_users[item] = set(users_of.get(item, ()))
+            for user in users_of.get(item, ()):
+                found.update(holders_of.get(user, ()))
+        return holder in found
 
     # Wildcard grant pairs and every edge per (source, target) needed for listed changes.
     wildcard_pairs: set[tuple[int, int]] = set()
@@ -935,8 +945,12 @@ def _changes(proposal: Proposal, computed, edges: dict) -> list[dict]:
     return changes
 
 
+# json.dumps(row, sort_keys=True, default=str), without building an encoder per row.
+_DIGEST_JSON = json.JSONEncoder(sort_keys=True, default=str).encode
+
+
 def _digest(row: tuple) -> str:
-    return hashlib.sha256(json.dumps(row, sort_keys=True, default=str).encode()).hexdigest()[:16]
+    return hashlib.sha256(_DIGEST_JSON(row).encode()).hexdigest()[:16]
 
 
 PROPOSAL_COLUMNS = [
@@ -944,6 +958,7 @@ PROPOSAL_COLUMNS = [
     "subject_name", "subject_type", "target_id", "target_name", "weight", "identities", "epi_before",
     "epi_after", "reasons", "evidence", "changes", "digest",
 ]  # fmt: skip
+JSON_POSITIONS = tuple(PROPOSAL_COLUMNS.index(c) for c in ("reasons", "evidence", "changes"))
 
 
 def proposal_rows(computed_proposals: ComputedProposals, computed, tenant: str, revision: str):
@@ -1003,7 +1018,11 @@ def store_proposals(
     )
     db.flush()
     _bulk_insert(
-        db, RevisionProposal, PROPOSAL_COLUMNS, proposal_rows(computed_proposals, computed, tenant, revision)
+        db,
+        RevisionProposal,
+        PROPOSAL_COLUMNS,
+        proposal_rows(computed_proposals, computed, tenant, revision),
+        json_columns=JSON_POSITIONS,
     )
 
 
@@ -1022,10 +1041,25 @@ def stored_proposal_summary(db: Session, tenant: str, revision: str) -> Revision
     )
 
 
+@contextmanager
+def _without_cycle_collection() -> Iterator[None]:
+    """Pause the cyclic garbage collector: with a revision's graph and topics in memory, its
+    full passes re-scan millions of live objects while proposals allocate (~a third of the
+    proposal phase at 100k). The phase builds no reference cycles worth collecting early."""
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if enabled:
+            gc.enable()
+
+
 def compute_and_store(db: Session, tenant: str, revision: str, computed, findings) -> ComputedProposals:
     """Proposals for a revision whose topics were just computed, in the caller's transaction."""
-    result = compute_proposals(computed, findings, policy_index(db, tenant, revision))
-    store_proposals(db, tenant, revision, result, computed)
+    with _without_cycle_collection():
+        result = compute_proposals(computed, findings, policy_index(db, tenant, revision))
+        store_proposals(db, tenant, revision, result, computed)
     return result
 
 
@@ -1141,6 +1175,43 @@ DECISION_STATES = ("accepted", "rejected")
 FILTER_STATES = ("pending", "accepted", "rejected")
 
 
+def ordinal_ranges(totals: dict, tier: str | None, kind: str | None) -> list[tuple[int, int]]:
+    """Half-open ordinal ranges of a revision's proposals of one tier and/or type.
+
+    Proposals are ordered by (tier, type, ...) (``compute_proposals``), so each (tier, type)
+    group is one contiguous block whose size is in the stored summary (``by_type_tier``).
+    """
+    by_type_tier = totals.get("by_type_tier", {})
+    ranges: list[tuple[int, int]] = []
+    start = 0
+    for tier_ in TIERS:
+        for kind_ in TYPES:
+            count = by_type_tier.get(kind_, {}).get(tier_, 0)
+            if count and tier in (None, tier_) and kind in (None, kind_):
+                if ranges and ranges[-1][1] == start:
+                    ranges[-1] = (ranges[-1][0], start + count)
+                else:
+                    ranges.append((start, start + count))
+            start += count
+    return ranges
+
+
+def summary_count(
+    totals: dict, tier: str | None, kind: str | None, topic: str | None, ranges: list | None
+) -> int | None:
+    """Matching proposals from the stored summary counts, or None if they don't say."""
+    if topic:
+        if kind:
+            return None
+        found = totals.get("topics", {}).get(topic)
+        if found is None:
+            return 0
+        return found["by_tier"].get(tier, 0) if tier else found["total"]
+    if ranges is not None:
+        return sum(high - low for low, high in ranges)
+    return totals.get("total")
+
+
 def proposal_page(
     db: Session,
     summary: RevisionProposalSummary,
@@ -1161,7 +1232,11 @@ def proposal_page(
     if state is not None and state not in FILTER_STATES:
         raise ValueError("Unknown decision state")
     tenant, revision = summary.tenant_id, summary.revision
+    totals = summary.totals if isinstance(summary.totals, dict) else json.loads(summary.totals)
     scope = [RevisionProposal.tenant_id == tenant, RevisionProposal.revision == revision]
+    # Rows are stored tier first, then type: a tier or type filter is a few ordinal ranges,
+    # each read through the order index (no per-tier or per-type index is kept).
+    ranges = ordinal_ranges(totals, tier, kind) if tier or kind else None
     if tier:
         scope.append(RevisionProposal.tier == tier)
     if kind:
@@ -1170,19 +1245,46 @@ def proposal_page(
         scope.append(RevisionProposal.topic_id == topic)
     if subject:
         scope.append((RevisionProposal.subject_id == subject) | (RevisionProposal.target_id == subject))
+    ordinal = RevisionProposal.ordinal
+    total = None if subject else summary_count(totals, tier, kind, topic, ranges)
+    if state and total is not None:
+        # Decided proposals of the filter, looked up by primary key (decisions are few).
+        decided_ = _decided_ids(db, tenant, None if state == "pending" else state)
+        found = 0
+        for start_ in range(0, len(decided_), DECIDED_BATCH):
+            batch = decided_[start_ : start_ + DECIDED_BATCH]
+            found += db.scalar(
+                select(func.count())
+                .select_from(RevisionProposal)
+                .where(*scope, RevisionProposal.proposal_id.in_(batch))
+            )
+        total = total - found if state == "pending" else found
     if state:
         decided = select(ProposalDecision.proposal_id).where(ProposalDecision.tenant_id == tenant)
         if state == "pending":
             scope.append(RevisionProposal.proposal_id.not_in(decided))
         else:
             scope.append(RevisionProposal.proposal_id.in_(decided.where(ProposalDecision.state == state)))
-    total = db.scalar(select(func.count()).select_from(RevisionProposal).where(*scope))
-    query = select(RevisionProposal).where(*scope)
-    if cursor is not None:
-        query = query.where(RevisionProposal.ordinal > cursor)
-    rows = list(db.scalars(query.order_by(RevisionProposal.ordinal).limit(limit)))
+    if total is None:
+        total = sum(
+            db.scalar(
+                select(func.count())
+                .select_from(RevisionProposal)
+                .where(*scope, *([ordinal >= low, ordinal < high] if high is not None else []))
+            )
+            for low, high in (ranges if ranges is not None else [(0, None)])
+        )
+    start = 0 if cursor is None else cursor + 1
+    rows: list[RevisionProposal] = []
+    for low, high in ranges if ranges is not None else [(0, None)]:
+        if high is not None and high <= start:
+            continue
+        bounded = [ordinal >= max(low, start)] + ([ordinal < high] if high is not None else [])
+        query = select(RevisionProposal).where(*scope, *bounded).order_by(ordinal).limit(limit - len(rows))
+        rows += db.scalars(query)
+        if len(rows) == limit:
+            break
     decisions = _decisions(db, tenant, [row.proposal_id for row in rows])
-    totals = summary.totals if isinstance(summary.totals, dict) else json.loads(summary.totals)
     return ProposalListResponse(
         revision=revision,
         proposals=[_view(row, decisions.get(row.proposal_id)) for row in rows],
