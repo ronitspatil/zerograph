@@ -80,9 +80,11 @@ export function epiColor(epi: number | null | undefined): string {
 export function topicEpi(
   row: TopicWhatIf | undefined,
   side: "before" | "after",
+  core = false,
 ): number | null {
   const totals = row?.identities?.rows ? row.identities : row?.roles;
-  return totals ? totals[side].epi : null;
+  if (!totals) return null;
+  return core ? totals[side].epi_excl_hubs : totals[side].epi;
 }
 
 export function topicColor(topic: TopicSummary): string {
@@ -316,7 +318,8 @@ export function TopicLens({
         t.id,
         t.kind === "fallback"
           ? FALLBACK_COLOR
-          : epiColor(topicEpi(whatifByTopic.get(t.id), "after")),
+          : // Without hubs: hub roles put almost every topic above 90%.
+            epiColor(topicEpi(whatifByTopic.get(t.id), "after", true)),
       ]),
     );
     const removed = new Map(
@@ -452,7 +455,7 @@ export function TopicLens({
                   ? [
                       { text: "Circle area: sensitivity weight" },
                       ...EPI_COLORS.map((s) => ({
-                        text: `Identity EPI after: ${s.text}`,
+                        text: `EPI after, without hubs: ${s.text}`,
                         color: s.color,
                       })),
                       {
@@ -503,7 +506,7 @@ export function TopicLens({
                 : whatifError
                   ? `Optimized view unavailable: ${whatifError}`
                   : whatif
-                    ? `${setDescription(proposalSet)}: ${count(whatif.links.reduce((sum, l) => sum + l.removed, 0))} cross-topic grants removed · colored by identity EPI after · simulated, not applied`
+                    ? `${setDescription(proposalSet)}: ${count(whatif.links.reduce((sum, l) => sum + l.removed, 0))} cross-topic grants removed · colored by identity EPI after (without hubs) · simulated, not applied`
                     : `${setDescription(proposalSet)}: loading…`}
             </small>
           </div>

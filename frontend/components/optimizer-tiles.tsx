@@ -89,7 +89,7 @@ export function OptimizerTiles({
         </small>
       </div>
       <div className="metric-card">
-        <span>Unused grants on restricted data</span>
+        <span>Unused restricted grants</span>
         <strong>{data ? count(data.unused_restricted_grants) : "—"}</strong>
         <small>
           {data

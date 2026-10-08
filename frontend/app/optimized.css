@@ -19,6 +19,7 @@
 }
 .optimized-set {
   display: inline-flex;
+  white-space: nowrap;
   align-items: center;
   gap: var(--space-2);
   font-size: 12px;
@@ -90,6 +91,7 @@
 }
 .topic-before-after dd {
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 /* Topic page */
@@ -355,9 +357,8 @@
   white-space: nowrap;
 }
 .optimizer-tiles .metric-card small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 18px;
+  overflow-wrap: anywhere;
 }
 .optimizer-rollout dl {
   display: grid;
