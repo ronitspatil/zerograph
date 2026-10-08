@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   computePositions,
   partitionCommunities,
@@ -236,9 +236,26 @@ describe("graph layout of connected explorer slices", () => {
     })).filter((e) => e.source !== e.target);
     const started = performance.now();
     const positions = computePositions({ nodes, edges });
-    // Measured at about 200 ms; the worker's 600 ms time cap is the hard bound.
-    expect(performance.now() - started).toBeLessThan(1500);
+    // Fixed iteration count; generous bound so a busy CI machine still passes.
+    expect(performance.now() - started).toBeLessThan(3000);
     expect(positions).toHaveLength(500);
     expect(computePositions({ nodes, edges })).toEqual(positions);
+  });
+  describe("under machine load", () => {
+    afterEach(() => vi.restoreAllMocks());
+    it("gives the same positions when the clock jumps mid-layout", () => {
+      const nodes = Array.from({ length: 300 }, (_, i) => `n${i}`);
+      const edges = Array.from({ length: 900 }, (_, i) => ({
+        id: `e${i}`,
+        source: nodes[(i * 7) % 300],
+        target: nodes[(i * 11 + 1 + Math.floor(i / 300)) % 300],
+      })).filter((e) => e.source !== e.target);
+      const calm = computePositions({ nodes, edges });
+      // Every clock read appears a full second later, as on a starved CPU.
+      let now = 0;
+      vi.spyOn(Date, "now").mockImplementation(() => (now += 1000));
+      vi.spyOn(performance, "now").mockImplementation(() => (now += 1000));
+      expect(computePositions({ nodes, edges })).toEqual(calm);
+    });
   });
 });

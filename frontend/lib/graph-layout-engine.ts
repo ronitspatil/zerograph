@@ -92,9 +92,14 @@ function noise(seed: string): number {
   return (((hash ^ (hash >>> 16)) >>> 0) / 0xffffffff) * 2 - 1;
 }
 
-/** Force refinement caps: about 200 ms for 500 nodes / 2,000 edges in a worker. */
+/**
+ * Fixed force refinement length. The work is bounded by the input caps
+ * (EXPLORE_LIMITS), never by a clock, so machine load cannot change positions.
+ * The only time limit is the caller's last-resort worker timeout in
+ * `startLayout`, which discards the run and reports failure; it never applies
+ * a partial result.
+ */
 export const REFINE_ITERATIONS = 240;
-export const REFINE_BUDGET_MS = 600;
 const SPRING = 46; // Ideal relationship length (layout units).
 
 /**
@@ -102,9 +107,9 @@ const SPRING = 46; // Ideal relationship length (layout units).
  * 3 x SPRING through a spatial hash (no all-pairs pass), relationships are
  * springs, members are tethered (reciprocally) to their community's role,
  * community centres repel each other by size so roles stay visible centres,
- * and a light pull toward the centroid keeps components together. Iterates over sorted IDs with a fixed cooling schedule, so the same
- * input always gives the same positions; the time cap only cuts a run short on
- * a device far slower than the measured one.
+ * and a light pull toward the centroid keeps components together. Iterates over
+ * sorted IDs for exactly REFINE_ITERATIONS steps with a fixed cooling schedule
+ * and reads no clock, so the same input always gives the same positions.
  */
 function refine(
   positions: Position[],
@@ -144,10 +149,8 @@ function refine(
     k2 = k * k,
     cutoff = 3 * k,
     cutoff2 = cutoff * cutoff;
-  const started = Date.now();
   let temperature = 4 * k;
   for (let iteration = 0; iteration < REFINE_ITERATIONS; iteration++) {
-    if (Date.now() - started > REFINE_BUDGET_MS) break;
     dx.fill(0);
     dy.fill(0);
     const grid = new Map<string, number[]>();
