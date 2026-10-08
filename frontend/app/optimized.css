@@ -1,0 +1,444 @@
+/*
+ * Current vs optimized views (optimizer Phase 5): the Current | Optimized switch,
+ * overlay legend entries, the topic page, the overview optimizer tiles and the
+ * proposal queue's bulk bar. Reuses the design tokens of globals.css; red appears
+ * only for what-if removals.
+ */
+
+/* Switch + proposal set (one row), and one status line that never wraps. */
+.optimized-switch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  min-width: 0;
+}
+.optimized-switch .graph-view-switch {
+  margin-bottom: 0;
+  flex-shrink: 0;
+}
+.optimized-set {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 12px;
+  color: var(--muted);
+  min-width: 0;
+}
+.optimized-set select {
+  height: var(--control-h-sm);
+  width: 192px;
+  max-width: 100%;
+  min-width: 0;
+}
+.optimized-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+.optimized-status {
+  flex: 1 1 240px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 20px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Overlay legend swatches (graph canvas legend). */
+.graph-legend .legend-removed {
+  width: 14px;
+  height: 0;
+  border-radius: 0;
+  border-top: 2px dashed var(--danger);
+}
+.graph-legend .legend-disabled {
+  background: #3c4757;
+  box-shadow: inset 0 0 0 1px #8796a8;
+}
+.graph-legend .legend-outside {
+  background: #e391bb;
+  opacity: 0.5;
+}
+
+/* Topics lens sidebar: the switch sits at the top of every panel state. */
+.topic-optimized {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-bottom: var(--space-3);
+  margin-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border);
+}
+.topic-optimized .optimized-set select {
+  width: 144px;
+}
+.optimized-note {
+  display: block;
+  min-height: 36px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.topic-before-after dd {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Topic page */
+.topic-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.topic-page-head {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.topic-page-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2) var(--space-3);
+  min-width: 0;
+  max-width: 100%;
+}
+.topic-page-title h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.topic-page-head .topic-reason {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+.topic-page .metric-grid.topic-tiles {
+  margin-bottom: 0;
+}
+.topic-page .metric-card strong {
+  font-size: 20px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.topic-page .metric-card small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.topic-graph-sidebar p {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.topic-page-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+}
+.topic-section {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.topic-section-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4) var(--space-4);
+  min-width: 0;
+}
+.topic-section-body > dl,
+.topic-section-body > ol,
+.topic-section-body > ul,
+.topic-section-body > small,
+.topic-section-body > p {
+  width: 100%;
+  margin: 0;
+}
+.topic-section-body dl {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-1) var(--space-3);
+  font-size: 13px;
+}
+.topic-section-body dt {
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.topic-section-body dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.topic-section-body small {
+  font-size: 12px;
+  color: var(--subtle);
+}
+.topic-section-body .topic-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+.topic-section-body .topic-tabs button {
+  height: var(--control-h-sm);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+}
+.topic-section-body .topic-tabs button[aria-pressed="true"] {
+  color: var(--text);
+  border-color: var(--border-strong);
+  background: var(--accent-soft);
+}
+.tier-counts .text-link:disabled {
+  color: var(--subtle);
+  cursor: default;
+  text-decoration: none;
+}
+.contributors,
+.topic-members {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.topic-members {
+  max-height: 320px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+.contributors li,
+.topic-members li {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: var(--space-1) 0;
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+.contributors li span,
+.topic-members li span {
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.contributors li small,
+.topic-members li small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Granted vs used per role: compact stacked bars (needed in teal, the rest neutral). */
+.role-bars {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  max-height: 360px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+.role-bar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.role-bar-label {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: 12px;
+  min-width: 0;
+}
+.role-bar-label span {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.role-bar-label small {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.role-bar-track {
+  display: flex;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--control);
+  overflow: hidden;
+}
+.role-bar-track i,
+.role-bar-key i {
+  display: block;
+  height: 100%;
+}
+.role-bar-track .needed,
+.role-bar-key .needed {
+  background: var(--accent);
+}
+.role-bar-track .excess,
+.role-bar-key .excess {
+  background: #4a586b;
+}
+.role-bar-track .granted {
+  background: #333f4f;
+}
+.topic-section-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-3);
+  margin-top: auto;
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border);
+}
+.role-bar-key {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 12px;
+  color: var(--muted);
+}
+.role-bar-key i {
+  width: 12px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+/* Overview optimizer tiles: one fixed grid. */
+.optimizer-tiles {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+}
+.optimizer-tiles .metric-card strong {
+  font-size: 20px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.optimizer-tiles .metric-card small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.optimizer-rollout dl {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0 var(--space-2);
+  margin: var(--space-2) 0;
+  font-size: 12px;
+}
+.optimizer-rollout dt {
+  color: var(--muted);
+}
+.optimizer-rollout dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.optimizer-rollout .text-link {
+  align-self: flex-start;
+}
+
+/* Proposal queue: bulk review within one tier and topic; one fixed row. */
+.bulk-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  min-height: 48px;
+  padding: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+.bulk-text {
+  flex: 1 1 240px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.bulk-bar .button,
+.bulk-bar .button-outline {
+  flex-shrink: 0;
+  min-width: 132px;
+}
+.advanced-remediation .notice {
+  margin-bottom: var(--space-4);
+}
+
+@media (max-width: 1200px) {
+  .optimizer-tiles {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (max-width: 900px) {
+  .optimizer-tiles {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-3);
+  }
+  .topic-page-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 600px) {
+  .optimized-bar {
+    padding: var(--space-2) var(--space-3);
+  }
+  .optimized-status {
+    flex-basis: 100%;
+  }
+  .optimizer-tiles {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .bulk-text {
+    flex-basis: 100%;
+  }
+  .bulk-bar .button,
+  .bulk-bar .button-outline {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+}

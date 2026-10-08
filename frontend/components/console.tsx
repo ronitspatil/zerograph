@@ -7,7 +7,6 @@ import {
   ArrowRight,
   ChevronRight,
   CircleHelp,
-  GitPullRequest,
   LayoutDashboard,
   ListChecks,
   LoaderCircle,
@@ -22,6 +21,7 @@ import {
 import { api, ApiError } from "@/lib/api";
 import { formatCount } from "@/lib/format";
 import type {
+  ProposalTier,
   Actor,
   AuditEvent,
   Finding,
@@ -39,11 +39,19 @@ import { Button } from "@/components/ui/button";
 import { Simulator } from "@/components/simulator";
 import { RemediationHub } from "@/components/remediation-hub";
 import { Proposals } from "@/components/proposals";
+import { TopicPage } from "@/components/topic-page";
+import { OptimizerTiles } from "@/components/optimizer-tiles";
 import { Sources } from "@/components/sources";
 import { ExcessPrivilegePanel } from "@/components/privilege";
 import { SensitivityChart } from "@/components/sensitivity-chart";
 import { Wordmark } from "@/components/ui/logo";
 import { GlobalMap } from "@/components/global-map";
+import {
+  OptimizedBar,
+  overlayStatus,
+  useSliceOverlay,
+} from "@/components/optimized";
+import { useProposalSet } from "@/lib/optimized";
 const GraphCanvas = dynamic(
   () => import("@/components/graph-canvas").then((m) => m.GraphCanvas),
   {
@@ -57,7 +65,7 @@ const GraphCanvas = dynamic(
   },
 );
 type View =
-  "overview" | "graph" | "proposals" | "remediation" | "sources" | "activity";
+  "overview" | "graph" | "topic" | "remediation" | "sources" | "activity";
 const titles: Record<View, { title: string; description: string }> = {
   overview: {
     title: "Security overview",
@@ -69,15 +77,15 @@ const titles: Record<View, { title: string; description: string }> = {
     description:
       "Explore effective access. Find the paths that put your data at risk.",
   },
-  proposals: {
-    title: "Least-privilege proposals",
+  topic: {
+    title: "Topic",
     description:
-      "Proposed, not applied: what to remove, disable, merge or split, with the evidence and a what-if.",
+      "One relationship topic as it is and as the selected proposals would leave it.",
   },
   remediation: {
-    title: "Remediation hub",
+    title: "Remediation",
     description:
-      "Turn access findings into reviewable least-privilege changes.",
+      "Least-privilege proposals with their evidence: review, accept, and roll out as draft pull requests. Nothing is applied by ZeroGraph.",
   },
   sources: {
     title: "Data sources",
@@ -92,8 +100,7 @@ const titles: Record<View, { title: string; description: string }> = {
 const nav = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
   { id: "graph", label: "Knowledge graph", icon: Network },
-  { id: "proposals", label: "Proposals", icon: ListChecks },
-  { id: "remediation", label: "Remediation", icon: GitPullRequest },
+  { id: "remediation", label: "Remediation", icon: ListChecks },
   { id: "sources", label: "Data sources", icon: Unplug },
   { id: "activity", label: "Audit activity", icon: Activity },
 ] as const;
@@ -106,6 +113,11 @@ const typeLabels: Record<string, string> = {
 };
 // Findings arrive page by page for the displayed revision; the graph never waits on them.
 const FINDINGS_PAGE = 200;
+const EMPTY_OVERLAY = {
+  grants: new Set<string>(),
+  hops: new Set<string>(),
+  disabled: new Set<string>(),
+};
 const emptyGraph: GraphView = {
   revision: "",
   nodes: [],
@@ -159,6 +171,17 @@ export function Console({ demo }: { demo: boolean }) {
   const [risk, setRisk] = useState("");
   const [showHelp, setShowHelp] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
+  const [optimized, setOptimized] = useState(false);
+  const [topicPage, setTopicPage] = useState<{
+    id: string;
+    revision: string;
+  } | null>(null);
+  const [queueFocus, setQueueFocus] = useState<{
+    topic: string;
+    tier: ProposalTier | "";
+    key: number;
+  } | null>(null);
+  const proposalSet = useProposalSet();
   const simulationKey = `${graph.revision}:${selected?.id ?? ""}:${simulating}`;
   const currentSimulationKey = useRef(simulationKey);
   currentSimulationKey.current = simulationKey;
@@ -468,6 +491,13 @@ export function Console({ demo }: { demo: boolean }) {
       edges: graph.edges.filter((e) => ids.has(e.source) && ids.has(e.target)),
     };
   }, [graph, account, type, risk, riskNodes]);
+  const visibleIds = useMemo(() => filtered.nodes.map((n) => n.id), [filtered]);
+  const explorerOverlay = useSliceOverlay(
+    optimized && !roles && graphMode !== "map" && !revisionStale,
+    graph.revision,
+    visibleIds,
+    explorationError,
+  );
   useEffect(() => {
     if (selected && !filtered.nodes.some((n) => n.id === selected.id)) {
       setSelected(null);
@@ -596,14 +626,20 @@ export function Console({ demo }: { demo: boolean }) {
           {nav.map((n) => (
             <button
               key={n.id}
-              className={view === n.id ? "nav-item active" : "nav-item"}
+              className={
+                (view === "topic" ? "graph" : view) === n.id
+                  ? "nav-item active"
+                  : "nav-item"
+              }
+              aria-current={
+                (view === "topic" ? "graph" : view) === n.id
+                  ? "page"
+                  : undefined
+              }
               onClick={() => setView(n.id)}
             >
               <n.icon size={16} aria-hidden="true" />
               <span className="nav-text">{n.label}</span>
-              {n.id === "remediation" && records.length > 0 && (
-                <span className="nav-count">{formatCount(records.length)}</span>
-              )}
             </button>
           ))}
         </nav>
@@ -768,6 +804,10 @@ export function Console({ demo }: { demo: boolean }) {
                         onOpenNeighborhood={(id, revision) =>
                           void explore(id, revision)
                         }
+                        onOpenTopicPage={(id, revision) => {
+                          setTopicPage({ id, revision });
+                          setView("topic");
+                        }}
                       />
                     </section>
                   )}
@@ -880,6 +920,21 @@ export function Console({ demo }: { demo: boolean }) {
                         affected nodes outside the visible view.
                       </span>
                     </div>
+                    <OptimizedBar
+                      optimized={optimized && !roles}
+                      onToggle={setOptimized}
+                      disabled={!!roles || revisionStale || !graph.revision}
+                      label="Current or optimized graph"
+                      status={
+                        roles
+                          ? "The optimized overlay covers the Identity & data view and neighborhoods."
+                          : overlayStatus(
+                              optimized,
+                              explorerOverlay,
+                              proposalSet,
+                            )
+                      }
+                    />
                     <div className="graph-toolbar">
                       <div className="search-field">
                         <Search size={14} aria-hidden="true" />
@@ -966,6 +1021,11 @@ export function Console({ demo }: { demo: boolean }) {
                             riskNodes={riskNodes}
                             simulation={simulation}
                             onSelect={selectNode}
+                            overlay={
+                              optimized && !roles
+                                ? (explorerOverlay.sets ?? EMPTY_OVERLAY)
+                                : null
+                            }
                           />
                         ) : (
                           <div className="empty-state">
@@ -1169,6 +1229,10 @@ export function Console({ demo }: { demo: boolean }) {
               )}
               {view === "overview" && (
                 <>
+                  <OptimizerTiles
+                    reloadKey={mapReload}
+                    onOpenQueue={() => setView("remediation")}
+                  />
                   <div className="overview-grid">
                     <div className="panel chart-panel">
                       <div className="panel-heading">
@@ -1223,15 +1287,42 @@ export function Console({ demo }: { demo: boolean }) {
                   />
                 </>
               )}
-              {view === "proposals" && <Proposals canAdmin={canAdmin} />}
+              {view === "topic" && topicPage && (
+                <TopicPage
+                  key={`${topicPage.id}:${topicPage.revision}`}
+                  topicId={topicPage.id}
+                  revision={topicPage.revision}
+                  onBack={() => setView("graph")}
+                  onError={explorationError}
+                  onOpenNeighborhood={(id, revision) => {
+                    setView("graph");
+                    void explore(id, revision);
+                  }}
+                  onReviewProposals={(topic, tier) => {
+                    setQueueFocus((previous) => ({
+                      topic,
+                      tier,
+                      key: (previous?.key ?? 0) + 1,
+                    }));
+                    setView("remediation");
+                  }}
+                />
+              )}
               {view === "remediation" && (
-                <RemediationHub
-                  identities={identities}
-                  records={records}
-                  onRefresh={() => void refresh()}
-                  demo={demo}
-                  canWrite={canWrite}
+                <Proposals
                   canAdmin={canAdmin}
+                  focus={queueFocus}
+                  advancedCount={records.length}
+                  advanced={
+                    <RemediationHub
+                      identities={identities}
+                      records={records}
+                      onRefresh={() => void refresh()}
+                      demo={demo}
+                      canWrite={canWrite}
+                      canAdmin={canAdmin}
+                    />
+                  }
                 />
               )}
               {view === "sources" && (
@@ -1336,9 +1427,10 @@ export function Console({ demo }: { demo: boolean }) {
               reachable data assets.
             </p>
             <p>
-              4. Supply an IAM policy and audit coverage to preview a
-              least-privilege change. An administrator can create a draft PR in
-              the configured repository.
+              4. Review least-privilege proposals in Remediation, compare the
+              current and optimized graph per topic, and accept them. An
+              administrator turns accepted proposals into draft pull requests;
+              nothing is applied by ZeroGraph.
             </p>
             <p>
               Metadata classifications are hypotheses. Validate them before

@@ -57,16 +57,20 @@ export const UNAVAILABLE_RETRY_MS = 30_000;
  * its sub-groups as a new level. Members hand off to the bounded neighborhood
  * explorer.
  */
+let rememberedLens: "structure" | "topics" = "structure";
+
 export function GlobalMap({
   reloadKey,
   stale,
   onError,
   onOpenNeighborhood,
+  onOpenTopicPage,
 }: {
   reloadKey: number;
   stale: boolean;
   onError: (e: unknown) => void;
   onOpenNeighborhood: (nodeId: string, revision: string) => void;
+  onOpenTopicPage?: (topicId: string, revision: string) => void;
 }) {
   const [map, setMap] = useState<ClusterMap | null>(null);
   const [detail, setDetail] = useState<ClusterDetail | null>(null);
@@ -77,7 +81,14 @@ export function GlobalMap({
   const [expansions, setExpansions] = useState<MapExpansion[]>([]);
   const [expanding, setExpanding] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
-  const [lens, setLens] = useState<"structure" | "topics">("structure");
+  // Remembered across mounts: back from a topic page lands on the Topics lens again.
+  const [lens, setLensState] = useState<"structure" | "topics">(
+    () => rememberedLens,
+  );
+  const setLens = (next: "structure" | "topics") => {
+    rememberedLens = next;
+    setLensState(next);
+  };
   const request = useRef<AbortController | null>(null);
   const expandRequest = useRef<AbortController | null>(null);
   const begin = () => {
@@ -323,6 +334,7 @@ export function GlobalMap({
           stale={stale}
           onError={onError}
           onOpenNeighborhood={onOpenNeighborhood}
+          onOpenTopicPage={onOpenTopicPage}
           statusSizer={statusLine}
         />
       </div>

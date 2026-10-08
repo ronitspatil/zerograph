@@ -1,5 +1,11 @@
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { api, ApiError } from "@/lib/api";
 import { formatCount } from "@/lib/format";
 import {
@@ -24,6 +30,7 @@ import type {
 } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Rollout } from "@/components/rollout";
+import { setCustomSet, useProposalSet } from "@/lib/optimized";
 
 const PAGE = 50;
 const count = formatCount;
@@ -52,15 +59,32 @@ function query(filters: Filters, cursor: number | null, revision?: string) {
  * and accept/reject; accepted, eligible proposals become draft pull requests (Create PR) and
  * the Rollout tab tracks them. Nothing is applied by ZeroGraph.
  */
-export function Proposals({ canAdmin }: { canAdmin: boolean }) {
-  const [tab, setTab] = useState<"proposals" | "rollout">("proposals");
+export function Proposals({
+  canAdmin,
+  focus = null,
+  advanced,
+  advancedCount = 0,
+}: {
+  canAdmin: boolean;
+  /** Open the queue filtered to a topic (and tier), e.g. from a topic page. */
+  focus?: { topic: string; tier: ProposalTier | ""; key: number } | null;
+  /** The single-policy remediation tool, kept under Advanced. */
+  advanced?: ReactNode;
+  advancedCount?: number;
+}) {
+  const [tab, setTab] = useState<"proposals" | "rollout" | "advanced">(
+    "proposals",
+  );
   const [rolloutKey, setRolloutKey] = useState(0);
+  useEffect(() => {
+    if (focus) setTab("proposals");
+  }, [focus]);
   return (
     <>
       <div
         className="graph-view-switch"
         role="group"
-        aria-label="Proposals or rollout"
+        aria-label="Proposals, rollout or advanced"
       >
         <button
           type="button"
@@ -79,25 +103,58 @@ export function Proposals({ canAdmin }: { canAdmin: boolean }) {
         >
           Rollout
         </button>
+        {advanced && (
+          <button
+            type="button"
+            aria-pressed={tab === "advanced"}
+            onClick={() => setTab("advanced")}
+          >
+            Advanced
+            {advancedCount > 0 ? ` · ${formatCount(advancedCount)}` : ""}
+          </button>
+        )}
       </div>
       {tab === "rollout" ? (
         <Rollout canAdmin={canAdmin} refreshKey={rolloutKey} />
+      ) : tab === "advanced" ? (
+        <section className="advanced-remediation" aria-label="Advanced">
+          <div className="notice">
+            <b>Advanced: single policy.</b> Trim one pasted IAM policy against
+            usage you supply. The proposal queue is the primary way to
+            remediate; use this for a policy outside the collected graph.
+          </div>
+          {advanced}
+        </section>
       ) : (
-        <ProposalQueue canAdmin={canAdmin} />
+        <ProposalQueue
+          key={focus?.key ?? 0}
+          canAdmin={canAdmin}
+          initial={focus}
+        />
       )}
     </>
   );
 }
 
-function ProposalQueue({ canAdmin }: { canAdmin: boolean }) {
+function ProposalQueue({
+  canAdmin,
+  initial,
+}: {
+  canAdmin: boolean;
+  initial?: { topic: string; tier: ProposalTier | "" } | null;
+}) {
   const [summary, setSummary] = useState<ProposalSummary | null>(null);
   const [topics, setTopics] = useState<Map<string, string>>(new Map());
   const [filters, setFilters] = useState<Filters>({
-    tier: "",
+    tier: initial?.tier ?? "",
     type: "",
-    topic: "",
+    topic: initial?.topic ?? "",
     state: "",
   });
+  const [confirming, setConfirming] = useState(false);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkStatus, setBulkStatus] = useState("");
+  const proposalSet = useProposalSet();
   const [list, setList] = useState<ProposalList | null>(null);
   const [rows, setRows] = useState<Proposal[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -272,7 +329,78 @@ function ProposalQueue({ canAdmin }: { canAdmin: boolean }) {
     setSelected(null);
     setDetail(null);
     setSimulation(null);
+    setConfirming(false);
+    setBulkStatus("");
     setFilters((current) => ({ ...current, ...patch }));
+  };
+
+  // Bulk review stays inside one tier and one topic (safety model); manual is one at a time.
+  const bulkScope =
+    filters.tier && filters.topic && filters.tier !== "manual"
+      ? { tier: filters.tier, topic: filters.topic }
+      : null;
+  const bulkRows = bulkScope
+    ? rows.filter(
+        (p) =>
+          p.tier === bulkScope.tier &&
+          p.topic_id === bulkScope.topic &&
+          p.decision?.state !== "accepted",
+      )
+    : [];
+  const scopeLabel = bulkScope
+    ? `${TIER_LABELS[bulkScope.tier]} · ${topics.get(bulkScope.topic) ?? bulkScope.topic}`
+    : "";
+  const bulkAccept = async () => {
+    if (!bulkScope || !list || !bulkRows.length) return;
+    setBulkBusy(true);
+    setBulkStatus("");
+    try {
+      let decided = 0;
+      for (let start = 0; start < bulkRows.length; start += 500) {
+        const chunk = bulkRows.slice(start, start + 500);
+        const result = await api<{ decided: number }>("proposals/decisions", {
+          method: "POST",
+          body: JSON.stringify({
+            proposal_ids: chunk.map((p) => p.id),
+            state: "accepted",
+            tier: bulkScope.tier,
+            topic_id: bulkScope.topic,
+            revision: list.revision,
+          }),
+        });
+        decided += result.decided;
+      }
+      setBulkStatus(
+        `Accepted ${count(decided)} proposals (${scopeLabel}). Nothing is applied; each decision is audited.`,
+      );
+      setConfirming(false);
+      void loadSummary();
+      void loadPage(filters, null, list.revision);
+    } catch (e) {
+      setBulkStatus(e instanceof Error ? e.message : "Bulk decision failed");
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+  const confirmRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (confirming) confirmRef.current?.focus();
+  }, [confirming]);
+  const useAsSet = () => {
+    if (!list || !rows.length) return;
+    const parts = [
+      filters.tier ? TIER_LABELS[filters.tier] : "",
+      filters.topic ? (topics.get(filters.topic) ?? "") : "",
+      filters.type ? TYPE_LABELS[filters.type] : "",
+    ].filter(Boolean);
+    setCustomSet(
+      rows.map((p) => p.id),
+      parts.join(" · ") || "queue",
+      list.revision,
+    );
+    setBulkStatus(
+      `${count(Math.min(rows.length, 2000))} shown proposals are now the custom set for the optimized views.`,
+    );
   };
 
   if (unavailable)
@@ -397,6 +525,79 @@ function ProposalQueue({ canAdmin }: { canAdmin: boolean }) {
             <option value="rejected">Rejected</option>
           </select>
         </label>
+      </div>
+      <div
+        className="bulk-bar"
+        role="group"
+        aria-label="Bulk review"
+        onKeyDown={(e) => {
+          if (e.key === "Escape" && confirming) setConfirming(false);
+        }}
+      >
+        <span
+          className="bulk-text"
+          role="status"
+          title={bulkStatus || undefined}
+        >
+          {bulkStatus ||
+            (confirming && bulkScope
+              ? `Accept ${count(bulkRows.length)} ${scopeLabel} proposals shown? Each is audited and carries forward; nothing is applied.`
+              : !bulkScope
+                ? filters.tier === "manual"
+                  ? "Manual-tier proposals are reviewed one at a time."
+                  : "Bulk review: choose one tier and one topic."
+                : !canAdmin
+                  ? "Administrators accept proposals in bulk."
+                  : `${count(bulkRows.length)} not yet accepted of ${count(rows.length)} shown (${scopeLabel}).`)}
+        </span>
+        {confirming && bulkScope ? (
+          <>
+            <Button
+              ref={confirmRef}
+              size="small"
+              disabled={bulkBusy || !bulkRows.length}
+              onClick={() => void bulkAccept()}
+            >
+              {bulkBusy
+                ? "Accepting…"
+                : `Confirm accept ${count(bulkRows.length)}`}
+            </Button>
+            <Button
+              variant="outline"
+              size="small"
+              disabled={bulkBusy}
+              onClick={() => setConfirming(false)}
+            >
+              Cancel
+            </Button>
+          </>
+        ) : (
+          <>
+            <Button
+              size="small"
+              disabled={!bulkScope || !canAdmin || !bulkRows.length}
+              onClick={() => {
+                setBulkStatus("");
+                setConfirming(true);
+              }}
+            >
+              Accept shown…
+            </Button>
+            <Button
+              variant="outline"
+              size="small"
+              disabled={!rows.length}
+              aria-pressed={
+                proposalSet.kind === "custom" &&
+                proposalSet.ids.length === Math.min(rows.length, 2000) &&
+                rows.every((p, i) => i >= 2000 || proposalSet.ids[i] === p.id)
+              }
+              onClick={useAsSet}
+            >
+              Use as custom set
+            </Button>
+          </>
+        )}
       </div>
       {error && (
         <div className="error-banner" role="alert">

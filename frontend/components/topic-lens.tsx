@@ -15,6 +15,8 @@ import type {
   ClusterLink,
   ClusterSummary,
   ProposalSummary,
+  TopicLinkRemovals,
+  TopicWhatIf,
   TopicDetail,
   TopicMap,
   TopicMember,
@@ -29,6 +31,9 @@ import {
   PrivilegeRows,
   windowText,
 } from "@/components/privilege";
+import { OptimizedSwitch } from "@/components/optimized";
+import { epiPrecise } from "@/lib/proposals";
+import { selectionBody, setDescription, useProposalSet } from "@/lib/optimized";
 
 const loading = () => (
   <div className="canvas-loading">
@@ -57,6 +62,28 @@ export const SHARE_COLORS = [
   { below: Infinity, color: "#d9534f", text: "35% or more" },
 ];
 const FALLBACK_COLOR = "#73849a";
+
+/** Optimized lens: color by identity excess privilege after the proposal set. */
+export const EPI_COLORS = [
+  { below: 0.25, color: "#4c9a8a", text: "under 25%" },
+  { below: 0.5, color: "#a7a04b", text: "25–50%" },
+  { below: 0.75, color: "#d0803c", text: "50–75%" },
+  { below: Infinity, color: "#d9534f", text: "75% or more" },
+];
+
+export function epiColor(epi: number | null | undefined): string {
+  if (typeof epi !== "number" || !Number.isFinite(epi)) return FALLBACK_COLOR;
+  return EPI_COLORS.find((s) => epi < s.below)!.color;
+}
+
+/** Identity EPI of a topic's what-if side (roles when it has no identity rows). */
+export function topicEpi(
+  row: TopicWhatIf | undefined,
+  side: "before" | "after",
+): number | null {
+  const totals = row?.identities?.rows ? row.identities : row?.roles;
+  return totals ? totals[side].epi : null;
+}
 
 export function topicColor(topic: TopicSummary): string {
   if (topic.kind === "fallback") return FALLBACK_COLOR;
@@ -122,12 +149,15 @@ export function TopicLens({
   stale,
   onError,
   onOpenNeighborhood,
+  onOpenTopicPage,
   statusSizer,
 }: {
   reloadKey: number;
   stale: boolean;
   onError: (e: unknown) => void;
   onOpenNeighborhood: (nodeId: string, revision: string) => void;
+  /** Open the full-width topic page (members, granted vs used, optimized subgraph). */
+  onOpenTopicPage?: (topicId: string, revision: string) => void;
   /** The structural status line, laid invisibly under this one to keep the bar height. */
   statusSizer?: ReactNode;
 }) {
@@ -141,6 +171,10 @@ export function TopicLens({
   const [members, setMembers] = useState<TopicMember[]>([]);
   const [member, setMember] = useState<TopicMember | null>(null);
   const [busy, setBusy] = useState(false);
+  const [optimized, setOptimized] = useState(false);
+  const [whatif, setWhatif] = useState<TopicLinkRemovals | null>(null);
+  const [whatifError, setWhatifError] = useState("");
+  const proposalSet = useProposalSet();
   const request = useRef<AbortController | null>(null);
   const detailRequest = useRef<AbortController | null>(null);
 
@@ -240,6 +274,62 @@ export function TopicLens({
     return () => clearInterval(timer);
   }, [unavailable, loadMap]);
 
+  useEffect(() => {
+    if (!optimized || !map) {
+      setWhatif(null);
+      setWhatifError("");
+      return;
+    }
+    const controller = new AbortController();
+    setWhatifError("");
+    api<TopicLinkRemovals>("proposals/links", {
+      method: "POST",
+      signal: controller.signal,
+      body: JSON.stringify({
+        ...selectionBody(proposalSet),
+        revision: map.revision,
+      }),
+    }).then(
+      (found) => {
+        if (!controller.signal.aborted) setWhatif(found);
+      },
+      (e) => {
+        if (controller.signal.aborted) return;
+        setWhatif(null);
+        if (e instanceof ApiError && e.status === 409) onError(e);
+        else
+          setWhatifError(
+            e instanceof Error ? e.message : "Optimized view failed",
+          );
+      },
+    );
+    return () => controller.abort();
+  }, [optimized, map, proposalSet, onError]);
+  const whatifByTopic = useMemo(
+    () => new Map((whatif?.topics ?? []).map((t) => [t.topic_id, t])),
+    [whatif],
+  );
+  const restyle = useMemo(() => {
+    if (!optimized || !whatif || !map) return null;
+    const colors = new Map(
+      map.topics.map((t) => [
+        t.id,
+        t.kind === "fallback"
+          ? FALLBACK_COLOR
+          : epiColor(topicEpi(whatifByTopic.get(t.id), "after")),
+      ]),
+    );
+    const removed = new Map(
+      whatif.links.map((l) => [`${l.source}~${l.target}`, l.removed]),
+    );
+    const weights = new Map(
+      map.edges.map((l) => {
+        const id = `${l.source}~${l.target}`;
+        return [id, Math.max(0, l.weight - (removed.get(id) ?? 0))];
+      }),
+    );
+    return { colors, weights };
+  }, [optimized, whatif, map, whatifByTopic]);
   const circles = useMemo(() => map?.topics.map(topicCircle) ?? [], [map]);
   const links: ClusterLink[] = useMemo(() => map?.edges ?? [], [map]);
   const byId = useMemo(
@@ -356,15 +446,31 @@ export function TopicLens({
               captionOf={(c) => captions.get(c.id) ?? c.label}
               label="Topics map"
               unit="topics"
-              legend={[
-                { text: "Circle area: sensitivity weight" },
-                ...SHARE_COLORS.map((s) => ({
-                  text: `Outside the topic: ${s.text}`,
-                  color: s.color,
-                })),
-                { text: "Unassigned", color: FALLBACK_COLOR },
-                { text: "Line width: cross-topic grants" },
-              ]}
+              restyle={restyle}
+              legend={
+                restyle
+                  ? [
+                      { text: "Circle area: sensitivity weight" },
+                      ...EPI_COLORS.map((s) => ({
+                        text: `Identity EPI after: ${s.text}`,
+                        color: s.color,
+                      })),
+                      {
+                        text: "Unassigned or no evidence",
+                        color: FALLBACK_COLOR,
+                      },
+                      { text: "Line width: cross-topic grants left" },
+                    ]
+                  : [
+                      { text: "Circle area: sensitivity weight" },
+                      ...SHARE_COLORS.map((s) => ({
+                        text: `Outside the topic: ${s.text}`,
+                        color: s.color,
+                      })),
+                      { text: "Unassigned", color: FALLBACK_COLOR },
+                      { text: "Line width: cross-topic grants" },
+                    ]
+              }
             />
           </div>
           <div className="identity-list" aria-label="Open a topic">
@@ -384,6 +490,23 @@ export function TopicLens({
           className="node-sidebar global-map-sidebar topic-sidebar"
           aria-label="Topic details"
         >
+          <div className="topic-optimized">
+            <OptimizedSwitch
+              optimized={optimized}
+              onToggle={setOptimized}
+              disabled={stale}
+              label="Current or optimized topics"
+            />
+            <small className="optimized-note" role="status">
+              {!optimized
+                ? "Current: colored by granted weight outside each topic."
+                : whatifError
+                  ? `Optimized view unavailable: ${whatifError}`
+                  : whatif
+                    ? `${setDescription(proposalSet)}: ${count(whatif.links.reduce((sum, l) => sum + l.removed, 0))} cross-topic grants removed · colored by identity EPI after · simulated, not applied`
+                    : `${setDescription(proposalSet)}: loading…`}
+            </small>
+          </div>
           {member && focus ? (
             <MemberPanel
               member={member}
@@ -393,7 +516,15 @@ export function TopicLens({
               onOpen={() => onOpenNeighborhood(member.id, map.revision)}
             />
           ) : hovered && hovered.id !== selected ? (
-            <TopicFacts topic={hovered} measured={measured} hint />
+            <TopicFacts
+              topic={hovered}
+              measured={measured}
+              hint
+              whatif={
+                restyle ? (whatifByTopic.get(hovered.id) ?? null) : undefined
+              }
+              setName={setDescription(proposalSet)}
+            />
           ) : focus ? (
             <>
               <TopicFacts
@@ -401,7 +532,32 @@ export function TopicLens({
                 measured={measured}
                 proposals={proposals?.topics[focus.id] ?? null}
                 proposalsReady={proposals !== null}
+                whatif={
+                  restyle ? (whatifByTopic.get(focus.id) ?? null) : undefined
+                }
+                removedOut={
+                  restyle
+                    ? whatif!.links
+                        .filter(
+                          (l) => l.source === focus.id || l.target === focus.id,
+                        )
+                        .reduce((sum, l) => sum + l.removed, 0)
+                    : undefined
+                }
+                linkTotal={map.edges
+                  .filter((l) => l.source === focus.id || l.target === focus.id)
+                  .reduce((sum, l) => sum + l.weight, 0)}
+                setName={setDescription(proposalSet)}
               />
+              {onOpenTopicPage && (
+                <Button
+                  variant="outline"
+                  disabled={stale}
+                  onClick={() => onOpenTopicPage(focus.id, map.revision)}
+                >
+                  Open topic page
+                </Button>
+              )}
               <span className="section-label">Most over-privileged roles</span>
               {detail && detail.topic.id === focus.id ? (
                 detail.top_roles.length ? (
@@ -566,16 +722,57 @@ function TopicFacts({
   measured,
   proposals,
   proposalsReady,
+  whatif,
+  removedOut,
+  linkTotal = 0,
+  setName,
 }: {
   topic: TopicSummary;
   hint?: boolean;
   measured?: boolean;
   proposals?: ProposalSummary["topics"][string] | null;
   proposalsReady?: boolean;
+  /** Optimized lens: the topic's what-if (null: nothing modelled for it). */
+  whatif?: TopicWhatIf | null;
+  /** Optimized lens: cross-topic grants of this topic's links the set removes. */
+  removedOut?: number;
+  /** Cross-topic grants on this topic's links shown on the map. */
+  linkTotal?: number;
+  setName?: string;
 }) {
   const privilege = topic.privilege;
   return (
     <>
+      {whatif !== undefined && (
+        <>
+          <span className="section-label">Before → after · {setName}</span>
+          <dl className="topic-before-after">
+            <dt>Identity EPI</dt>
+            <dd>
+              {epiPrecise(topicEpi(whatif ?? undefined, "before"))} →{" "}
+              {epiPrecise(topicEpi(whatif ?? undefined, "after"))}
+            </dd>
+            <dt>Without hubs</dt>
+            <dd>
+              {epiPrecise(whatif?.identities?.before.epi_excl_hubs)} →{" "}
+              {epiPrecise(whatif?.identities?.after.epi_excl_hubs)}
+            </dd>
+            <dt>Role EPI</dt>
+            <dd>
+              {epiPrecise(whatif?.roles?.before.epi)} →{" "}
+              {epiPrecise(whatif?.roles?.after.epi)}
+            </dd>
+            {removedOut !== undefined && (
+              <>
+                <dt>Cross-topic grants removed</dt>
+                <dd>
+                  {count(removedOut)} of {count(linkTotal)}
+                </dd>
+              </>
+            )}
+          </dl>
+        </>
+      )}
       <span className="section-label">{hint ? "Topic" : "Open topic"}</span>
       <h3 title={topic.label}>{topic.label}</h3>
       <span className="node-type">

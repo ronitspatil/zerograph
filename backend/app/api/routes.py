@@ -404,10 +404,13 @@ def graph_topic(
     kind: Literal["resource", "role", "identity"] = "resource",
     offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
     limit: Annotated[int, Query(ge=1, le=MAX_PAGE)] = 50,
+    sort: Literal["rank", "excess"] = "rank",
     revision: str | None = None,
 ):
     """One topic with a page of its data assets, roles or identities (profiles and flags) and
-    its most over-privileged roles. Granted (structural) access, not needed access."""
+    its most over-privileged roles. Granted (structural) access, not needed access.
+    ``sort=excess`` orders roles and identities by granted minus needed weight (the topic's
+    top excess-privilege contributors)."""
     current = expected_revision(db, actor.tenant_id, revision)
     _topic_summary(db, actor.tenant_id, current)
     try:
@@ -415,7 +418,7 @@ def graph_topic(
     except RevisionUnavailable:
         raise _unavailable() from None
     try:
-        return topic_detail(db, actor.tenant_id, current, topic_id, kind, offset, limit)
+        return topic_detail(db, actor.tenant_id, current, topic_id, kind, offset, limit, sort)
     except TopicNotFound:
         raise HTTPException(404, "Topic not found in this revision") from None
 
