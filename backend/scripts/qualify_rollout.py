@@ -7,7 +7,11 @@ the planted usage as CloudTrail exports and lets the sweep compute topics and pr
 Then:
 
 1. accepts the high-tier ``remove_grant`` / ``disable_*`` proposals of a sample of
-   principals across topics (through the API);
+   principals across topics (through the API). The sample is deterministic for a seed:
+   ``--roles-per-topic`` seeded roles per topic, topped up round-robin across topics until
+   at least ``--min-scopings`` ``remove_grant`` proposals are accepted, plus ``--disables``
+   seeded disables. The usage window stays relative to the current time on purpose (the
+   evidence must be fresh to reach the high tier), and nothing in the sample depends on it;
 2. **diff correctness**: plans every accepted principal (``rollout.plan_change``) and
    re-evaluates every grant edge of each touched principal with ``iam_evaluator``
    before and after the diff (``rollout_reference.verify_diffs``): exactly the removed
@@ -77,6 +81,7 @@ def main() -> None:  # noqa: C901 - one linear qualification run
     parser.add_argument("--seed", type=int, default=11)
     parser.add_argument("--roles-per-topic", type=int, default=10)
     parser.add_argument("--disables", type=int, default=60)
+    parser.add_argument("--min-scopings", type=int, default=500)
     parser.add_argument("--chunk-bytes", type=int, default=3_900_000)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
@@ -256,15 +261,31 @@ def main() -> None:  # noqa: C901 - one linear qualification run
         for row in rows:
             if row["type"] == "remove_grant" and kinds.get(row["subject_id"]) == "CloudRole":
                 by_topic.setdefault(row["topic_id"], {}).setdefault(row["subject_id"], []).append(row)
-        chosen: list[dict] = []
+        # Deterministic for the seed: only stable IDs (topic, subject, target) order the
+        # candidates, never proposal IDs, page order or the clock.
         sampled_roles: dict[str, list[str]] = {}
+        remaining: dict[str, list[str]] = {}
         for topic in sorted(by_topic):
             roles = sorted(by_topic[topic])
             rng.shuffle(roles)
-            sampled_roles[topic] = sorted(roles[: args.roles_per_topic])
+            sampled_roles[topic] = roles[: args.roles_per_topic]
+            remaining[topic] = roles[args.roles_per_topic :]
+        scopings = sum(len(by_topic[t][r]) for t, roles in sampled_roles.items() for r in roles)
+        while scopings < args.min_scopings and any(remaining.values()):
+            for topic in sorted(remaining):
+                if remaining[topic] and scopings < args.min_scopings:
+                    role = remaining[topic].pop(0)
+                    sampled_roles[topic].append(role)
+                    scopings += len(by_topic[topic][role])
+        chosen: list[dict] = []
+        for topic in sorted(sampled_roles):
+            sampled_roles[topic] = sorted(sampled_roles[topic])
             for role in sampled_roles[topic]:
-                chosen += by_topic[topic][role]
-        disables = [r for r in rows if r["type"] in ("disable_role", "disable_identity")]
+                chosen += sorted(by_topic[topic][role], key=lambda r: r["target_id"] or "")
+        disables = sorted(
+            (r for r in rows if r["type"] in ("disable_role", "disable_identity")),
+            key=lambda r: (r["type"], r["subject_id"], r["target_id"] or ""),
+        )
         rng.shuffle(disables)
         chosen += disables[: args.disables]
         accept_times = []
@@ -279,6 +300,12 @@ def main() -> None:  # noqa: C901 - one linear qualification run
             "topics": len(sampled_roles),
             "roles": sum(len(v) for v in sampled_roles.values()),
             "high_tier_available": len(rows),
+            "min_scopings": args.min_scopings,
+            "sample_sha256": hashlib.sha256(
+                json.dumps(
+                    [[r["type"], r["subject_id"], r["target_id"]] for r in chosen], separators=(",", ":")
+                ).encode()
+            ).hexdigest(),
         }
         report["timings"]["accept_decision"] = percentiles(accept_times)
         print(json.dumps(report["accepted"]), flush=True)
