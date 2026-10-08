@@ -51,7 +51,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from pydantic import BaseModel
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, false, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from app.db.locks import acquire_publication_lock, try_publication_lock
@@ -944,6 +944,7 @@ PROPOSAL_COLUMNS = [
     "subject_name", "subject_type", "target_id", "target_name", "weight", "identities", "epi_before",
     "epi_after", "reasons", "evidence", "changes", "digest",
 ]  # fmt: skip
+JSON_POSITIONS = tuple(PROPOSAL_COLUMNS.index(c) for c in ("reasons", "evidence", "changes"))
 
 
 def proposal_rows(computed_proposals: ComputedProposals, computed, tenant: str, revision: str):
@@ -1003,7 +1004,11 @@ def store_proposals(
     )
     db.flush()
     _bulk_insert(
-        db, RevisionProposal, PROPOSAL_COLUMNS, proposal_rows(computed_proposals, computed, tenant, revision)
+        db,
+        RevisionProposal,
+        PROPOSAL_COLUMNS,
+        proposal_rows(computed_proposals, computed, tenant, revision),
+        json_columns=JSON_POSITIONS,
     )
 
 
@@ -1141,6 +1146,43 @@ DECISION_STATES = ("accepted", "rejected")
 FILTER_STATES = ("pending", "accepted", "rejected")
 
 
+def ordinal_ranges(totals: dict, tier: str | None, kind: str | None) -> list[tuple[int, int]]:
+    """Half-open ordinal ranges of a revision's proposals of one tier and/or type.
+
+    Proposals are ordered by (tier, type, ...) (``compute_proposals``), so each (tier, type)
+    group is one contiguous block whose size is in the stored summary (``by_type_tier``).
+    """
+    by_type_tier = totals.get("by_type_tier", {})
+    ranges: list[tuple[int, int]] = []
+    start = 0
+    for tier_ in TIERS:
+        for kind_ in TYPES:
+            count = by_type_tier.get(kind_, {}).get(tier_, 0)
+            if count and tier in (None, tier_) and kind in (None, kind_):
+                if ranges and ranges[-1][1] == start:
+                    ranges[-1] = (ranges[-1][0], start + count)
+                else:
+                    ranges.append((start, start + count))
+            start += count
+    return ranges
+
+
+def summary_count(
+    totals: dict, tier: str | None, kind: str | None, topic: str | None, ranges: list | None
+) -> int | None:
+    """Matching proposals from the stored summary counts, or None if they don't say."""
+    if topic:
+        if kind:
+            return None
+        found = totals.get("topics", {}).get(topic)
+        if found is None:
+            return 0
+        return found["by_tier"].get(tier, 0) if tier else found["total"]
+    if ranges is not None:
+        return sum(high - low for low, high in ranges)
+    return totals.get("total")
+
+
 def proposal_page(
     db: Session,
     summary: RevisionProposalSummary,
@@ -1161,7 +1203,15 @@ def proposal_page(
     if state is not None and state not in FILTER_STATES:
         raise ValueError("Unknown decision state")
     tenant, revision = summary.tenant_id, summary.revision
+    totals = summary.totals if isinstance(summary.totals, dict) else json.loads(summary.totals)
     scope = [RevisionProposal.tenant_id == tenant, RevisionProposal.revision == revision]
+    ranges = None
+    if tier or kind:
+        # Rows are stored tier first, then type: the filter is a few ordinal ranges, read
+        # through the order index (no per-tier or per-type index is kept).
+        ranges = ordinal_ranges(totals, tier, kind)
+        bounds = [RevisionProposal.ordinal.between(low, high - 1) for low, high in ranges]
+        scope.append(or_(*bounds) if bounds else false())
     if tier:
         scope.append(RevisionProposal.tier == tier)
     if kind:
@@ -1176,13 +1226,16 @@ def proposal_page(
             scope.append(RevisionProposal.proposal_id.not_in(decided))
         else:
             scope.append(RevisionProposal.proposal_id.in_(decided.where(ProposalDecision.state == state)))
-    total = db.scalar(select(func.count()).select_from(RevisionProposal).where(*scope))
+    total = None
+    if not (subject or state):
+        total = summary_count(totals, tier, kind, topic, ranges)
+    if total is None:
+        total = db.scalar(select(func.count()).select_from(RevisionProposal).where(*scope))
     query = select(RevisionProposal).where(*scope)
     if cursor is not None:
         query = query.where(RevisionProposal.ordinal > cursor)
     rows = list(db.scalars(query.order_by(RevisionProposal.ordinal).limit(limit)))
     decisions = _decisions(db, tenant, [row.proposal_id for row in rows])
-    totals = summary.totals if isinstance(summary.totals, dict) else json.loads(summary.totals)
     return ProposalListResponse(
         revision=revision,
         proposals=[_view(row, decisions.get(row.proposal_id)) for row in rows],

@@ -468,8 +468,6 @@ class RevisionProposal(Base):
     __tablename__ = "revision_proposals"
     __table_args__ = (
         Index("ux_revision_proposals_order", "tenant_id", "revision", "ordinal", unique=True),
-        Index("ix_revision_proposals_tier", "tenant_id", "revision", "tier", "ordinal"),
-        Index("ix_revision_proposals_type", "tenant_id", "revision", "type", "ordinal"),
         Index("ix_revision_proposals_topic", "tenant_id", "revision", "topic_id", "ordinal"),
         Index("ix_revision_proposals_subject", "tenant_id", "revision", "subject_id"),
         Index("ix_revision_proposals_target", "tenant_id", "revision", "target_id"),
