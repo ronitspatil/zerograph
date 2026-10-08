@@ -215,9 +215,15 @@ describe("bounded graph exploration", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "Simulate compromise" }),
     );
-    expect(
-      await screen.findByText(/Server-side simulation: 1 affected nodes/),
-    ).toBeInTheDocument();
+    // The count sits last, in a fixed-width box, so the bar never re-wraps.
+    await waitFor(() =>
+      expect(document.querySelector(".simulation-note")).toHaveTextContent(
+        "Server-side simulation, affected nodes outside the visible view: 1",
+      ),
+    );
+    expect(document.querySelector(".simulation-count")).toHaveTextContent(
+      /^1$/,
+    );
   });
   it("retains permission denial without fabricating a neighborhood", async () => {
     await ready();
