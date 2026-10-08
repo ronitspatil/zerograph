@@ -15,6 +15,8 @@ import type {
   TopicMember,
   TopicSummary,
 } from "@/lib/types";
+// The status bar keeps an invisible copy of the top-level line as its sizer.
+const VISIBLE = { ignore: "script, style, [aria-hidden=true] *" };
 vi.mock("@/lib/api", async () => ({
   ...(await vi.importActual<typeof import("@/lib/api")>("@/lib/api")),
   api: vi.fn(),
@@ -204,7 +206,7 @@ function renderMap(open = vi.fn()) {
 describe("topics lens", () => {
   it("switches lenses, keeps each notice to its own mode and counts with separators", async () => {
     renderMap();
-    await screen.findByText(/0 \/ 0 top-level clusters/);
+    await screen.findByText(/0 \/ 0 top-level clusters/, VISIBLE);
     expect(screen.getAllByText(STRUCTURAL).length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: "Topics" }));
     const status = await screen.findByText(/2 \/ 2 topics/);
@@ -237,13 +239,13 @@ describe("topics lens", () => {
       "true",
     );
     fireEvent.click(screen.getByRole("button", { name: "Structure" }));
-    await screen.findByText(/0 \/ 0 top-level clusters/);
+    await screen.findByText(/0 \/ 0 top-level clusters/, VISIBLE);
     expect(screen.queryByText(TOPICS)).toBeNull();
   });
 
   it("opens a topic panel with its reason, top roles and paged members, then hands off to explore", async () => {
     const open = renderMap();
-    await screen.findByText(/top-level clusters/);
+    await screen.findAllByText(/top-level clusters/);
     fireEvent.click(screen.getByRole("button", { name: "Topics" }));
     fireEvent.click(
       await screen.findByRole("button", { name: "data-lake · 4,500" }),
@@ -403,7 +405,7 @@ describe("topics lens", () => {
       return { ...detail("role", 0, [role], 1), topic: measured.topics[0] };
     };
     renderMap();
-    await screen.findByText(/top-level clusters/);
+    await screen.findAllByText(/top-level clusters/);
     fireEvent.click(screen.getByRole("button", { name: "Topics" }));
     await screen.findByText(/1 \/ 2 topics|2 \/ 2 topics/);
     expect(

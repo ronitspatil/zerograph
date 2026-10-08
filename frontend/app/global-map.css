@@ -282,3 +282,16 @@
 .global-map-status .status-layer.sizer {
   visibility: hidden;
 }
+/* Structure lens: the bar is sized by the invisible top-level line alone. The current
+   level's line is laid over it and clipped to that height (full text in the title), so
+   a level line that wraps differently can never grow or shrink the bar. */
+.global-map-status.reserved {
+  position: relative;
+}
+.global-map-status.reserved > .status-layer:not(.sizer) {
+  position: absolute;
+  inset: 0;
+  padding: inherit;
+  align-content: flex-start;
+  overflow: hidden;
+}
