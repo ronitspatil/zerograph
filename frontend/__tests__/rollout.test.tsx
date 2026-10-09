@@ -131,7 +131,8 @@ describe("Rollout panel", () => {
   });
 
   it("shows a merge warning and a refused revert on a merged change", async () => {
-    const refused = "The change is not on the base branch (not merged, or already reverted); nothing to revert";
+    const refused =
+      "The change is not on the base branch (not merged, or already reverted); nothing to revert";
     vi.mocked(api).mockImplementation(async (path) => {
       calls.push(path);
       if (path === "rollout")
@@ -156,7 +157,8 @@ describe("Rollout panel", () => {
         } as never;
       return {
         state: "merged",
-        warning: "The Git provider does not show this pull request as merged; recorded anyway.",
+        warning:
+          "The Git provider does not show this pull request as merged; recorded anyway.",
       } as never;
     });
     render(<Rollout canAdmin />);
@@ -167,11 +169,15 @@ describe("Rollout panel", () => {
       within(auditor).getByRole("button", { name: "Open revert PR" }),
     ).toBeEnabled();
     const pending = screen.getByText("etl-runner").closest("article")!;
-    fireEvent.click(within(pending).getByRole("button", { name: "Mark merged" }));
+    fireEvent.click(
+      within(pending).getByRole("button", { name: "Mark merged" }),
+    );
     await act(async () => {});
     expect(calls).toContain("rollout/changes/c4/merged");
     expect(
-      screen.getByText(/Recorded as merged.*Warning: The Git provider does not show/),
+      screen.getByText(
+        /Recorded as merged.*Warning: The Git provider does not show/,
+      ),
     ).toBeInTheDocument();
   });
 

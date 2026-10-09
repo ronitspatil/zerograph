@@ -93,7 +93,9 @@ export function Rollout({
           revert: `Revert pull request opened for ${change.subject_name} (draft; never merged by ZeroGraph).`,
           reverted: `Recorded as rolled back.`,
         }[action];
-        setMessage(result?.warning ? `${done} Warning: ${result.warning}` : done);
+        setMessage(
+          result?.warning ? `${done} Warning: ${result.warning}` : done,
+        );
       }
       await load();
     } catch (e) {
