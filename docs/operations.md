@@ -26,7 +26,9 @@ The console uses PKCE and an encrypted HTTP-only session cookie. Configure `ZG_S
 
 ## AWS collection
 
-Configure `ZG_AWS_TENANT_ID`, `ZG_AWS_ROLE_ARN`, region, optional external ID and optional `ZG_AWS_ACCESS_ADVISOR=true` (IAM Access Advisor last-accessed hints; needs the two Access Advisor permissions in `deploy/aws/collector-role-policy.example.json`) on the backend and worker. Give the workload an AWS identity through the standard boto3 credential chain. No cloud credentials are accepted from the browser.
+Configure `ZG_AWS_TENANT_ID`, `ZG_AWS_ROLE_ARN`, region, optional external ID, optional `ZG_AWS_ACCOUNT_ID` and optional `ZG_AWS_ACCESS_ADVISOR=true` (IAM Access Advisor last-accessed hints; needs the two Access Advisor permissions in `deploy/aws/collector-role-policy.example.json`) on the backend and worker. Give the workload an AWS identity through the standard boto3 credential chain. No cloud credentials are accepted from the browser.
+
+After AssumeRole, and before any inventory call, the worker confirms the STS caller identity against the target, as the qualification CLI does: the account must be `ZG_AWS_ACCOUNT_ID` (or, when that is unset, the account in `ZG_AWS_ROLE_ARN`) and the identity must be an assumed-role session of the configured role in that partition. A mismatch fails the collection closed; a `ZG_AWS_ROLE_ARN` that is not an IAM role ARN, or a `ZG_AWS_ACCOUNT_ID` that differs from its account, fails the job before AssumeRole. Leaving `ZG_AWS_ACCOUNT_ID` unset is safe: the check still runs against the role ARN's account.
 
 The assumed role needs read-only access to IAM authorization details and managed policy versions, S3 bucket listing, policies, tags and encryption configuration, and Organizations descriptions and SCP hierarchy. Scope these rights to the required accounts where AWS supports resource constraints. The collector never reads object contents or modifies cloud infrastructure. Missing required IAM inventory aborts the job; optional missing metadata is reported as incomplete coverage.
 
