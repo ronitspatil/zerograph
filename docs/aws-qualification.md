@@ -12,6 +12,14 @@ objects, reads object contents, creates AWS resources or changes policies.
   most 32 per entity; extra tags are dropped, counted in `tags_dropped` and warned
   about). Bucket classification labels (`PII`, `PHI`, ...) stay beside them. Tags
   such as `topic=`, `app=` and `team=` anchor relationship topics.
+- **Classification tags.** Besides words in bucket names and tags (`email`, `ssn`,
+  `patient`, ...), explicit classification tags are labels: keys `data-class`,
+  `data_classification`, `classification`, `sensitivity` or `dataclass` (case and
+  separators ignored) with values `PII`, `PHI`, `PCI` or `Credentials` (case-insensitive;
+  several may be separated by commas, spaces, `;`, `/`, `|` or `+`) add that label, and
+  `confidential`/`restricted` raise the bucket's sensitivity. So `data-class=PII` labels
+  the bucket `PII` (sensitivity `confidential`), with `classification_basis`
+  `classification_tag`. Other values (`public`, `internal`) never lower sensitivity.
 - **Last-used hints.** `RoleLastUsed` (`LastUsedDate`, `Region`) from
   `GetAccountAuthorizationDetails` becomes `role_last_used`/`role_last_used_region`
   role metadata. With `ZG_AWS_ACCESS_ADVISOR=true`, the collector also starts one
@@ -27,11 +35,31 @@ objects, reads object contents, creates AWS resources or changes policies.
   submitted as a `PolicyAttachment` beside the graph. Publication stores each
   distinct document once per revision in PostgreSQL (`revision_policy_documents`,
   keyed by the SHA-256 of its canonical JSON) and every attachment in
-  `revision_policies`; node JSON never carries documents. Bounds: 64 KiB and 256
-  statements per document, `max_policy_attachments` per collection, 50,000
-  attachments per snapshot and 64 MiB of distinct documents per revision (a
-  larger revision fails publication). `GET /api/v1/graph/policies?principal=ARN`
+  `revision_policies`; node JSON never carries documents. Bounds: 64 KiB (canonical
+  compact JSON) and 256 statements per customer-authored document (inline,
+  customer-managed, trust, bucket policy, SCP; AWS caps these far lower, and exceeding
+  the bound fails the collection), 1 MiB and 2,048 statements per AWS-managed policy
+  (`arn:<partition>:iam::aws:policy/...`, see below), `max_policy_attachments` per
+  collection, 50,000 attachments per snapshot and 64 MiB of distinct documents per
+  revision (a larger revision fails publication). `GET /api/v1/graph/policies?principal=ARN`
   (analyst) returns one principal's documents.
+- **Large AWS-managed policies.** Some AWS-managed policies exceed 64 KiB:
+  `AWSSupportServiceRolePolicy`, attached to `AWSServiceRoleForSupport` in essentially
+  every account, is about 152 KB of compact JSON. They are collected and evaluated
+  like any other document up to 1 MiB and 2,048 statements. An AWS-managed document
+  beyond either bound does **not** abort the collection: its attachment is kept with
+  the policy ARN and the SHA-256 (and size) of its canonical JSON in place of the
+  document (`{"ZeroGraphUnevaluated": {"status": "too_large/unevaluated", ...}}`, no
+  `Statement`), warning code `policy_unevaluated` is raised, artifact coverage counts
+  `unevaluated_policy_documents`, and the principal gets `policies_unevaluated`
+  metadata (the ARNs, at most 20). The access that policy grants or denies is unknown:
+  none of its statements is applied (no edge is derived from it; the principal's
+  other conditional edges carry evidence that a policy was not evaluated), an
+  unevaluated permissions boundary allows nothing that can be claimed (no edges for
+  that principal), and every optimizer proposal for that principal is forced to
+  `manual` with never-auto reason `unevaluated_policy`. Customer-authored documents
+  never get the larger bound, and a snapshot upload may use it only for a
+  `managed`/`boundary`/`group-managed` attachment whose ARN is AWS-managed.
 - **Users and groups.** Users get the union of their own and their groups'
   policies (permission boundaries and SCPs apply as for roles) and are evaluated for
   the same S3 actions and `sts:AssumeRole` into every role. A user in a group missing
@@ -40,9 +68,13 @@ objects, reads object contents, creates AWS resources or changes policies.
 Every generated AWS permission edge remains **conditional**. A successful
 inventory is not complete effective-permission or production qualification.
 
-No live sandbox credentials were supplied for this implementation. Tests use
-synthetic credentials with botocore Stubber and mocks; live authentication,
+Tests use synthetic credentials with botocore Stubber and mocks; live authentication,
 permissions, regional behavior and account-scale timing remain qualification gates.
+A read-only live check (2026-10-09, replayed offline) found the 64 KiB cap aborting on
+`AWSSupportServiceRolePolicy`, `aws login` profiles failing without `botocore[crt]`, the CLI never
+enabling Access Advisor, the in-app path skipping the STS target check, and explicit
+classification tags such as `data-class=PII` being ignored; those are fixed as
+described here.
 
 ## Provision a sandbox read role
 
@@ -94,6 +126,14 @@ It reserves a new artifact file with mode 0600 and refuses existing paths before
 credential discovery. The CLI assumes the supplied role for 900 seconds, then
 verifies the returned STS account, ARN partition and assumed-role name **before**
 any IAM/S3/Organizations inventory. It never publishes to ZeroGraph databases.
+Access Advisor follows the in-app setting: `ZG_AWS_ACCESS_ADVISOR` (default false,
+read directly so the CLI needs no other server settings) unless `--access-advisor` or
+`--no-access-advisor` is given; a malformed value is a usage error before any
+credential discovery.
+
+Profiles that sign in with `aws login` need the AWS Common Runtime: the backend
+dependencies pin `awscrt` (`boto3[crt]`), so the CLI works with them from a normal
+`pip install -r requirements.lock`.
 
 ```sh
 # Set external ID securely in the process environment; do not put it in arguments.
@@ -104,6 +144,7 @@ python -m app.collectors.aws_collector \
   --confirm-account 123456789012 \
   --confirm-role arn:aws:iam::123456789012:role/ZeroGraphReadOnlyCollector \
   --ack-readonly-sandbox --external-id-env ZG_QUALIFICATION_EXTERNAL_ID \
+  --access-advisor \
   --artifact /approved/private/path/aws-qualification.json
 ```
 
@@ -114,7 +155,8 @@ before invoking the CLI. There is no implicit default-profile discovery path.
 
 Artifact schema v1 includes hashed target account/role identifiers, region,
 aggregate role/user/group/bucket/edge/evaluation/policy-attachment counts, RoleLastUsed
-observed/absent counts, Access Advisor requested/completed counts, inventory-completeness flags,
+observed/absent counts, Access Advisor requested/completed counts (when Access Advisor
+is enabled), unevaluated AWS-managed document counts, inventory-completeness flags,
 SCP coverage status, bucket metadata observed/absent/unknown counts, warning-code
 counts, budgets, SDK invocation/page counts and duration. It includes no resource
 names, raw policy JSON, credentials, external IDs or exception strings. Correlate
@@ -138,7 +180,8 @@ verification remain false for every outcome.
 | Organizations ancestor depth | 10 | 20 |
 | Collection wall time | 600 seconds | 600 seconds |
 
-Each policy document is additionally bounded to 64 KiB and 256 statements; each role
+Each customer-authored policy document is additionally bounded to 64 KiB and 256
+statements (AWS-managed: 1 MiB and 2,048, degrading to unevaluated beyond); each role
 has at most 100 unique attached policy references. Duplicate inventory rows and
 policy IDs are reconciled before consuming unique-resource budgets. Conflicting
 role/bucket duplicates, repeated continuation tokens, malformed/truncated pages,

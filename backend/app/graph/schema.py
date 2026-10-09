@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -68,14 +69,33 @@ class Edge(BaseModel):
 
 
 # Policy documents travel beside the graph (staged and stored in SQL per revision),
-# never inside node JSON. Each document is bounded like the AWS collector's decoder.
+# never inside node JSON. Each document is bounded like the AWS collector's decoder:
+# 64 KiB for customer-authored documents (AWS itself caps those far lower), 1 MiB for
+# AWS-managed policies (``arn:<partition>:iam::aws:policy/...``), some of which exceed
+# 64 KiB (``AWSSupportServiceRolePolicy`` is ~150 KB). Every revision's distinct
+# documents also share ``app.graph.policies.MAX_REVISION_POLICY_BYTES``.
 MAX_POLICY_BYTES = 65536
+MAX_AWS_MANAGED_POLICY_BYTES = 2**20
+AWS_MANAGED_POLICY_ARN = re.compile(r"arn:(?:aws|aws-us-gov|aws-cn):iam::aws:policy/.+")
+MANAGED_POLICY_KINDS = ("managed", "boundary", "group-managed")
 MAX_SNAPSHOT_POLICIES = 50_000
 POLICY_KINDS = ("inline", "managed", "boundary", "trust", "group-inline", "group-managed")
 
 
 def canonical_policy(document: dict) -> str:
     return json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def aws_managed_policy(arn: str) -> bool:
+    """An AWS-managed policy ARN (owned by the ``aws`` account, not a customer account)."""
+    return bool(AWS_MANAGED_POLICY_ARN.fullmatch(arn or ""))
+
+
+def policy_byte_limit(kind: str, arn: str) -> int:
+    """Canonical-JSON byte bound of one attached document of ``kind`` from ``arn``."""
+    if kind in MANAGED_POLICY_KINDS and aws_managed_policy(arn):
+        return MAX_AWS_MANAGED_POLICY_BYTES
+    return MAX_POLICY_BYTES
 
 
 class PolicyAttachment(BaseModel):
@@ -95,7 +115,7 @@ class PolicyAttachment(BaseModel):
 
     @model_validator(mode="after")
     def validate_document(self) -> "PolicyAttachment":
-        if len(canonical_policy(self.document).encode()) > MAX_POLICY_BYTES:
+        if len(canonical_policy(self.document).encode()) > policy_byte_limit(self.kind, self.arn):
             raise ValueError("Policy document exceeds the byte limit")
         return self
 

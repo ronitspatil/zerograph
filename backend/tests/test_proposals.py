@@ -167,6 +167,10 @@ def test_invariant_detects_a_violation():
         ({"tags": ["schedule=seasonal"]}, "seasonal"),
         ({"metadata": {"scp_exempt_service_linked_role": True}}, "service_linked"),
         ({"name": "dr-failover"}, "break_glass"),
+        (
+            {"metadata": {"policies_unevaluated": ["arn:aws:iam::aws:policy/HugeManagedPolicy"]}},
+            "unevaluated_policy",
+        ),
     ],
 )
 def test_never_auto_identities_are_manual(change, reason):
