@@ -82,6 +82,10 @@ the change in `revert_open`: it returns to `merged` (or `verified`) with the mes
 change is on the base branch. A provider error (502) keeps `revert_open` so the same request
 is retried. `POST .../reverted` records the merge (`rolled_back`).
 
+`POST .../merged` records a person's merge and never blocks. It makes one read-only request
+for the change's pull request; when the provider does not show it as merged (or cannot be
+reached), the response carries a `warning` that the console shows.
+
 CloudTrail uploads ([usage-evidence.md](usage-evidence.md)) now also aggregate denied
 attempts (`errorCode`) per (principal, resource, service, error code) in `access_denials`
 (never as use; at most 20,000 pairs per file). After each upload commit, a merged or
@@ -104,7 +108,7 @@ stays `merged` and flagged: it is never verified and keeps holding its topic.
 | `GET /rollout/changes/{id}` | analyst | Change with diffs |
 | `DELETE /rollout/changes/{id}` | admin | Discard a draft |
 | `POST /rollout/changes/{id}/pr` | admin | Open the draft pull request (canary gated) |
-| `POST /rollout/changes/{id}/merged` | admin | Record the merge; watch starts |
+| `POST /rollout/changes/{id}/merged` | admin | Record the merge; watch starts (warns if the provider shows it unmerged) |
 | `POST /rollout/changes/{id}/revert` | admin | Open the revert pull request |
 | `POST /rollout/changes/{id}/reverted` | admin | Record the revert merge |
 | `GET /proposals/{id}/draft` | viewer | Draft text and pull-request eligibility |

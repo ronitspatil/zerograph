@@ -510,6 +510,28 @@ class GitOpsClient:
             payload["content"] = content
             self.request("PUT", suffix, statuses=(200, 400, 409), json=payload)
 
+    def review_merged(self, change_id: str, tenant_key: str) -> bool | None:
+        """Read only: is the change's review merged on the provider? ``None``: no review found.
+
+        One bounded GET of the review list for the change's branch; used only to warn when
+        a person records a merge the provider does not show.
+        """
+        self.deadline, self.requests = time.monotonic() + 15, 0
+        try:
+            if str(UUID(change_id)) != change_id or not re.fullmatch(r"[a-f0-9]{16}", tenant_key):
+                raise GitOpsError("Invalid change identifier")
+            review = self.reviews(f"zerograph/{tenant_key}/{change_id}")
+            if review is None:
+                return None
+            target = object_response(review.get("base")).get("ref") if self.provider == "github" else (
+                review.get("target_branch")
+            )
+            return target == self.base and review.get("merged_at") is not None
+        except (httpx.HTTPError, KeyError, ValueError, TypeError, AttributeError, RecursionError) as exc:
+            raise GitOpsError("GitOps request failed") from exc
+        finally:
+            self.close()
+
     @staticmethod
     def revert_check(item, current, fresh=False):
         """A revert rewrites or removes a file only when it holds exactly what the change wrote.

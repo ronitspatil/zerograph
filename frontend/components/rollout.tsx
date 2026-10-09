@@ -80,18 +80,20 @@ export function Rollout({
         });
         setMessage(`Discarded the draft for ${change.subject_name}.`);
       } else {
-        await api(`rollout/changes/${change.id}/${action}`, {
-          method: "POST",
-          body: action === "revert" ? JSON.stringify({}) : undefined,
-        });
-        setMessage(
+        const result = await api<{ warning?: string }>(
+          `rollout/changes/${change.id}/${action}`,
           {
-            pr: `Draft pull request opened for ${change.subject_name}.`,
-            merged: `Recorded as merged; the ${change.watch_days}-day AccessDenied watch started.`,
-            revert: `Revert pull request opened for ${change.subject_name} (draft; never merged by ZeroGraph).`,
-            reverted: `Recorded as rolled back.`,
-          }[action],
+            method: "POST",
+            body: action === "revert" ? JSON.stringify({}) : undefined,
+          },
         );
+        const done = {
+          pr: `Draft pull request opened for ${change.subject_name}.`,
+          merged: `Recorded as merged; the ${change.watch_days}-day AccessDenied watch started.`,
+          revert: `Revert pull request opened for ${change.subject_name} (draft; never merged by ZeroGraph).`,
+          reverted: `Recorded as rolled back.`,
+        }[action];
+        setMessage(result?.warning ? `${done} Warning: ${result.warning}` : done);
       }
       await load();
     } catch (e) {

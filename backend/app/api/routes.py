@@ -1565,8 +1565,37 @@ def open_rollout_pr(change_id: ChangeId, db: DB, graph: Graph, actor: Admin):
 
 @router.post("/rollout/changes/{change_id}/merged")
 def mark_rollout_merged(change_id: ChangeId, db: DB, actor: Admin):
-    """Record that the pull request was merged in the customer's repository; the canary watch starts."""
-    return _transition(db, actor, change_id, "merged")
+    """Record that the pull request was merged in the customer's repository; the canary watch starts.
+    Warns (never blocks) when the provider does not show the pull request as merged."""
+    result = _transition(db, actor, change_id, "merged")
+    warning = _merge_warning(actor, change_id)
+    return {**result, "warning": warning} if warning else result
+
+
+def _merge_warning(actor: Actor, change_id: str) -> str | None:
+    """Best effort, read only: one GET of the change's review on the provider."""
+    settings = get_settings()
+    if (
+        not settings.git_repository
+        or not settings.git_token.get_secret_value()
+        or settings.git_tenant_id != actor.tenant_id
+    ):
+        return None
+    client = None
+    try:
+        client = GitOpsClient(settings)
+        merged = client.review_merged(change_id, tenant_key(actor.tenant_id))
+    except GitOpsError:
+        return "Could not check the pull request on the Git provider; confirm it is merged before relying on the watch"
+    finally:
+        if client is not None:
+            client.close()
+    if merged:
+        return None
+    return (
+        "The Git provider does not show this pull request as merged; recorded anyway. A revert is"
+        " refused until the change is on the base branch."
+    )
 
 
 @router.post("/rollout/changes/{change_id}/reverted")

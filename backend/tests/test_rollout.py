@@ -298,6 +298,31 @@ def test_revert_branch_changed_on_one_file_writes_nothing(provider):
     assert repo.branches[branch]["tree"][f"{root}/role-1/inline-a.json"] == files_v1()[0].content.encode()
 
 
+@pytest.mark.parametrize("provider", ["github", "gitlab"])
+def test_review_merged_is_a_single_read(provider):
+    import httpx
+
+    repo = fake_git.FakeRepository(provider)
+    change_id = str(uuid4())
+    client = lambda: GitOpsClient(fake_git.settings(provider), repo.transport())  # noqa: E731
+    assert client().review_merged(change_id, TENANT_KEY) is None
+    client().open_change(change_id, TENANT_KEY, files_v1(), "t", "body")
+    writes = len(repo.writes)
+    assert client().review_merged(change_id, TENANT_KEY) is False
+    repo.merge(1)
+    assert client().review_merged(change_id, TENANT_KEY) is True
+    assert len(repo.writes) == writes
+
+    def failing(_request):
+        return httpx.Response(500, json={"message": "secret-token-value"})
+
+    with pytest.raises(GitOpsError) as error:
+        GitOpsClient(fake_git.settings(provider), httpx.MockTransport(failing)).review_merged(
+            change_id, TENANT_KEY
+        )
+    assert "secret" not in str(error.value)
+
+
 @pytest.mark.parametrize(
     "files,purpose",
     [
@@ -559,7 +584,7 @@ def test_rollout_api_canary_revert_and_access_denied(client, environment, repo):
     other_canary = created[third]["id"]
     assert client.post(f"/api/v1/rollout/changes/{other_canary}/pr").status_code == 200
     repo.merge(len(repo.reviews))
-    client.post(f"/api/v1/rollout/changes/{other_canary}/merged")
+    assert "warning" not in client.post(f"/api/v1/rollout/changes/{other_canary}/merged").json()
     with factory() as db:
         db.get(RolloutChange, other_canary).merged_at = NOW - timedelta(hours=3)
         db.commit()
@@ -622,7 +647,11 @@ def test_revert_of_a_change_not_on_the_base_branch_is_refused(client, environmen
     assert created.status_code == 201, created.text
     change_id = created.json()["id"]
     assert client.post(f"/api/v1/rollout/changes/{change_id}/pr").status_code == 200
-    assert client.post(f"/api/v1/rollout/changes/{change_id}/merged").json()["state"] == "merged"
+    reads = len(repo.requests)
+    marked = client.post(f"/api/v1/rollout/changes/{change_id}/merged").json()
+    # Recorded anyway, with a warning from one read-only look at the provider.
+    assert marked["state"] == "merged" and "does not show this pull request as merged" in marked["warning"]
+    assert [r.method for r in repo.requests[reads:]] == ["GET"]
     branches, main = set(repo.branches), dict(repo.branches["main"]["tree"])
     writes = len(repo.writes)
 
