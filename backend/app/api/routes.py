@@ -1651,8 +1651,28 @@ def open_revert(db: Session, actor: Actor, change_id: str, reason: str, automati
         db.rollback()
         try:
             change = rollout.get_change(db, actor.tenant_id, change_id, lock=True)
+            # A conflict means no revert pull request can be opened as things stand (e.g. the
+            # change is not on the base branch): the change returns to merged / verified with
+            # the error shown, instead of staying in revert_open with nothing to merge. A
+            # provider error keeps revert_open so "Open revert PR" retries the same request.
+            restored = (
+                rollout.abandon_revert(change)
+                if isinstance(exc, GitOpsConflict) and not change.revert_pr_url
+                else None
+            )
             change.revert_error = str(exc)[:256]
-            audit(db, actor, "rollout.revert_failed", {"change_id": change_id, "error": str(exc)[:256]})
+            audit(
+                db,
+                actor,
+                "rollout.revert_failed",
+                {
+                    "change_id": change_id,
+                    "error": str(exc)[:256],
+                    "automatic": automatic,
+                    "conflict": isinstance(exc, GitOpsConflict),
+                    "state": restored or change.state,
+                },
+            )
             db.commit()
         except rollout.ChangeNotFound:
             db.rollback()
