@@ -510,6 +510,47 @@ class GitOpsClient:
             payload["content"] = content
             self.request("PUT", suffix, statuses=(200, 400, 409), json=payload)
 
+    def review_merged(self, change_id: str, tenant_key: str) -> bool | None:
+        """Read only: is the change's review merged on the provider? ``None``: no review found.
+
+        One bounded GET of the review list for the change's branch; used only to warn when
+        a person records a merge the provider does not show.
+        """
+        self.deadline, self.requests = time.monotonic() + 15, 0
+        try:
+            if str(UUID(change_id)) != change_id or not re.fullmatch(r"[a-f0-9]{16}", tenant_key):
+                raise GitOpsError("Invalid change identifier")
+            review = self.reviews(f"zerograph/{tenant_key}/{change_id}")
+            if review is None:
+                return None
+            target = object_response(review.get("base")).get("ref") if self.provider == "github" else (
+                review.get("target_branch")
+            )
+            return target == self.base and review.get("merged_at") is not None
+        except (httpx.HTTPError, KeyError, ValueError, TypeError, AttributeError, RecursionError) as exc:
+            raise GitOpsError("GitOps request failed") from exc
+        finally:
+            self.close()
+
+    @staticmethod
+    def revert_check(item, current, fresh=False):
+        """A revert rewrites or removes a file only when it holds exactly what the change wrote.
+
+        ``current`` is the file's bytes (``None``: absent) on the base branch (``fresh``,
+        before the revert branch exists) or on the revert branch, which forks from the base.
+        On a fresh check the restored content counts as "not on the base" too, since nothing
+        was written yet; on the revert branch it means this revert already wrote it.
+        """
+        if current == item.expected.encode():
+            return
+        target = item.content.encode() if item.content is not None else None
+        if current is None or (fresh and current == target):
+            raise GitOpsConflict(
+                "The change is not on the base branch (not merged, or already reverted); nothing to revert"
+            )
+        if current != target:
+            raise GitOpsConflict("The file changed since the change was merged; revert it manually")
+
     def open_change(
         self, change_id: str, tenant_key: str, files, title: str, body: str, purpose: str = "change"
     ) -> PullRequest:
@@ -520,7 +561,9 @@ class GitOpsClient:
         the change's content digest, never touching a review that does not match it, and
         retries that reuse what already exists. A change only creates files that do not
         exist; a revert rewrites (or removes) a file only when the base still holds exactly
-        what the change wrote. Never merges, closes or force-pushes anything.
+        what the change wrote: a file missing from the base (the change is not merged) or
+        holding anything else is a conflict. Every file is checked before any is written,
+        so a conflict writes nothing. Never merges, closes or force-pushes anything.
         """
         self.deadline, self.requests = time.monotonic() + DEADLINE_SECONDS, 0
         try:
@@ -556,10 +599,17 @@ class GitOpsClient:
             if head is None:
                 if review is not None:
                     raise GitOpsConflict("Existing review branch was removed; do not recreate it")
+                if purpose == "revert":
+                    # Check the base before creating the review branch, so a change that is
+                    # not merged leaves no stale branch behind.
+                    for item in files:
+                        found = self.file_state(f"{root}/{item.path}", self.base)
+                        self.revert_check(item, found[0] if found is not None else None, fresh=True)
                 head = self.ensure_branch(branch)
             if review is not None:
                 self.validate_review(review, branch, head, marker, project_id)
-            wrote = False
+            # Validate every file before writing any: a conflict leaves nothing half written.
+            pending = []
             for item in files:
                 path = f"{root}/{item.path}"
                 state = self.file_state(path, branch)
@@ -572,13 +622,15 @@ class GitOpsClient:
                 if item.expected is None:
                     if current is not None:
                         raise GitOpsConflict("Published proposal content differs; generate a fresh change")
-                elif current is not None and current != item.expected.encode():
-                    raise GitOpsConflict("The file changed since the change was merged; revert it manually")
-                self.write_file(path, branch, item.content, state if current is not None else None, title)
+                else:
+                    self.revert_check(item, current)
+                pending.append((path, item, state if current is not None else None, target))
+            for path, item, state, target in pending:
+                self.write_file(path, branch, item.content, state, title)
                 after = self.file_state(path, branch)
                 if (after[0] if after is not None else None) != target:
                     raise GitOpsConflict("Proposal write conflicted; existing content was preserved")
-                wrote = True
+            wrote = bool(pending)
             head = self.ref(branch)
             if head is None:
                 raise GitOpsError("Review branch disappeared")

@@ -1565,8 +1565,37 @@ def open_rollout_pr(change_id: ChangeId, db: DB, graph: Graph, actor: Admin):
 
 @router.post("/rollout/changes/{change_id}/merged")
 def mark_rollout_merged(change_id: ChangeId, db: DB, actor: Admin):
-    """Record that the pull request was merged in the customer's repository; the canary watch starts."""
-    return _transition(db, actor, change_id, "merged")
+    """Record that the pull request was merged in the customer's repository; the canary watch starts.
+    Warns (never blocks) when the provider does not show the pull request as merged."""
+    result = _transition(db, actor, change_id, "merged")
+    warning = _merge_warning(actor, change_id)
+    return {**result, "warning": warning} if warning else result
+
+
+def _merge_warning(actor: Actor, change_id: str) -> str | None:
+    """Best effort, read only: one GET of the change's review on the provider."""
+    settings = get_settings()
+    if (
+        not settings.git_repository
+        or not settings.git_token.get_secret_value()
+        or settings.git_tenant_id != actor.tenant_id
+    ):
+        return None
+    client = None
+    try:
+        client = GitOpsClient(settings)
+        merged = client.review_merged(change_id, tenant_key(actor.tenant_id))
+    except GitOpsError:
+        return "Could not check the pull request on the Git provider; confirm it is merged before relying on the watch"
+    finally:
+        if client is not None:
+            client.close()
+    if merged:
+        return None
+    return (
+        "The Git provider does not show this pull request as merged; recorded anyway. A revert is"
+        " refused until the change is on the base branch."
+    )
 
 
 @router.post("/rollout/changes/{change_id}/reverted")
@@ -1651,8 +1680,28 @@ def open_revert(db: Session, actor: Actor, change_id: str, reason: str, automati
         db.rollback()
         try:
             change = rollout.get_change(db, actor.tenant_id, change_id, lock=True)
+            # A conflict means no revert pull request can be opened as things stand (e.g. the
+            # change is not on the base branch): the change returns to merged / verified with
+            # the error shown, instead of staying in revert_open with nothing to merge. A
+            # provider error keeps revert_open so "Open revert PR" retries the same request.
+            restored = (
+                rollout.abandon_revert(change)
+                if isinstance(exc, GitOpsConflict) and not change.revert_pr_url
+                else None
+            )
             change.revert_error = str(exc)[:256]
-            audit(db, actor, "rollout.revert_failed", {"change_id": change_id, "error": str(exc)[:256]})
+            audit(
+                db,
+                actor,
+                "rollout.revert_failed",
+                {
+                    "change_id": change_id,
+                    "error": str(exc)[:256],
+                    "automatic": automatic,
+                    "conflict": isinstance(exc, GitOpsConflict),
+                    "state": restored or change.state,
+                },
+            )
             db.commit()
         except rollout.ChangeNotFound:
             db.rollback()

@@ -24,7 +24,9 @@ byte for byte.
 canary; every other change of the topic (and any topic bundle) is held until the canary
 is marked merged and its watch window (``rollout_watch_days``, default 7) passes without
 AccessDenied events on what it touched. States: ``draft`` -> ``pr_open`` -> ``merged``
-(canary watch) -> ``verified``, or -> ``revert_open`` -> ``rolled_back``. A rolled-back
+(canary watch) -> ``verified``, or -> ``revert_open`` -> ``rolled_back`` (a revert that
+conflicts before its pull request exists, e.g. the change is not on the base branch,
+returns to ``merged`` / ``verified`` with ``revert_error``). A rolled-back
 canary no longer counts: the next change of the topic becomes its canary.
 
 **AccessDenied watch.** When a committed CloudTrail upload holds denied attempts by a
@@ -798,6 +800,21 @@ def can_revert(change: RolloutChange) -> None:
         raise RolloutError(
             "Only a merged change can be reverted; close an unmerged pull request in your repository instead"
         )
+
+
+def abandon_revert(change: RolloutChange, at: datetime | None = None) -> str | None:
+    """A revert that conflicted before its pull request existed: back to merged (or verified).
+
+    Clears the revert request so a later "Open revert PR" starts over; a flag stays, so a
+    flagged canary keeps holding its topic. Returns the restored state, or ``None`` when the
+    change was not waiting on a revert pull request.
+    """
+    if change.state != "revert_open" or change.revert_pr_url:
+        return None
+    at = at or now()
+    change.state = "verified" if change.verified_at is not None else "merged"
+    change.revert_scope, change.updated_at = None, at
+    return change.state
 
 
 def change_files(db: Session, change: RolloutChange) -> list[FileChange]:

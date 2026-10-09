@@ -203,6 +203,126 @@ def test_revert_refuses_a_file_changed_after_merge_and_spoofed_markers(provider)
     )
 
 
+def revert_of(files, original):
+    """The revert of ``files_v1()``-style changes: rewrites restore ``original``, adds are removed."""
+    return [
+        FileChange(f.path, original if "Disable" not in f.path else None, expected=f.content) for f in files
+    ]
+
+
+def file_writes(repo, since=0):
+    return [w for w in repo.writes[since:] if "/contents/" in w.url.path or "/files/" in w.url.path]
+
+
+@pytest.mark.parametrize("provider", ["github", "gitlab"])
+@pytest.mark.parametrize(
+    "files",
+    [
+        pytest.param(lambda: files_v1()[:1], id="single-rewrite"),
+        pytest.param(lambda: files_v1()[1:], id="disable-only"),
+        pytest.param(files_v1, id="multi-file"),
+    ],
+)
+def test_revert_refuses_a_change_that_is_not_on_the_base_branch(provider, files):
+    """The change's review was never merged: the base lacks every file it wrote. The revert is a
+    conflict, writes nothing and leaves no branch or review behind (no new original file)."""
+    repo = fake_git.FakeRepository(provider)
+    change_id = str(uuid4())
+    client = lambda: GitOpsClient(fake_git.settings(provider), repo.transport())  # noqa: E731
+    client().open_change(change_id, TENANT_KEY, files(), "t", "body")
+    assert not repo.review(1)["_merged"]
+    writes, branches, main = len(repo.writes), set(repo.branches), dict(repo.branches["main"]["tree"])
+    original = render(doc({"Effect": "Allow", "Action": "s3:GetObject", "Resource": [A, B]}))
+    for _ in range(2):  # a retry is refused the same way
+        with pytest.raises(GitOpsConflict, match="not on the base branch"):
+            client().open_change(
+                change_id, TENANT_KEY, revert_of(files(), original), "r", "b", purpose="revert"
+            )
+    assert repo.writes[writes:] == [] and set(repo.branches) == branches and len(repo.reviews) == 1
+    assert repo.branches["main"]["tree"] == main
+    # Once a person merges the change, the same revert opens and restores the original.
+    repo.merge(1)
+    pr = client().open_change(change_id, TENANT_KEY, revert_of(files(), original), "r", "b", purpose="revert")
+    assert pr.branch.endswith("-revert") and len(repo.reviews) == 2
+    repo.merge(2)
+    root = f"security/zerograph/{TENANT_KEY}/{change_id}"
+    for item in revert_of(files(), original):
+        restored = repo.file(f"{root}/{item.path}")
+        assert restored == (item.content.encode() if item.content is not None else None)
+
+
+@pytest.mark.parametrize("provider", ["github", "gitlab"])
+def test_revert_with_one_of_two_files_missing_writes_nothing(provider):
+    repo = fake_git.FakeRepository(provider)
+    change_id = str(uuid4())
+    client = lambda: GitOpsClient(fake_git.settings(provider), repo.transport())  # noqa: E731
+    client().open_change(change_id, TENANT_KEY, files_v1(), "t", "body")
+    repo.merge(1)
+    root = f"security/zerograph/{TENANT_KEY}/{change_id}"
+    original = render(doc({"Effect": "Allow", "Action": "s3:GetObject", "Resource": [A, B]}))
+    revert = revert_of(files_v1(), original)
+    for missing in (revert[0].path, revert[1].path):
+        repo.merge(1)  # restore both files on the base
+        del repo.branches["main"]["tree"][f"{root}/{missing}"]
+        writes, branches = len(repo.writes), set(repo.branches)
+        with pytest.raises(GitOpsConflict, match="not on the base branch"):
+            client().open_change(change_id, TENANT_KEY, revert, "r", "b", purpose="revert")
+        assert repo.writes[writes:] == [] and set(repo.branches) == branches and len(repo.reviews) == 1
+    # A base already holding the restored original (reverted elsewhere) is refused too.
+    repo.merge(1)
+    repo.branches["main"]["tree"][f"{root}/{revert[0].path}"] = original.encode()
+    with pytest.raises(GitOpsConflict, match="not on the base branch"):
+        client().open_change(change_id, TENANT_KEY, revert, "r", "b", purpose="revert")
+
+
+@pytest.mark.parametrize("provider", ["github", "gitlab"])
+def test_revert_branch_changed_on_one_file_writes_nothing(provider):
+    """The revert branch exists (an interrupted earlier attempt) and one of its files no longer
+    holds what the change wrote: every file is checked before any write, so none is written."""
+    repo = fake_git.FakeRepository(provider)
+    change_id = str(uuid4())
+    client = lambda: GitOpsClient(fake_git.settings(provider), repo.transport())  # noqa: E731
+    client().open_change(change_id, TENANT_KEY, files_v1(), "t", "body")
+    repo.merge(1)
+    branch = f"zerograph/{TENANT_KEY}/{change_id}-revert"
+    repo.fork(branch)
+    root = f"security/zerograph/{TENANT_KEY}/{change_id}"
+    repo.branches[branch]["tree"][f"{root}/role-1/ZeroGraphDisable.json"] = b"edited\n"
+    original = render(doc({"Effect": "Allow", "Action": "s3:GetObject", "Resource": [A, B]}))
+    writes = len(repo.writes)
+    with pytest.raises(GitOpsConflict, match="changed since"):
+        client().open_change(
+            change_id, TENANT_KEY, revert_of(files_v1(), original), "r", "b", purpose="revert"
+        )
+    assert file_writes(repo, writes) == [] and len(repo.reviews) == 1
+    assert repo.branches[branch]["tree"][f"{root}/role-1/inline-a.json"] == files_v1()[0].content.encode()
+
+
+@pytest.mark.parametrize("provider", ["github", "gitlab"])
+def test_review_merged_is_a_single_read(provider):
+    import httpx
+
+    repo = fake_git.FakeRepository(provider)
+    change_id = str(uuid4())
+    client = lambda: GitOpsClient(fake_git.settings(provider), repo.transport())  # noqa: E731
+    assert client().review_merged(change_id, TENANT_KEY) is None
+    client().open_change(change_id, TENANT_KEY, files_v1(), "t", "body")
+    writes = len(repo.writes)
+    assert client().review_merged(change_id, TENANT_KEY) is False
+    repo.merge(1)
+    assert client().review_merged(change_id, TENANT_KEY) is True
+    assert len(repo.writes) == writes
+
+    def failing(_request):
+        return httpx.Response(500, json={"message": "secret-token-value"})
+
+    with pytest.raises(GitOpsError) as error:
+        GitOpsClient(fake_git.settings(provider), httpx.MockTransport(failing)).review_merged(
+            change_id, TENANT_KEY
+        )
+    assert "secret" not in str(error.value)
+
+
 @pytest.mark.parametrize(
     "files,purpose",
     [
@@ -463,7 +583,8 @@ def test_rollout_api_canary_revert_and_access_denied(client, environment, repo):
     # AccessDenied watch: the other topic's canary is merged, then denials on what it removed.
     other_canary = created[third]["id"]
     assert client.post(f"/api/v1/rollout/changes/{other_canary}/pr").status_code == 200
-    client.post(f"/api/v1/rollout/changes/{other_canary}/merged")
+    repo.merge(len(repo.reviews))
+    assert "warning" not in client.post(f"/api/v1/rollout/changes/{other_canary}/merged").json()
     with factory() as db:
         db.get(RolloutChange, other_canary).merged_at = NOW - timedelta(hours=3)
         db.commit()
@@ -505,6 +626,77 @@ def test_rollout_api_canary_revert_and_access_denied(client, environment, repo):
     with factory() as db:
         record_id = db.get(RolloutChange, other_canary).remediation_ids[0]
     assert client.post(f"/api/v1/remediations/{record_id}/pr").status_code == 409
+
+
+def test_revert_of_a_change_not_on_the_base_branch_is_refused(client, environment, repo):
+    """"Mark merged" was recorded but the pull request was never merged in the repository. A
+    revert (by hand or by the AccessDenied watch) is a conflict: nothing is written, no branch
+    or review is created, and the change returns to merged with the error shown and audited."""
+    factory, _ = environment
+    snapshot, _, _ = planted_environment(client)
+    rows, by_subject = high_by_subject(client)
+    kinds = {node.id: node.type.value for node in snapshot.nodes}
+    subject, removals = next(
+        (s, [p for p in ps if p["type"] == "remove_grant"])
+        for s, ps in sorted(by_subject.items())
+        if kinds[s] == "CloudRole"
+        and any(p["type"] == "remove_grant" and kinds[p["target_id"]] == "S3Bucket" for p in ps)
+    )
+    accept(client, removals)
+    created = client.post("/api/v1/rollout/changes", json={"subject_id": subject})
+    assert created.status_code == 201, created.text
+    change_id = created.json()["id"]
+    assert client.post(f"/api/v1/rollout/changes/{change_id}/pr").status_code == 200
+    reads = len(repo.requests)
+    marked = client.post(f"/api/v1/rollout/changes/{change_id}/merged").json()
+    # Recorded anyway, with a warning from one read-only look at the provider.
+    assert marked["state"] == "merged" and "does not show this pull request as merged" in marked["warning"]
+    assert [r.method for r in repo.requests[reads:]] == ["GET"]
+    branches, main = set(repo.branches), dict(repo.branches["main"]["tree"])
+    writes = len(repo.writes)
+
+    refused = client.post(f"/api/v1/rollout/changes/{change_id}/revert", json={"reason": "test"})
+    assert refused.status_code == 409 and "not on the base branch" in refused.json()["detail"]
+    shown = client.get(f"/api/v1/rollout/changes/{change_id}").json()
+    assert shown["state"] == "merged" and not shown["revert_requested"] and not shown["revert_pr_url"]
+    assert "not on the base branch" in shown["revert_error"]
+
+    # The AccessDenied watch flags the change and records the same refusal.
+    with factory() as db:
+        db.get(RolloutChange, change_id).merged_at = NOW - timedelta(hours=3)
+        db.commit()
+    bucket = next(p["target_id"] for p in removals if kinds[p["target_id"]] == "S3Bucket")
+    noisy = denied_upload(client, [denial(subject, bucket, NOW - timedelta(hours=1))])
+    assert noisy["rollout"]["flagged"] == [change_id]
+    assert "not on the base branch" in noisy["rollout"]["reverts"][0]["error"]
+    assert "url" not in noisy["rollout"]["reverts"][0]
+    shown = client.get(f"/api/v1/rollout/changes/{change_id}").json()
+    assert shown["state"] == "merged" and shown["flag"]["events"] == 1 and shown["flagged_at"]
+    assert "not on the base branch" in shown["revert_error"] and not shown["revert_requested"]
+    # Nothing was written to the repository and no revert branch or review exists.
+    assert repo.writes[writes:] == [] and set(repo.branches) == branches and len(repo.reviews) == 1
+    assert repo.branches["main"]["tree"] == main
+    with factory() as db:
+        failed = [
+            e
+            for e in db.scalars(select(AuditEvent).where(AuditEvent.action == "rollout.revert_failed"))
+        ]
+    assert [(e.actor, e.detail["automatic"], e.detail["state"]) for e in failed] == [
+        ("alice", False, "merged"),
+        (rollout.HOOK_ACTOR, True, "merged"),
+    ]
+    # A flagged change is not verified when its window passes; it keeps holding its topic.
+    with factory() as db:
+        db.get(RolloutChange, change_id).merged_at = NOW - timedelta(days=8)
+        db.commit()
+    assert {c["id"]: c for c in client.get("/api/v1/rollout").json()["changes"]}[change_id]["state"] == "merged"
+
+    # Once a person actually merges it, "Open revert PR" opens the revert and clears the error.
+    repo.merge(1)
+    opened = client.post(f"/api/v1/rollout/changes/{change_id}/revert", json={})
+    assert opened.status_code == 200 and opened.json()["state"] == "revert_open"
+    shown = client.get(f"/api/v1/rollout/changes/{change_id}").json()
+    assert shown["revert_pr_url"] and shown["revert_error"] is None and shown["revert_requested"]
 
 
 def rollout_key():

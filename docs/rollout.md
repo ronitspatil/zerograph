@@ -58,6 +58,7 @@ longer counts: the next change of the topic becomes its canary.
 ```
 draft -> pr_open -> merged (canary watch) -> verified
                          \-> revert_open -> rolled_back
+                              (a revert conflict before its pull request exists: back to merged / verified)
 ```
 
 State is per tenant (`rollout_changes`, migration 0012), so changes carry forward across
@@ -70,8 +71,20 @@ never requested can be discarded.
 `zerograph/<tenant_key>/<change_id>-revert`: each rewritten file is restored **byte for byte**
 to `render(Remediation.original)` (the stored document) and each added disable policy is
 removed. It rewrites or removes a file only when the base branch still holds exactly what
-the change wrote (GitHub blob SHA / GitLab last commit compare-and-swap); anything else is
-a conflict and nothing is written. `POST .../reverted` records the merge (`rolled_back`).
+the change wrote (GitHub blob SHA / GitLab last commit compare-and-swap). Every file is
+checked before any is written, and before the revert branch is created: a file missing from
+the base (the change's pull request was never merged, even if it was recorded as merged),
+a base that already holds the restored original, or a file edited since the merge is a
+conflict (409, e.g. "The change is not on the base branch (not merged, or already
+reverted); nothing to revert") and nothing is written. A conflicted revert does not leave
+the change in `revert_open`: it returns to `merged` (or `verified`) with the message in
+`revert_error`, audited as `rollout.revert_failed`; "Open revert PR" tries again once the
+change is on the base branch. A provider error (502) keeps `revert_open` so the same request
+is retried. `POST .../reverted` records the merge (`rolled_back`).
+
+`POST .../merged` records a person's merge and never blocks. It makes one read-only request
+for the change's pull request; when the provider does not show it as merged (or cannot be
+reached), the response carries a `warning` that the console shows.
 
 CloudTrail uploads ([usage-evidence.md](usage-evidence.md)) now also aggregate denied
 attempts (`errorCode`) per (principal, resource, service, error code) in `access_denials`
@@ -81,7 +94,9 @@ principal it touched — on an asset it removed, or any asset for a disabled pri
 inside its watch window is **flagged** and its revert pull request is opened automatically
 (never merged), audited as `system:access-denied-watch` (`rollout.flagged`,
 `rollout.revert_requested`, `rollout.revert_opened`). A failure is recorded on the change
-(`revert_error`) and never fails the upload; "Open revert PR" retries.
+(`revert_error`, `rollout.revert_failed`) and never fails the upload; "Open revert PR"
+retries. A flagged change whose revert was refused because it is not on the base branch
+stays `merged` and flagged: it is never verified and keeps holding its topic.
 
 ## API
 
@@ -93,7 +108,7 @@ inside its watch window is **flagged** and its revert pull request is opened aut
 | `GET /rollout/changes/{id}` | analyst | Change with diffs |
 | `DELETE /rollout/changes/{id}` | admin | Discard a draft |
 | `POST /rollout/changes/{id}/pr` | admin | Open the draft pull request (canary gated) |
-| `POST /rollout/changes/{id}/merged` | admin | Record the merge; watch starts |
+| `POST /rollout/changes/{id}/merged` | admin | Record the merge; watch starts (warns if the provider shows it unmerged) |
 | `POST /rollout/changes/{id}/revert` | admin | Open the revert pull request |
 | `POST /rollout/changes/{id}/reverted` | admin | Record the revert merge |
 | `GET /proposals/{id}/draft` | viewer | Draft text and pull-request eligibility |
