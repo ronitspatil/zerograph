@@ -1,3 +1,5 @@
+import pytest
+
 from app.collectors.data_classifier import classify_metadata, enrich_node
 from app.collectors.mcp_agent_collector import MCPInventory, collect_mcp
 from app.graph.schema import Node, NodeType, Sensitivity
@@ -9,6 +11,35 @@ def test_metadata_classification_and_no_downgrade():
     assert result.sensitivity == Sensitivity.RESTRICTED
     node = Node(id="db", name="db", type=NodeType.DATABASE, sensitivity=Sensitivity.RESTRICTED)
     assert enrich_node(node, ["public_title"]).sensitivity == Sensitivity.RESTRICTED
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "labels", "sensitivity"),
+    [
+        ("data-class", "PII", {"PII"}, Sensitivity.CONFIDENTIAL),
+        ("Data_Classification", "phi", {"PHI"}, Sensitivity.RESTRICTED),
+        ("classification", "PCI, credentials", {"PCI", "Credentials"}, Sensitivity.RESTRICTED),
+        ("Sensitivity", "Confidential", set(), Sensitivity.CONFIDENTIAL),
+        ("dataclass", "RESTRICTED", set(), Sensitivity.RESTRICTED),
+        ("data-class", "credential", {"Credentials"}, Sensitivity.RESTRICTED),
+    ],
+)
+def test_explicit_classification_tags_become_labels(key, value, labels, sensitivity):
+    result = classify_metadata(["bucket", f"{key} {value}"], tags=[(key, value)])
+    assert set(result.tags) == labels
+    assert result.sensitivity == sensitivity
+    assert result.basis == "classification_tag"
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [("owner", "PII"), ("team", "restricted"), ("data-class", "public"), ("data-class", "pii-ish")],
+)
+def test_other_tags_are_not_classification(key, value):
+    result = classify_metadata(["bucket"], tags=[(key, value)])
+    assert result.tags == ()
+    assert result.sensitivity == Sensitivity.INTERNAL
+    assert result.basis == "metadata_heuristic"
 
 
 def test_presidio_results_are_tags_only():

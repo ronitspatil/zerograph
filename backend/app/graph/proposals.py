@@ -70,7 +70,16 @@ from app.db.models import (
     now,
 )
 from app.db.session import session_factory
-from app.graph.compact import BREAK_GLASS, EDGE_CODE, EDGE_KINDS, EXEMPT, KMS, SERVICE_LINKED, CompactGraph
+from app.graph.compact import (
+    BREAK_GLASS,
+    EDGE_CODE,
+    EDGE_KINDS,
+    EXEMPT,
+    KMS,
+    SERVICE_LINKED,
+    UNEVALUATED,
+    CompactGraph,
+)
 from app.graph.policies import PolicyIndex, policy_index
 from app.graph.privilege import data_service
 from app.graph.schema import EdgeType
@@ -113,6 +122,7 @@ NEVER_AUTO = {
     "coverage": "The service lacked attested, complete usage coverage",
     "seasonal": "Scheduled or seasonal identity (exemption tag); needs a longer window",
     "structure": "Changes role or tool relationships (who can invoke or inherit what)",
+    "unevaluated_policy": "An attached policy was too large to evaluate; the identity's access is unknown",
 }
 NOTICE = (
     "Proposed, not applied. Every proposal is reviewed by a person; accepted ones become draft pull requests "
@@ -290,6 +300,8 @@ def compute_proposals(
             found.append("break_glass")
         if flags & EXEMPT:
             found.append("seasonal")
+        if flags & UNEVALUATED:
+            found.append("unevaluated_policy")
         return found
 
     def classify(holder: int, item: int) -> tuple[int, list[str], dict] | None:

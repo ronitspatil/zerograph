@@ -8,7 +8,7 @@ from loguru import logger
 from sqlalchemy import or_, select, update
 
 from app.collectors import staging
-from app.collectors.aws_collector import AWSCollector
+from app.collectors.aws_collector import AWSCollector, expected_target
 from app.collectors.mcp_agent_collector import MCPInventory, collect_mcp
 from app.collectors.publication import publish_sets
 from app.core.auth import Actor
@@ -66,6 +66,8 @@ def collect(source: str, payload: dict, tenant: str) -> GraphSnapshot | StagedUp
     if source == "aws":
         if not settings.aws_role_arn or settings.aws_tenant_id != tenant:
             raise ValueError("No AWS collector is configured for this tenant")
+        # Fail closed before AssumeRole on a malformed target; STS identity is checked before inventory.
+        account, role_arn = expected_target(settings.aws_role_arn, settings.aws_account_id)
         session = boto3.Session(region_name=settings.aws_region)
         kwargs = {"RoleArn": settings.aws_role_arn, "RoleSessionName": "ZeroGraphReadOnly"}
         if settings.aws_external_id.get_secret_value():
@@ -77,7 +79,12 @@ def collect(source: str, payload: dict, tenant: str) -> GraphSnapshot | StagedUp
             aws_session_token=credentials["SessionToken"],
             region_name=settings.aws_region,
         )
-        return AWSCollector(session, access_advisor=settings.aws_access_advisor).collect()
+        return AWSCollector(
+            session,
+            expected_account=account,
+            expected_role_arn=role_arn,
+            access_advisor=settings.aws_access_advisor,
+        ).collect()
     raise ValueError("Unsupported ingestion source")
 
 

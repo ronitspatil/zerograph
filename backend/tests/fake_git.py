@@ -4,8 +4,11 @@ Implements the documented REST contracts the GitOps client uses: branches/refs, 
 contents (create, compare-and-swap update and delete), draft reviews and, for
 GitLab, the project identity. ``merge`` stands in for a person merging a review in
 the customer's repository (three-way: the review's changes are applied onto the
-base branch). Every request is recorded; any merge, close or force-push attempt by
-the client fails the test.
+base branch); a review that is never merged leaves the base untouched, so a revert of
+an unmerged change can be exercised by simply not calling it. GitLab's
+``last_commit_id`` is the last commit that changed the file (per file, as in GitLab's
+Files API), not the branch head. Every request is recorded; any merge, close or
+force-push attempt by the client fails the test.
 """
 
 import base64
@@ -42,10 +45,10 @@ class FakeRepository:
     def __init__(self, provider: str = "github"):
         self.provider = provider
         self.commits = 0
-        self.branches: dict[str, dict] = {}  # name -> {"head", "tree", "fork"}
+        self.branches: dict[str, dict] = {}  # name -> {"head", "tree", "fork", "last"}
         self.reviews: list[dict] = []
         self.requests: list[httpx.Request] = []
-        self.branches["main"] = {"head": self._commit(), "tree": {}, "fork": {}}
+        self.branches["main"] = {"head": self._commit(), "tree": {}, "fork": {}, "last": {}}
 
     # -- helpers -------------------------------------------------------------
 
@@ -62,6 +65,21 @@ class FakeRepository:
 
     def file(self, path: str, branch: str = "main") -> bytes | None:
         return self.branches[branch]["tree"].get(path)
+
+    def fork(self, name: str) -> dict:
+        """Create branch ``name`` at the current base head (what the client's branch POST does)."""
+        base = self.branches["main"]
+        self.branches[name] = {
+            "head": base["head"],
+            "tree": dict(base["tree"]),
+            "fork": dict(base["tree"]),
+            "last": dict(base["last"]),
+        }
+        return self.branches[name]
+
+    def last_commit(self, path: str, branch: str = "main") -> str:
+        state = self.branches[branch]
+        return state["last"].get(path, state["head"])
 
     def review(self, number: int) -> dict:
         return self.reviews[number - 1]
@@ -80,6 +98,9 @@ class FakeRepository:
             else:
                 base["tree"][path] = after
         base["head"] = self._commit()
+        for path in set(branch["fork"]) | set(branch["tree"]):
+            if branch["fork"].get(path) != branch["tree"].get(path):
+                base["last"][path] = base["head"]
         review["_merged"] = True
 
     def _review_json(self, review: dict) -> dict:
@@ -124,7 +145,7 @@ class FakeRepository:
                     "ref": branch,
                     "blob_id": blob_sha(content),
                     "content_sha256": hashlib.sha256(content).hexdigest(),
-                    "last_commit_id": self.branches[branch]["head"],
+                    "last_commit_id": self.last_commit(path, branch),
                 }
             )
         return data
@@ -136,6 +157,7 @@ class FakeRepository:
         else:
             state["tree"][path] = content
         state["head"] = self._commit()
+        state["last"][path] = state["head"]
 
     # -- transport -----------------------------------------------------------
 
@@ -172,9 +194,8 @@ class FakeRepository:
             sha = payload["sha"] if github else payload["ref"]
             if name in self.branches:
                 return httpx.Response(422 if github else 400, json={"message": "exists"})
-            base = self.branches["main"]
-            assert sha == base["head"], "Branches start from the current base head"
-            self.branches[name] = {"head": sha, "tree": dict(base["tree"]), "fork": dict(base["tree"])}
+            assert sha == self.branches["main"]["head"], "Branches start from the current base head"
+            self.fork(name)
             return httpx.Response(201, json={})
         # Files.
         if path.startswith("/contents/") or path.startswith("/repository/files/"):
@@ -202,14 +223,14 @@ class FakeRepository:
                     self._set(ref, file_path, None)
                     return httpx.Response(200, json={})
             else:
-                head = self.branches[ref]["head"]
+                last = self.last_commit(file_path, ref)
                 if method == "POST":
                     if current is not None:
                         return httpx.Response(400, json={"message": "exists"})
                     self._set(ref, file_path, payload["content"].encode())
                     return httpx.Response(201, json={})
                 if method in ("PUT", "DELETE"):
-                    if current is None or payload.get("last_commit_id") != head:
+                    if current is None or payload.get("last_commit_id") != last:
                         return httpx.Response(400, json={"message": "stale"})
                     self._set(ref, file_path, payload["content"].encode() if method == "PUT" else None)
                     return httpx.Response(

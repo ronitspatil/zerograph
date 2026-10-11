@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     max_open_uploads: int = Field(default=4, ge=1, le=100)
     aws_tenant_id: str = ""
     aws_role_arn: str = ""
+    # Optional explicit target account; must equal the role ARN's account. Either way the
+    # collector verifies the assumed STS identity against the role and account before inventory.
+    aws_account_id: str = Field(default="", pattern=r"^(\d{12})?$")
     aws_external_id: SecretStr = SecretStr("")
     aws_region: str = "us-east-1"
     # Optional IAM Access Advisor last-accessed hints (needs the Access Advisor permissions).

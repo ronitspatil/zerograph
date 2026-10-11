@@ -10,7 +10,7 @@ dependencies = [
   "fastapi>=0.115,<1", "uvicorn[standard]>=0.32,<1", "pydantic>=2.10,<3",
   "pydantic-settings>=2.6,<3", "sqlalchemy>=2.0,<3", "psycopg[binary]>=3.2,<4",
   "alembic>=1.14,<2", "celery[redis]>=5.4,<6", "redis>=5.2,<7",
-  "neo4j>=5.26,<6", "boto3>=1.35,<2", "httpx>=0.28,<1",
+  "neo4j>=5.26,<6", "boto3[crt]>=1.35,<2", "httpx>=0.28,<1",
   "PyJWT[crypto]>=2.10,<3", "loguru>=0.7,<1", "networkx>=3.4,<4", "prometheus-client>=0.22,<1"
 ]
 

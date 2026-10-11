@@ -130,6 +130,57 @@ describe("Rollout panel", () => {
     expect(calls).toContain("rollout/changes/c3/reverted");
   });
 
+  it("shows a merge warning and a refused revert on a merged change", async () => {
+    const refused =
+      "The change is not on the base branch (not merged, or already reverted); nothing to revert";
+    vi.mocked(api).mockImplementation(async (path) => {
+      calls.push(path);
+      if (path === "rollout")
+        return {
+          ...list,
+          changes: [
+            change({
+              id: "c4",
+              subject_name: "etl-runner",
+              state: "pr_open",
+              pr_url: "https://github.com/acme/policies/pull/4",
+            }),
+            change({
+              id: "c5",
+              subject_name: "lake-auditor",
+              state: "merged",
+              watch_remaining_days: 6,
+              flag: { events: 1, pairs: [] },
+              revert_error: refused,
+            }),
+          ],
+        } as never;
+      return {
+        state: "merged",
+        warning:
+          "The Git provider does not show this pull request as merged; recorded anyway.",
+      } as never;
+    });
+    render(<Rollout canAdmin />);
+    await act(async () => {});
+    expect(screen.getByText(`Revert failed: ${refused}`)).toBeInTheDocument();
+    const auditor = screen.getByText("lake-auditor").closest("article")!;
+    expect(
+      within(auditor).getByRole("button", { name: "Open revert PR" }),
+    ).toBeEnabled();
+    const pending = screen.getByText("etl-runner").closest("article")!;
+    fireEvent.click(
+      within(pending).getByRole("button", { name: "Mark merged" }),
+    );
+    await act(async () => {});
+    expect(calls).toContain("rollout/changes/c4/merged");
+    expect(
+      screen.getByText(
+        /Recorded as merged.*Warning: The Git provider does not show/,
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("keeps actions disabled for viewers", async () => {
     render(<Rollout canAdmin={false} />);
     await act(async () => {});

@@ -29,6 +29,8 @@ from app.collectors.data_classifier import enrich_node
 from app.collectors.execution_audit import AccessAdvisorCollector
 from app.collectors.iam_evaluator import Decision, Request, evaluate
 from app.graph.schema import (
+    MAX_AWS_MANAGED_POLICY_BYTES,
+    MAX_POLICY_BYTES,
     MAX_SNAPSHOT_POLICIES,
     Edge,
     EdgeType,
@@ -36,6 +38,8 @@ from app.graph.schema import (
     Node,
     NodeType,
     PolicyAttachment,
+    aws_managed_policy,
+    canonical_policy,
 )
 
 READ_ACTIONS = ("s3:GetObject", "s3:GetObjectVersion", "s3:ListBucket")
@@ -59,14 +63,24 @@ HARD_LIMITS = {
 MAX_TAGS = 32  # Node.tags bound; raw tags beyond it are dropped and counted.
 ACCESS_ADVISOR_POLLS = 10
 MAX_ADVISOR_SERVICES = 400
-MAX_POLICY_BYTES = 65536
+# Customer-authored documents (inline, customer-managed, trust, bucket policies, SCPs):
+# MAX_POLICY_BYTES (64 KiB) and 256 statements; exceeding either aborts the collection.
+# AWS-managed policies (arn:<partition>:iam::aws:policy/...) are larger in practice and
+# get 1 MiB and 2,048 statements; one beyond those is recorded as unevaluated instead.
 MAX_POLICY_STATEMENTS = 256
+MAX_AWS_MANAGED_POLICY_STATEMENTS = 2048
+MAX_UNEVALUATED_PER_PRINCIPAL = 20
+UNEVALUATED = "too_large/unevaluated"
 
 ROLE_ARN = re.compile(r"arn:(aws|aws-us-gov|aws-cn):iam::(\d{12}):role/(.+)")
 
 
 class CollectionIncomplete(ValueError):
     """A bound or malformed inventory prevents safely publishing any snapshot."""
+
+
+class PolicyTooLarge(CollectionIncomplete):
+    """A policy document exceeds its byte or statement bound."""
 
 
 @dataclass(frozen=True)
@@ -91,20 +105,61 @@ class CollectionLimits:
                 raise ValueError(f"Collection limit {key} must be 1..{HARD_LIMITS[key]}")
 
 
-def decode_policy(document: dict | str) -> dict:
-    encoded = json.dumps(document) if isinstance(document, dict) else document
-    if not isinstance(encoded, str) or len(encoded.encode()) > MAX_POLICY_BYTES:
-        raise CollectionIncomplete("Policy document byte budget exhausted")
-    policy = document if isinstance(document, dict) else json.loads(unquote(document))
-    if not isinstance(policy, dict):
+def decode_policy(
+    document: dict | str,
+    *,
+    max_bytes: int = MAX_POLICY_BYTES,
+    max_statements: int = MAX_POLICY_STATEMENTS,
+) -> dict:
+    """A decoded policy object; its canonical JSON (as stored) must fit ``max_bytes``."""
+    if isinstance(document, str):
+        # Bound the raw (possibly URL-encoded) text before parsing it.
+        if len(document.encode()) > max_bytes:
+            raise PolicyTooLarge("Policy document byte budget exhausted")
+        document = json.loads(unquote(document))
+    if not isinstance(document, dict):
         raise CollectionIncomplete("Policy document is not an object")
-    statements = policy.get("Statement", [])
+    if len(canonical_policy(document).encode()) > max_bytes:
+        raise PolicyTooLarge("Policy document byte budget exhausted")
+    statements = document.get("Statement", [])
     statements = statements if isinstance(statements, list) else [statements]
-    if len(statements) > MAX_POLICY_STATEMENTS:
-        raise CollectionIncomplete("Policy statement budget exhausted")
+    if len(statements) > max_statements:
+        raise PolicyTooLarge("Policy statement budget exhausted")
     if not all(isinstance(statement, dict) for statement in statements):
         raise CollectionIncomplete("Policy statement is not an object")
-    return policy
+    return document
+
+
+def _document_digest(document) -> tuple[str, int, str]:
+    """SHA-256, byte size and basis of a document kept only by reference."""
+    if isinstance(document, dict):
+        encoded, basis = canonical_policy(document).encode(), "canonical_json"
+    else:
+        encoded, basis = str(document).encode(), "raw_document"
+    return hashlib.sha256(encoded).hexdigest(), len(encoded), basis
+
+
+def unevaluated_document(arn: str, document) -> dict:
+    """Stand-in stored for an AWS-managed document beyond the bounds: ARN, SHA-256, status.
+
+    It has no ``Statement``, so nothing reads it as granting or denying anything.
+    """
+    digest, size, basis = _document_digest(document)
+    return {
+        "ZeroGraphUnevaluated": {
+            "status": UNEVALUATED,
+            "arn": arn,
+            "sha256": digest,
+            "sha256_basis": basis,
+            "size_bytes": size,
+            "limit_bytes": MAX_AWS_MANAGED_POLICY_BYTES,
+            "limit_statements": MAX_AWS_MANAGED_POLICY_STATEMENTS,
+        }
+    }
+
+
+def is_unevaluated(document: dict) -> bool:
+    return isinstance(document, dict) and "ZeroGraphUnevaluated" in document
 
 
 def _iso(value) -> str:
@@ -112,6 +167,22 @@ def _iso(value) -> str:
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return str(value or "")[:64]
+
+
+def _unevaluated(detail: dict, arn: str) -> None:
+    """Note on a role/user detail that an attached policy was kept unevaluated."""
+    found = detail.setdefault("unevaluated", [])
+    if arn not in found:
+        found.append(arn)
+
+
+def _unevaluated_evidence(detail: dict) -> list[str]:
+    if not detail.get("unevaluated"):
+        return []
+    return [
+        "An attached AWS-managed policy was too large to evaluate; its grants and denies are unknown "
+        "and were not applied"
+    ]
 
 
 def _privileged(policies: list[dict]) -> bool:
@@ -158,6 +229,7 @@ class AWSCollector:
         self.warnings: list[str] = []
         self.warning_counts: dict[str, int] = {}
         self.managed_cache: dict[str, dict] = {}
+        self.unevaluated_policies: set[str] = set()
         self.scp_cache: dict[str, dict] = {}
         self.coverage: dict[str, Any] = {
             "effective_permissions_complete": False,
@@ -171,6 +243,7 @@ class AWSCollector:
             "iam_user_inventory_complete": False,
             "iam_group_inventory_complete": False,
             "role_last_used": {"observed": 0, "absent": 0},
+            "unevaluated_policy_documents": 0,
         }
         self.counts = {"roles": 0, "users": 0, "groups": 0, "buckets": 0, "edges": 0, "evaluations": 0}
         self.attachments: list[PolicyAttachment] = []
@@ -220,20 +293,40 @@ class AWSCollector:
             seen.add(next_token)
             kwargs[token] = next_token
 
-    def _policy(self, document):
+    def _policy(self, document, **bounds):
         if self.policy_documents >= self.limits.max_policy_documents:
             raise CollectionIncomplete("Policy document budget exhausted")
         self.policy_documents += 1
-        return decode_policy(document)
+        return decode_policy(document, **bounds)
 
     def _managed(self, arn: str) -> dict:
+        """A managed policy's decoded document, or its unevaluated stand-in (AWS-managed only)."""
         if arn not in self.managed_cache:
             version = self._call(self.iam, "get_policy", PolicyArn=arn)["Policy"]["DefaultVersionId"]
-            self.managed_cache[arn] = self._policy(
-                self._call(self.iam, "get_policy_version", PolicyArn=arn, VersionId=version)["PolicyVersion"][
-                    "Document"
-                ]
-            )
+            raw = self._call(self.iam, "get_policy_version", PolicyArn=arn, VersionId=version)[
+                "PolicyVersion"
+            ]["Document"]
+            if not aws_managed_policy(arn):
+                self.managed_cache[arn] = self._policy(raw)
+            else:
+                try:
+                    self.managed_cache[arn] = self._policy(
+                        raw,
+                        max_bytes=MAX_AWS_MANAGED_POLICY_BYTES,
+                        max_statements=MAX_AWS_MANAGED_POLICY_STATEMENTS,
+                    )
+                except PolicyTooLarge:
+                    # Never abort for an AWS-owned document: keep its reference and digest and
+                    # treat the access it grants as unknown (see ``_unevaluated``).
+                    self.managed_cache[arn] = unevaluated_document(arn, raw)
+                    self.unevaluated_policies.add(arn)
+                    self.coverage["unevaluated_policy_documents"] = len(self.unevaluated_policies)
+                    self._warning(
+                        "policy_unevaluated",
+                        "One or more AWS-managed policies exceed 1 MiB or 2,048 statements and were not "
+                        "evaluated; access they grant is unknown (no edges claimed from them) and proposals "
+                        "for the principals they attach to are manual",
+                    )
         return self.managed_cache[arn]
 
     def _organizations(self, account: str) -> tuple[list[list[dict]], bool]:
@@ -425,6 +518,9 @@ class AWSCollector:
         for arn, name in attached.items():
             document = self._managed(arn)
             self._attach(principal, "managed", name or arn.rsplit("/", 1)[-1], document, arn)
+            if is_unevaluated(document):
+                _unevaluated(detail, arn)
+                continue
             policies.append(document)
         return policies
 
@@ -434,6 +530,10 @@ class AWSCollector:
             return None
         document = self._managed(boundary_arn)
         self._attach(principal, "boundary", boundary_arn.rsplit("/", 1)[-1], document, boundary_arn)
+        if is_unevaluated(document):
+            # An unknown boundary allows nothing we can claim: no edges for this principal.
+            _unevaluated(detail, boundary_arn)
+            return [{"Statement": []}]
         return [document]
 
     def _tags(self, tags: list[dict], keep: int = MAX_TAGS) -> tuple[list[str], int]:
@@ -525,6 +625,8 @@ class AWSCollector:
                 self.coverage["role_last_used"]["absent"] += 1
             if dropped:
                 metadata["tags_dropped"] = dropped
+            if role.get("unevaluated"):
+                metadata["policies_unevaluated"] = sorted(role["unevaluated"])[:MAX_UNEVALUATED_PER_PRINCIPAL]
             nodes[role["Arn"]] = Node(
                 id=role["Arn"],
                 name=role["RoleName"],
@@ -562,6 +664,9 @@ class AWSCollector:
                         )
                 for kind, document, label, arn in group_policies[name]:
                     self._attach(user["Arn"], kind, label, document, arn)
+                    if is_unevaluated(document):
+                        _unevaluated(user, arn)
+                        continue
                     policies.append(document)
             user["policies"] = policies
             user["boundary"] = self._boundary(user["Arn"], user)
@@ -575,6 +680,8 @@ class AWSCollector:
             }
             if dropped:
                 metadata["tags_dropped"] = dropped
+            if user.get("unevaluated"):
+                metadata["policies_unevaluated"] = sorted(user["unevaluated"])[:MAX_UNEVALUATED_PER_PRINCIPAL]
             nodes[user["Arn"]] = Node(
                 id=user["Arn"],
                 name=user["UserName"],
@@ -643,6 +750,9 @@ class AWSCollector:
                     },
                 ),
                 [name, *tags],
+                tags=[
+                    (str(tag.get("Key", "")), str(tag.get("Value", ""))) for tag in tagging.get("TagSet", [])
+                ],
             )
             # Raw tags (topic anchors such as topic=/app=/team=) beside classification labels.
             raw, dropped = self._tags(tagging.get("TagSet", []), MAX_TAGS - len(enriched.tags))
@@ -681,7 +791,8 @@ class AWSCollector:
                             actions=possible,
                             certainty="conditional",
                             evidence=[
-                                "IAM identity + available bucket policy/boundary/SCP metadata; object scope, ACLs, RCPs and session context unresolved"
+                                "IAM identity + available bucket policy/boundary/SCP metadata; object scope, ACLs, RCPs and session context unresolved",
+                                *_unevaluated_evidence(principal),
                             ],
                         )
                         self._edge(edges, edge)
@@ -714,6 +825,7 @@ class AWSCollector:
                             evidence=[
                                 *result.reasons,
                                 "Trust and identity policies collected; missing policy domains can restrict access; AWS access remains conditional",
+                                *_unevaluated_evidence(source),
                             ],
                         ),
                     )
@@ -753,6 +865,31 @@ class AWSCollector:
         }
 
 
+def access_advisor_default() -> bool:
+    """``ZG_AWS_ACCESS_ADVISOR`` parsed as ``Settings.aws_access_advisor`` is (default false).
+
+    Read directly so the qualification CLI does not need the server's other settings.
+    """
+    from pydantic import TypeAdapter
+
+    value = os.environ.get("ZG_AWS_ACCESS_ADVISOR", "").strip()
+    return TypeAdapter(bool).validate_python(value) if value else False
+
+
+def expected_target(role_arn: str, account: str = "") -> tuple[str, str]:
+    """``(expected_account, expected_role_arn)`` the STS caller identity must match.
+
+    The account comes from ``account`` when given, else from ``role_arn``; a malformed
+    role ARN or a configured account that differs from the ARN's account is an error.
+    """
+    match = ROLE_ARN.fullmatch(role_arn)
+    if not match:
+        raise ValueError("AWS collector role ARN is not an IAM role ARN")
+    if account and account != match[2]:
+        raise ValueError("AWS collector account does not match the role ARN's account")
+    return match[2], role_arn
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Explicit read-only sandbox AWS inventory qualification; never publishes graph data"
@@ -766,7 +903,17 @@ def main() -> None:
     parser.add_argument("--ack-readonly-sandbox", action="store_true", required=True)
     parser.add_argument("--external-id-env")
     parser.add_argument("--artifact", type=Path, required=True)
+    parser.add_argument(
+        "--access-advisor",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Collect IAM Access Advisor hints (default: ZG_AWS_ACCESS_ADVISOR, as the in-app collector)",
+    )
     args = parser.parse_args()
+    try:
+        access_advisor = access_advisor_default() if args.access_advisor is None else args.access_advisor
+    except ValueError:
+        parser.error("ZG_AWS_ACCESS_ADVISOR must be a boolean")
     match = ROLE_ARN.fullmatch(args.role_arn)
     if (
         not match
@@ -816,7 +963,12 @@ def main() -> None:
             aws_session_token=credentials["SessionToken"],
             region_name=args.region,
         )
-        collector = AWSCollector(assumed, expected_account=args.account, expected_role_arn=args.role_arn)
+        collector = AWSCollector(
+            assumed,
+            expected_account=args.account,
+            expected_role_arn=args.role_arn,
+            access_advisor=access_advisor,
+        )
         collector.collect()  # STS target confirmation is checked before any inventory call.
         artifact = collector.qualification_artifact(
             args.account,
