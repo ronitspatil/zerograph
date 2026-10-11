@@ -390,13 +390,18 @@ def main() -> None:  # noqa: C901 - one linear qualification run
         cloudtrail_files,
         cloudtrail_records,
         generate_topics,
+        glue_base_size,
     )
     from qualify_topics import accuracy, digest, stored_rows
     from sqlalchemy import create_engine, text
 
     if not graph_is_empty(args.graph_uri):
         parser.error(f"Graph at {args.graph_uri} is not empty; use a disposable instance")
-    snapshot, truth, planted_usage = generate_topics(args.size, args.seed, glue=args.glue)
+    snapshot, truth, planted_usage = (
+        generate_topics(glue_base_size(args.size), args.seed, glue=True, glue_size=args.size)
+        if args.glue
+        else generate_topics(args.size, args.seed)
+    )
     schema = "zg_usage_" + uuid4().hex
     admin = create_engine(args.database_url)
     with admin.begin() as connection:

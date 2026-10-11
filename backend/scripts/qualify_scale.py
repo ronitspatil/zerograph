@@ -170,18 +170,29 @@ _WRITE = {
 _PREFIX = {NodeType.BUCKET: "bucket", NodeType.DATABASE: "db", NodeType.VECTOR: "index"}
 # Optional Glue Data Catalog part of the data-lake topic (``generate_topics(glue=True)``).
 GLUE_FIXTURE = (
-    "With --glue: n/100 Glue tables in n/4000 Glue databases of the data-lake topic, IDs as the AWS collector "
+    "With --glue: the base fixture shrinks to n - n/100 - n/4000 nodes and n/100 Glue tables in n/4000 Glue "
+    "databases of the data-lake topic, IDs as the AWS collector "
     "and CloudTrail mapping use (arn:aws:glue:us-east-1:<account>:table/<db>/<table>); 60% of databases tagged "
     "topic=data-lake (their tables inherit it as metadata, as the collector does), else tables inherit their "
     "S3 location bucket's topic tag when it has one; database names carry data-lake tokens. Data-lake roles get "
     "1-12 table grants (70% read) and a database read, 65% used; 5% of other roles get 1-3 unused Glue "
-    "over-grants. A separate seeded generator: the base fixture is unchanged."
+    "over-grants. Glue comes from a separate seeded generator; the base generator is unchanged."
 )
 GLUE_ACCOUNT = "123456789012"  # = CLOUDTRAIL_ACCOUNT, so CloudTrail Glue events resolve to these IDs.
 _GLUE_READ = {NodeType.TABLE: ["glue:GetTable", "glue:GetPartitions"], NodeType.DATABASE: ["glue:GetDatabase"]}
 _GLUE_WRITE = {NodeType.TABLE: ["glue:UpdateTable"], NodeType.DATABASE: ["glue:CreateTable"]}
 _GLUE_ZONES = ("raw", "curated", "analytics", "landing", "refined")
 _GLUE_TABLES = ("events", "orders", "sessions", "clicks", "customers", "invoices", "devices", "shipments")
+
+
+def glue_counts(n: int) -> tuple[int, int]:
+    """(databases, tables) the Glue part of an ``n``-node fixture adds."""
+    return max(2, n // 4000), max(12, n // 100)
+
+
+def glue_base_size(n: int) -> int:
+    """Base fixture size whose Glue-extended graph has at most ``n`` nodes (the publish cap)."""
+    return n - sum(glue_counts(n))
 
 
 def _plant_glue(n, seed, nodes, kind_of, topic_of, data_by_topic, roles_by_topic, hubs, grants, used, over):
@@ -193,7 +204,8 @@ def _plant_glue(n, seed, nodes, kind_of, topic_of, data_by_topic, roles_by_topic
     tokens = dict((topic[0], topic[3]) for topic in PLANTED_TOPICS)["data-lake"]
     added: list[str] = []
     databases = []
-    for k in range(max(2, n // 4000)):
+    database_count, table_count = glue_counts(n)
+    for k in range(database_count):
         name = f"{rng.choice(tokens)}_{rng.choice(_GLUE_ZONES)}_{k:03d}"
         node_id = f"{prefix}:database/{name}"
         tagged = rng.random() < 0.6
@@ -212,7 +224,7 @@ def _plant_glue(n, seed, nodes, kind_of, topic_of, data_by_topic, roles_by_topic
         databases.append((node_id, name, tagged))
         added.append(node_id)
     tables_of: dict[str, list[str]] = {}
-    for i in range(max(12, n // 100)):
+    for i in range(table_count):
         database, db_name, tagged = databases[i % len(databases)]
         name = f"{rng.choice(_GLUE_TABLES)}_{i:05d}"
         node_id = f"{prefix}:table/{db_name}/{name}"
@@ -270,7 +282,9 @@ def _plant_glue(n, seed, nodes, kind_of, topic_of, data_by_topic, roles_by_topic
     return added
 
 
-def generate_topics(n: int = 100_000, seed: int = 11, glue: bool = False) -> tuple[GraphSnapshot, dict, dict]:
+def generate_topics(
+    n: int = 100_000, seed: int = 11, glue: bool = False, glue_size: int | None = None
+) -> tuple[GraphSnapshot, dict, dict]:
     """Planted-topic identity graph with a ground-truth sidecar and synthetic usage.
 
     Returns ``(snapshot, truth, usage)``. ``truth`` holds the planted topic of every
@@ -280,7 +294,10 @@ def generate_topics(n: int = 100_000, seed: int = 11, glue: bool = False) -> tup
     role assumed); Phase 1 never reads it. Deterministic for the same ``n``/``seed``
     (adapted from the optimizer design scout's ``measure.py`` planted generator).
     With ``glue``, Glue databases and tables join the data-lake topic (``GLUE_FIXTURE``)
-    from a separate generator, so every base node, edge and label is unchanged.
+    from a separate generator, so every base node, edge and label is unchanged; they are
+    sized from ``glue_size`` (default ``n``). The qualifications publish
+    ``generate_topics(glue_base_size(size), glue=True, glue_size=size)``: at most ``size``
+    nodes, within the 100,000-node publish cap.
     """
     rng = random.Random(seed)
     names = [topic[0] for topic in PLANTED_TOPICS]
@@ -429,7 +446,7 @@ def generate_topics(n: int = 100_000, seed: int = 11, glue: bool = False) -> tup
     glue_items: set[str] = set()
     if glue:
         added = _plant_glue(
-            n, seed, nodes, kind_of, topic_of, data_by_topic, roles_by_topic, set(hubs), grants, used, over
+            glue_size or n, seed, nodes, kind_of, topic_of, data_by_topic, roles_by_topic, set(hubs), grants, used, over
         )
         glue_items = set(added)
         data = data + added

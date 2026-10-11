@@ -263,12 +263,16 @@ def main() -> None:
         rss_bytes,
         run_measured,
     )
-    from qualify_scale import GLUE_FIXTURE, TOPIC_FIXTURE, generate_topics
+    from qualify_scale import GLUE_FIXTURE, TOPIC_FIXTURE, generate_topics, glue_base_size
     from sqlalchemy import create_engine, text
 
     if not graph_is_empty(args.graph_uri):
         parser.error(f"Graph at {args.graph_uri} is not empty; use a disposable instance")
-    snapshot, truth, usage = generate_topics(args.size, args.seed, glue=args.glue)
+    snapshot, truth, usage = (
+        generate_topics(glue_base_size(args.size), args.seed, glue=True, glue_size=args.size)
+        if args.glue
+        else generate_topics(args.size, args.seed)
+    )
     if args.sidecars:
         args.sidecars.mkdir(parents=True, exist_ok=True)
         (args.sidecars / f"planted-{args.size}-truth.json").write_text(json.dumps(truth) + "\n")
