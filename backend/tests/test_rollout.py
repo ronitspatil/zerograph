@@ -4,6 +4,7 @@ network), and the rollout API end to end: diff correctness and the re-ingest rou
 canary gating, byte-for-byte revert and the AccessDenied watch."""
 
 import json
+import re
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -361,6 +362,107 @@ def test_provider_errors_never_expose_the_token():
 
 
 # ---------------------------------------------------------------------------
+# Pull request text
+
+# "47.9% -> 47.9%" or "0 -> 0": a before/after pair that reads as no change.
+IDENTICAL = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?%?) -> \1(?![\w.])")
+
+
+def side(granted, needed):
+    return {
+        "granted_weight": granted,
+        "needed_weight": needed,
+        "epi": round(1 - needed / granted, 6),
+        "epi_excl_hubs": round(1 - needed / granted, 6),
+    }
+
+
+def live_summary(legacy=False):
+    """The live 1-grant canary (graph-wide roles 47.9% -> 47.9%, risk 0 -> 0)."""
+    epi = {
+        "graph": {
+            "roles": {"rows": 900, "before": side(1_000_000, 521_000), "after": side(999_920, 521_000)},
+            "identities": {"rows": 5000, "before": side(2_000_000, 34_000), "after": side(1_999_000, 34_000)},
+        },
+        "counts": {"grants_removed": 1, "restricted_grants_removed": 1, "disabled_nodes": 0},
+        "applied": {"remove_grant": 1},
+    }
+    if not legacy:
+        epi["counts"].update(roles_with_less_access=1, identities_with_less_access=3)
+        epi["affected"] = {
+            "roles": {"rows": 1, "before": side(800, 300), "after": side(720, 300)},
+            "identities": {"rows": 3, "before": side(3000, 900), "after": side(2990, 900)},
+        }
+        epi["principals"] = [
+            {"id": "cloudrole:0000086", "name": "role-00086 | <!-- x -->", "kind": "roles",
+             "basis": "used", "disabled": False, "epi_before": 0.625, "epi_after": 0.583333},
+            {"id": "cloudrole:0000087", "name": "role-00087", "kind": "roles", "basis": "none",
+             "disabled": False, "epi_before": None, "epi_after": None},
+        ]  # fmt: skip
+    return {
+        "revision": "r1",
+        "proposals": [],
+        "proposal_count": 1,
+        "evidence": {"status": "attested"},
+        "epi": epi,
+        "simulation": {
+            "risk_before": 0, "risk_after": 0, "assets_before": 7, "assets_after": 6, "assets_removed": 1,
+            **({} if legacy else {"exposure_before": 0.0021, "exposure_after": 0.0019}),
+        },  # fmt: skip
+    }
+
+
+def test_pr_body_leads_with_the_changes_own_impact_and_never_shows_identical_pairs():
+    change = RolloutChange(
+        id="a3c0d99f-0abe-4944-80bc-f9816143d50c", scope="role", subject_name="role-00086",
+        revision="r1", files=[], summary=live_summary(), pr_url="https://example.test/pull/1",
+    )  # fmt: skip
+    body = rollout.pr_body(change, "canary", "k", "security/zerograph")
+    impact = body[body.index("### Impact of this change") : body.index("### Simulation")]
+    lines = impact.splitlines()
+    assert lines[2] == "- Grants removed: 1 (1 on restricted data); principals disabled: 0."
+    assert lines[3] == "- `role-00086 \\| &lt;!-- x -->` excess privilege: 62.50% -> 58.33% (-4.17 pp)."
+    assert lines[4] == "- `role-00087`: excess privilege not measured (no usage evidence for this principal)."
+    assert "- Roles with less access: 1; identities with less access: 3." in lines
+    assert "- Excess privilege of those identities (3 with usage evidence): 70.00% -> 69.90% (-0.10 pp)." in lines
+    assert not any("of those roles" in line for line in lines)  # the principal's own line says it
+    # Graph-wide shares come after, with a delta instead of "47.9% -> 47.9%".
+    assert impact.index("Graph-wide") > impact.index("identities with less access")
+    assert "- All roles: 47.90% before, -0.004 pp after this change." in lines
+    assert "- All identities: 98.30% before, -0.001 pp after this change." in lines
+    simulation = body[body.index("### Simulation") : body.index("### Canary plan")]
+    assert "- Reachable data assets: 7 -> 6 (1 no longer reachable)." in simulation
+    assert "0.21% -> 0.19% (-0.02 pp)" in simulation
+    assert "Risk score (0-100, relative to the whole graph, rounded) stays 0:" in simulation
+    assert not IDENTICAL.search(body), IDENTICAL.search(body)
+    assert "<!--" not in body.replace("&lt;!--", "")
+
+    restored = rollout.revert_body(change, "AccessDenied")
+    section = restored[restored.index("### What the revert restores") :]
+    assert "- Grants restored: 1 (1 on restricted data); principals re-enabled: 0." in section
+    assert "excess privilege returns: 58.33% -> 62.50% (+4.17 pp)." in section
+    assert "- Access returns to 1 role(s) and 3 identity(ies)." in section
+    assert "- Reachable data assets of the principal: 6 -> 7 (1 reachable again)." in section
+    assert not IDENTICAL.search(restored)
+
+
+def test_pr_body_of_a_change_stored_before_per_principal_impact():
+    change = RolloutChange(
+        id="b3c0d99f-0abe-4944-80bc-f9816143d50c", scope="role", subject_name="role-00086",
+        revision="r1", files=[], summary=live_summary(legacy=True), pr_url="",
+    )  # fmt: skip
+    body = rollout.pr_body(change, "canary", "k", "security/zerograph")
+    assert "- Grants removed: 1 (1 on restricted data); principals disabled: 0." in body
+    assert "- All roles: 47.90% before, -0.004 pp after this change." in body
+    assert "Sensitivity-weighted" not in body and "stays 0:" in body
+    assert not IDENTICAL.search(body)
+    assert "- Grants restored: 1 (1 on restricted data)" in rollout.revert_body(change, "r")
+    assert rollout._shift(0.5, 0.5) == "unchanged at 50.00%"
+    assert rollout._shift(0.5, 0.4999999) == "50.00% before, -<0.0001 pp after this change"
+    assert rollout._shift(None, 0.5) == "n/a before, 50.00% after"
+
+
+# ---------------------------------------------------------------------------
 # API end to end (in-memory graph, SQLite, local fake provider)
 
 
@@ -462,6 +564,29 @@ def denial(role, bucket, when):
     }
 
 
+def assert_impact_body(body: str, change: dict) -> None:
+    """The change's own impact leads; graph-wide shares are context, never identical pairs."""
+    epi = change["epi"]
+    impact = body[body.index("### Impact of this change") : body.index("### Simulation")]
+    assert impact.index("Grants removed") < impact.index("Graph-wide")
+    counts = epi["counts"]
+    assert (
+        f"- Grants removed: {counts['grants_removed']} ({counts['restricted_grants_removed']} on restricted data)"
+        in impact
+    )
+    assert f"identities with less access: {counts['identities_with_less_access']}" in impact
+    (principal,) = epi["principals"]
+    assert principal["id"] == change["subject_id"] and principal["epi_before"] > principal["epi_after"]
+    assert f"`{change['subject_name']}` excess privilege: " in impact
+    assert "pp)" in impact.split("Graph-wide")[0]
+    assert epi["affected"]["roles"]["rows"] >= 1 and epi["affected"]["identities"]["rows"] >= 1
+    assert "Excess privilege of those identities" in impact
+    assert not IDENTICAL.search(body), IDENTICAL.search(body)
+    simulation = change["simulation"]
+    assert isinstance(simulation["exposure_before"], float)
+    assert f"Reachable data assets: {simulation['assets_before']} -> {simulation['assets_after']}" in body
+
+
 def test_rollout_api_canary_revert_and_access_denied(client, environment, repo):  # noqa: C901
     factory, _ = environment
     snapshot, _, _ = planted_environment(client)
@@ -523,13 +648,14 @@ def test_rollout_api_canary_revert_and_access_denied(client, environment, repo):
     for section in (
         "Proposals included",
         "Evidence",
-        "Excess privilege",
+        "Impact of this change",
         "Simulation",
         "Canary plan",
         "Revert",
     ):
         assert f"### {section}" in body
     assert "**canary**" in body and "Nothing is applied by ZeroGraph" in body
+    assert_impact_body(body, created[first])
 
     # Revert of a change whose PR is not merged is refused (close the PR instead).
     assert client.post(f"/api/v1/rollout/changes/{canary}/revert", json={}).status_code == 409
@@ -552,6 +678,11 @@ def test_rollout_api_canary_revert_and_access_denied(client, environment, repo):
     reverted = client.post(f"/api/v1/rollout/changes/{canary}/revert", json={"reason": "test"})
     assert reverted.status_code == 200 and reverted.json()["state"] == "revert_open"
     revert_review = len(repo.reviews)
+    restored = repo.review(revert_review)["body"]
+    assert "### What the revert restores" in restored
+    assert f"- Grants restored: {created[first]['epi']['counts']['grants_removed']} (" in restored
+    assert "excess privilege returns" in restored and "reachable again" in restored
+    assert not IDENTICAL.search(restored)
     assert not repo.review(revert_review)["_merged"]
     repo.merge(revert_review)
     with factory() as db:

@@ -1296,6 +1296,8 @@ def _change_simulation(db, graph, actor, revision, plan: rollout.Plan) -> dict |
         "assets_before": len(result.affected_assets),
         "assets_after": len(after.affected_assets),
         "assets_removed": result.whatif.assets_removed_count if result.whatif else 0,
+        "exposure_before": result.sensitivity_exposure,
+        "exposure_after": after.sensitivity_exposure,
     }
 
 
