@@ -654,3 +654,22 @@ def test_changes_of_reads_view_changes():
         ]  # fmt: skip
     )
     assert removed == {("a", "b")} and cut == {("d", "e")} and disabled == {"c"}
+
+
+def test_lake_formation_grants_are_manual_never_iam_edits():
+    """A grant a Lake Formation permission contributes to is revoked in Lake Formation: manual."""
+    table = "arn:aws:glue:us-east-1:1:table/lake/events"
+    glue = node(table, NodeType.TABLE, tags=["topic=lake"], metadata={"service": "glue"})
+    snapshot = small(
+        extra_nodes=[glue],
+        extra_edges=[grant("role:a", table, ["glue:GetTable", "lakeformation:SELECT"])],
+    )
+    found = evidence(sufficient=(*SERVICES, "glue"))
+    found.services["glue"] = ServiceEvidence("glue", NOW - timedelta(days=95), NOW, 95.0, True, 1, 1, 10, 0, True)
+    computed, result = run(snapshot, found=found)
+    removal = by_pair(result, computed)[("role:a", table)]
+    assert removal.detail["service"] == "glue" and removal.detail["coverage"] == "sufficient"
+    assert "lakeformation" in removal.reasons and P.TIERS[removal.tier] == "manual"
+    assert P.TIERS[removal.base_tier] != "manual"
+    # IAM-only grants on the same kind of asset are not affected.
+    assert "lakeformation" not in by_pair(result, computed)[("role:a", "pay:0")].reasons

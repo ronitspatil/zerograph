@@ -834,13 +834,42 @@ def test_readonly_permission_templates_match_sdk_operation_contract():
         "organizations:ListParents",
         "organizations:ListPoliciesForTarget",
         "organizations:DescribePolicy",
+        "glue:GetDatabases",
+        "glue:GetTables",
+        "glue:GetTags",
+        "glue:GetResourcePolicy",
+        "lakeformation:GetDataLakeSettings",
+        "lakeformation:ListPermissions",
+        "athena:ListWorkGroups",
+        "athena:GetWorkGroup",
     }
     assert {statement["Sid"] for statement in policy["Statement"] if statement["Resource"] == "*"} == {
         "IamInventoryOnly",
         "OwnedBucketInventory",
         "OptionalAccessAdvisorResults",
         "OptionalOrganizationDescription",
+        "OptionalLakeFormationRead",
+        "OptionalAthenaWorkgroupList",
     }
+    # No Glue wildcard: glue:Get* would include GetConnection(s), which can return connection passwords.
+    assert not any(action.endswith("*") for action in actions)
+    # Every data lake SDK call the collector makes is covered by an action in the template.
+    from app.collectors import aws_datalake
+
+    source = Path(aws_datalake.__file__).read_text()
+    operations = {
+        "get_databases": "glue:GetDatabases",
+        "get_tables": "glue:GetTables",
+        "get_tags": "glue:GetTags",
+        "get_resource_policy": "glue:GetResourcePolicy",
+        "get_data_lake_settings": "lakeformation:GetDataLakeSettings",
+        "list_permissions": "lakeformation:ListPermissions",
+        "list_work_groups": "athena:ListWorkGroups",
+        "get_work_group": "athena:GetWorkGroup",
+    }
+    called = set(__import__("re").findall(r'"(get_[a-z_]+|list_[a-z_]+)"', source))
+    assert called == set(operations)
+    assert set(operations.values()) <= actions
     metadata = next(
         statement for statement in policy["Statement"] if statement["Sid"] == "SandboxBucketMetadataOnly"
     )
