@@ -12,7 +12,7 @@ incomplete, and events outside the declared window are ignored.
   otherwise the IAM user/root ARN. Service principals and cross-account callers
   without an ARN are counted as unresolved.
 * **Resource**: per service: the S3 bucket, the assumed role, the Glue table or
-  database, the Athena workgroup, the Lake Formation table, the RDS Data API resource,
+  database (names lowercased, as the Data Catalog stores them), the Athena workgroup, the Lake Formation table, the RDS Data API resource,
   else the first ``resources[].ARN``. Records without one are counted as unresolved.
 * Records with an ``errorCode`` (for example ``AccessDenied``) are denied attempts:
   counted, never treated as use. Denied attempts whose principal and resource resolve
@@ -121,9 +121,11 @@ def resource_of(record: dict, service: str, principal: str) -> str:
             if not table and isinstance(request.get("tableInput"), dict):
                 table = request["tableInput"].get("name")
         if isinstance(database, str) and database and region and account:
+            # The Data Catalog stores database and table names in lowercase (the collector's
+            # IDs use the stored names); a request may spell them in any case.
             if isinstance(table, str) and table:
-                return f"arn:{partition}:glue:{region}:{account}:table/{database}/{table}"
-            return f"arn:{partition}:glue:{region}:{account}:database/{database}"
+                return f"arn:{partition}:glue:{region}:{account}:table/{database.lower()}/{table.lower()}"
+            return f"arn:{partition}:glue:{region}:{account}:database/{database.lower()}"
     if service == "athena":
         group = request.get("workGroup") or "primary"
         if isinstance(group, str) and region and account:

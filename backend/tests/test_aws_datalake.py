@@ -519,7 +519,7 @@ def test_cloudtrail_resources_match_collected_asset_ids():
         }
 
     records = [
-        record("glue.amazonaws.com", "GetTable", {"databaseName": "lake_raw", "name": "events"}),
+        record("glue.amazonaws.com", "GetTable", {"databaseName": "Lake_Raw", "name": "EVENTS"}),
         record("glue.amazonaws.com", "GetPartitions", {"databaseName": "lake_raw", "tableName": "customers"}),
         record("glue.amazonaws.com", "GetDatabase", {"name": "lake_curated"}),
         record("athena.amazonaws.com", "StartQueryExecution", {"workGroup": "analysts", "queryString": "x"}),

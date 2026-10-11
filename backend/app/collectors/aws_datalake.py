@@ -404,7 +404,7 @@ class DataLakeInventory:
                 break
             self._denied(
                 "athena_workgroup_detail_unknown",
-                "Athena workgroup configuration unavailable for one or more",
+                "Athena workgroup configuration unavailable for one or more workgroups",
             )
         self.coverage["athena_workgroups"] = status
         return list(found.values())
