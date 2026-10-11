@@ -54,6 +54,7 @@ DATA_SERVICE = {
     NodeType.BUCKET.value: "s3",
     NodeType.DATABASE.value: "rds-data",
     NodeType.VECTOR.value: "aoss",
+    NodeType.TABLE.value: "glue",
 }
 ASSUME_SERVICE = "sts"
 BASES = ("used", "inferred", "none")

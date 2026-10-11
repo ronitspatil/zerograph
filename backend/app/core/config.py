@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     aws_region: str = "us-east-1"
     # Optional IAM Access Advisor last-accessed hints (needs the Access Advisor permissions).
     aws_access_advisor: bool = False
+    # Glue Data Catalog, Lake Formation and Athena inventory (needs the data lake read
+    # permissions; denials are warnings, never failures).
+    aws_data_lake: bool = True
     # Peer baseline for inferred need: a grant is needed when at least this share of
     # same-topic, same-role peers were observed using it.
     peer_baseline_share: float = Field(default=0.5, gt=0, le=1)

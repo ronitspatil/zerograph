@@ -1009,7 +1009,7 @@ def in_app_collect(monkeypatch, *, role_arn=ARN, account="", identity_account="1
 def test_in_app_collection_confirms_sts_target_before_inventory(monkeypatch):
     run, made, iam, _ = in_app_collect(monkeypatch)
     snapshot = run()
-    assert made == [{"expected_account": "123456789012", "expected_role_arn": ARN, "access_advisor": False}]
+    assert made == [{"expected_account": "123456789012", "expected_role_arn": ARN, "access_advisor": False, "data_lake": True}]
     assert snapshot.nodes
     # An explicit ZG_AWS_ACCOUNT_ID equal to the role ARN's account is accepted.
     run, made, iam, _ = in_app_collect(monkeypatch, account="123456789012")

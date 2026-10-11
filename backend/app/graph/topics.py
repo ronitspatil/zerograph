@@ -121,6 +121,7 @@ TYPE_NAMES = {
     NodeType.DATABASE.value: "databases",
     NodeType.BUCKET.value: "S3 buckets",
     NodeType.VECTOR.value: "vector stores",
+    NodeType.TABLE.value: "data tables",
 }
 
 # Member flags (bitmask).
