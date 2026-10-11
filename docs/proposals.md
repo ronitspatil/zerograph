@@ -56,6 +56,7 @@ evidence alone would give and `reasons` lists why:
 | `coverage` | The asset's service lacks attested, complete coverage |
 | `seasonal` | `schedule=seasonal|scheduled|quarterly|annual|monthly`, `seasonal`, `zg-optimizer=exempt` tags or `optimizer_exempt` metadata |
 | `structure` | Cutting a tool-invocation or inheritance hop |
+| `lakeformation` | The grant edge carries a Lake Formation permission (`lakeformation:SELECT`...): revoke it in Lake Formation, not IAM |
 
 Deleting an identity is never proposed. Removing an identity-policy grant on an asset in
 another account is not a trust change and keeps its evidence tier (the resource-side

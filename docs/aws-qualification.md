@@ -1,7 +1,9 @@
 # Read-only AWS sandbox qualification
 
 ZeroGraph inventories IAM roles, IAM users (modeled as `HumanUser` identities),
-IAM groups and owned general-purpose S3 buckets. It reads policy documents, role,
+IAM groups, owned general-purpose S3 buckets and, in the collector's region, the
+Glue Data Catalog, Lake Formation permissions and Athena workgroups (see
+[Data lake](#data-lake-glue-lake-formation-athena)). It reads policy documents, role,
 user and bucket tags, each role's `RoleLastUsed`, default encryption configuration
 and, optionally, IAM Access Advisor service last-accessed data; it never lists
 objects, reads object contents, creates AWS resources or changes policies.
@@ -68,6 +70,83 @@ objects, reads object contents, creates AWS resources or changes policies.
 Every generated AWS permission edge remains **conditional**. A successful
 inventory is not complete effective-permission or production qualification.
 
+## Data lake (Glue, Lake Formation, Athena)
+
+With `ZG_AWS_DATA_LAKE` (default `true`; the CLI follows it unless `--data-lake` or
+`--no-data-lake` is given) the collector also reads, in the session's region and
+only after the IAM and S3 inventory:
+
+- **Glue Data Catalog.** `GetDatabases` and `GetTables` (`CatalogId` = the verified
+  account, 100 per page) for the account's own catalog; resource links to other
+  catalogs are skipped and counted. Databases become `Database` nodes and tables
+  `DataTable` nodes keyed by their ARNs (`arn:<partition>:glue:<region>:<account>:database/<db>`
+  and `.../table/<db>/<table>`, the IDs CloudTrail Glue events resolve to, so
+  uploaded usage, the excess-privilege index and proposals apply to them). A
+  table's (or database's) S3 location becomes `location`, plus `location_bucket`
+  (the bucket asset's ID) when the bucket is inventoried. Column, partition-key
+  and table names, column comments, table parameters and database tags
+  (`GetTags`) go through the same classifier as buckets, so a column named
+  `email` labels the table `PII`; topic and classification keys (`topic=`,
+  `app=`, `team=`, `owner=`, `env=`, `data-class=`...) become node tags (the
+  Glue format parameter `classification=parquet` is kept as `format`, never a
+  label). **Topic anchors:** a table without its own anchor inherits its
+  database's, else its S3 location bucket's, as metadata (`topic_inherited_from`),
+  so Glue tables join the topic of their database and data (for example
+  `data-lake`). `GetResourcePolicy` reads the catalog resource policy (absent is
+  `EntityNotFoundException`).
+- **IAM grants** evaluated per principal (roles and users, with boundaries and
+  SCPs, the catalog resource policy as the resource policy) for a bounded action
+  set: tables `glue:GetTable`, `glue:GetTables`, `glue:GetPartitions` (read) and
+  `glue:UpdateTable`, `glue:DeleteTable`, `glue:BatchCreatePartition` (write),
+  each required on the catalog, database and table ARNs; databases
+  `glue:GetDatabase` (read) and `glue:CreateTable` (write) on the catalog and
+  database ARNs; Athena workgroups `athena:StartQueryExecution` (read). Unlike S3
+  (where ACLs keep absence unresolved), an absent Glue/Athena grant is a denial:
+  no edge. Evaluations are cached per principal and short-circuit on the catalog.
+- **Lake Formation.** `GetDataLakeSettings` (administrators become
+  `lakeformation_admin` metadata on their role/user; whether new tables default to
+  `IAM_ALLOWED_PRINCIPALS`) and every `ListPermissions` entry (1,000 per page).
+  `SELECT`/`DESCRIBE` are reads, `INSERT`/`ALTER`/`DELETE`/`DROP` writes, `ALL`
+  both (databases: `DESCRIBE` read, `CREATE_TABLE`/`ALTER`/`DROP` write); table,
+  all-tables (`TableWildcard`), column-scoped and data-filter grants apply to
+  tables. Edge actions name them (`lakeformation:SELECT`) and evidence starts
+  `lakeformation:`. A table whose permissions include `IAM_ALLOWED_PRINCIPALS`
+  is in IAM-only or hybrid mode and its IAM edges stand (`lakeformation_mode:
+  iam_allowed_principals`). A table without one, with the listing complete, is
+  governed by Lake Formation (`lakeformation`): a principal gets an edge only
+  with a Lake Formation grant. With the listing denied or truncated the mode is
+  `unknown` and IAM edges stand (over-stated, never under-stated). Proposals to
+  remove a grant that a Lake Formation permission contributes to are always
+  `manual` (never-auto reason `lakeformation`: revoke it in Lake Formation, not
+  IAM). LF-Tag based grants, catalog and data-location grants and principals
+  outside the inventory (other accounts, SAML, Identity Center) are counted and
+  warned about, not resolved.
+- **Athena workgroups.** `ListWorkGroups` (50 per page) and `GetWorkGroup` become
+  `QueryWorkgroup` nodes (not data assets) with state, engine version, whether
+  the configuration is enforced and the result location (`output_bucket` when
+  inventoried). Queries, query history and results are never read.
+
+Glue and Lake Formation only list what the collector may see: in a Lake
+Formation-governed catalog, `GetTables` and `ListPermissions` return only
+resources the caller holds permissions on. Make the collector role a Lake
+Formation **read-only administrator** (`ReadOnlyAdmins` in the data lake
+settings) so the inventory is complete; that grants no data access.
+
+Bounds (per collection; beyond them the data lake part is **truncated with a
+warning**, never the whole collection): `max_glue_databases` 100 (hard 1,000),
+`max_glue_tables` 2,000 (10,000), `max_lakeformation_permissions` 10,000
+(50,000), `max_athena_workgroups` 50 (500). The data lake phase runs last and
+shares the request, page, evaluation and edge budgets; if one runs out there it
+stops with warning `data_lake_budget` or `data_lake_edges_truncated` and keeps
+everything collected before. Every denial or service error is a warning with
+coverage `unknown` (`glue_catalog_unknown`, `glue_tables_unknown`,
+`glue_tags_unknown`, `glue_resource_policy_unknown`, `lakeformation_settings_unknown`,
+`lakeformation_permissions_unknown`, `athena_workgroups_unknown`); malformed pages
+and repeated continuation tokens still fail closed. The artifact adds
+`coverage.data_lake` (inventory status, modes per table, unresolved grants) and
+counts `glue_databases`, `glue_tables`, `athena_workgroups` and
+`lakeformation_permissions`, never names.
+
 Tests use synthetic credentials with botocore Stubber and mocks; live authentication,
 permissions, regional behavior and account-scale timing remain qualification gates.
 A read-only live check (2026-10-09, replayed offline) found the 64 KiB cap aborting on
@@ -104,6 +183,15 @@ SDK calls match the supplied permissions:
 | GenerateServiceLastAccessedDetails (optional, ACTION_LEVEL) | iam:GenerateServiceLastAccessedDetails | role and user ARNs of the account |
 | GetServiceLastAccessedDetails (optional) | iam:GetServiceLastAccessedDetails | `*` |
 | GetCallerIdentity | no Allow required | permissionless identity verification |
+| GetResourcePolicy (optional, data lake) | glue:GetResourcePolicy | catalog ARN |
+| GetDatabases / GetTables (optional) | glue:GetDatabases / glue:GetTables | catalog, `database/*`, `table/*/*` ARNs |
+| GetTags (optional) | glue:GetTags | database ARNs |
+| GetDataLakeSettings / ListPermissions (optional) | lakeformation:GetDataLakeSettings / lakeformation:ListPermissions | `*` |
+| ListWorkGroups (optional) | athena:ListWorkGroups | `*` |
+| GetWorkGroup (optional) | athena:GetWorkGroup | workgroup ARNs |
+
+The Glue actions are listed exactly, never `glue:Get*`: that wildcard also grants
+`glue:GetConnection(s)`, which can return connection passwords.
 
 Organizations hierarchy APIs generally require management/delegated authority;
 a member-account read role alone may not have it. Optional Organizations denials
@@ -178,6 +266,9 @@ verification remain false for every outcome.
 | Permission evaluations | 100000 | 1000000 |
 | Graph edges | 15000 | 15000 |
 | Organizations ancestor depth | 10 | 20 |
+| Glue databases / tables (truncates) | 100 / 2000 | 1000 / 10000 |
+| Lake Formation permissions (truncates) | 10000 | 50000 |
+| Athena workgroups (truncates) | 50 | 500 |
 | Collection wall time | 600 seconds | 600 seconds |
 
 Each customer-authored policy document is additionally bounded to 64 KiB and 256
