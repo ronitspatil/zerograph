@@ -168,6 +168,9 @@ def main() -> None:  # noqa: C901 - one linear qualification run
     parser.add_argument("--graph-uri", required=True)
     parser.add_argument("--size", type=int, default=100_000)
     parser.add_argument("--seed", type=int, default=11)
+    parser.add_argument(
+        "--glue", action="store_true", help="Add Glue databases/tables to the data-lake topic (GLUE_FIXTURE)"
+    )
     parser.add_argument("--publish-runs", type=int, default=2)
     parser.add_argument("--requests", type=int, default=100)
     parser.add_argument("--chunk-bytes", type=int, default=3_900_000)
@@ -190,6 +193,7 @@ def main() -> None:  # noqa: C901 - one linear qualification run
         run_measured,
     )
     from qualify_scale import (
+        GLUE_FIXTURE,
         SAFETY_CASES,
         TOPIC_FIXTURE,
         cloudtrail_files,
@@ -201,7 +205,7 @@ def main() -> None:  # noqa: C901 - one linear qualification run
 
     if not graph_is_empty(args.graph_uri):
         parser.error(f"Graph at {args.graph_uri} is not empty; use a disposable instance")
-    snapshot, truth, planted_usage = generate_topics(args.size, args.seed)
+    snapshot, truth, planted_usage = generate_topics(args.size, args.seed, glue=args.glue)
     cases = plant_safety_cases(snapshot, truth, planted_usage)
     schema = "zg_proposals_" + uuid4().hex
     admin = create_engine(args.database_url)
@@ -232,7 +236,7 @@ def main() -> None:  # noqa: C901 - one linear qualification run
         "platform": platform.platform(),
         "graph": "memgraph/memgraph:3.2.0 (Docker via colima)",
         "app_database": "postgresql 16",
-        "fixture": TOPIC_FIXTURE,
+        "fixture": TOPIC_FIXTURE + (" " + GLUE_FIXTURE if args.glue else ""),
         "safety_cases": SAFETY_CASES,
         "size": args.size,
         "seed": args.seed,
@@ -327,7 +331,7 @@ def main() -> None:  # noqa: C901 - one linear qualification run
             json={
                 "window_start": start.isoformat(),
                 "window_end": end.isoformat(),
-                "attested_services": ["aoss", "rds-data", "s3", "sts"],
+                "attested_services": ["aoss", "rds-data", "s3", "sts", *(["glue"] if args.glue else [])],
             },
         )
         assert created.status_code == 201, created.text
@@ -429,7 +433,9 @@ def main() -> None:  # noqa: C901 - one linear qualification run
         }
         print(json.dumps(report["never_auto"]), flush=True)
         everything = proposals.overlay_from(model, range(len(views)))
-        data = {n.id for n in snapshot.nodes if n.type.value in ("Database", "VectorStore", "S3Bucket")}
+        data = {
+            n.id for n in snapshot.nodes if n.type.value in ("Database", "VectorStore", "S3Bucket", "DataTable")
+        }
         cut = {pair for pair in everything.removed if pair[1] not in data}
         started = time.perf_counter()
         lost = observed_access_kept(

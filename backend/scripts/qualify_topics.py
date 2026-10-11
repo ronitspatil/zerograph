@@ -239,6 +239,9 @@ def main() -> None:
     parser.add_argument("--graph-uri", required=True, help="Empty disposable Memgraph bolt URI")
     parser.add_argument("--size", type=int, default=100_000)
     parser.add_argument("--seed", type=int, default=11)
+    parser.add_argument(
+        "--glue", action="store_true", help="Add Glue databases/tables to the data-lake topic (GLUE_FIXTURE)"
+    )
     parser.add_argument("--publish-runs", type=int, default=2, help="Publications per arm (alternating)")
     parser.add_argument("--requests", type=int, default=200)
     parser.add_argument("--chunk-bytes", type=int, default=3_900_000)
@@ -260,12 +263,12 @@ def main() -> None:
         rss_bytes,
         run_measured,
     )
-    from qualify_scale import TOPIC_FIXTURE, generate_topics
+    from qualify_scale import GLUE_FIXTURE, TOPIC_FIXTURE, generate_topics
     from sqlalchemy import create_engine, text
 
     if not graph_is_empty(args.graph_uri):
         parser.error(f"Graph at {args.graph_uri} is not empty; use a disposable instance")
-    snapshot, truth, usage = generate_topics(args.size, args.seed)
+    snapshot, truth, usage = generate_topics(args.size, args.seed, glue=args.glue)
     if args.sidecars:
         args.sidecars.mkdir(parents=True, exist_ok=True)
         (args.sidecars / f"planted-{args.size}-truth.json").write_text(json.dumps(truth) + "\n")
@@ -296,7 +299,7 @@ def main() -> None:
         "platform": platform.platform(),
         "graph": "memgraph/memgraph:3.2.0 (Docker via colima)",
         "app_database": "postgresql",
-        "fixture": TOPIC_FIXTURE,
+        "fixture": TOPIC_FIXTURE + (" " + GLUE_FIXTURE if args.glue else ""),
         "size": args.size,
         "seed": args.seed,
         "nodes": len(snapshot.nodes),

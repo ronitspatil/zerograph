@@ -168,9 +168,109 @@ _WRITE = {
     NodeType.VECTOR: ["aoss:WriteDocument"],
 }
 _PREFIX = {NodeType.BUCKET: "bucket", NodeType.DATABASE: "db", NodeType.VECTOR: "index"}
+# Optional Glue Data Catalog part of the data-lake topic (``generate_topics(glue=True)``).
+GLUE_FIXTURE = (
+    "With --glue: n/100 Glue tables in n/4000 Glue databases of the data-lake topic, IDs as the AWS collector "
+    "and CloudTrail mapping use (arn:aws:glue:us-east-1:<account>:table/<db>/<table>); 60% of databases tagged "
+    "topic=data-lake (their tables inherit it as metadata, as the collector does), else tables inherit their "
+    "S3 location bucket's topic tag when it has one; database names carry data-lake tokens. Data-lake roles get "
+    "1-12 table grants (70% read) and a database read, 65% used; 5% of other roles get 1-3 unused Glue "
+    "over-grants. A separate seeded generator: the base fixture is unchanged."
+)
+GLUE_ACCOUNT = "123456789012"  # = CLOUDTRAIL_ACCOUNT, so CloudTrail Glue events resolve to these IDs.
+_GLUE_READ = {NodeType.TABLE: ["glue:GetTable", "glue:GetPartitions"], NodeType.DATABASE: ["glue:GetDatabase"]}
+_GLUE_WRITE = {NodeType.TABLE: ["glue:UpdateTable"], NodeType.DATABASE: ["glue:CreateTable"]}
+_GLUE_ZONES = ("raw", "curated", "analytics", "landing", "refined")
+_GLUE_TABLES = ("events", "orders", "sessions", "clicks", "customers", "invoices", "devices", "shipments")
 
 
-def generate_topics(n: int = 100_000, seed: int = 11) -> tuple[GraphSnapshot, dict, dict]:
+def _plant_glue(n, seed, nodes, kind_of, topic_of, data_by_topic, roles_by_topic, hubs, grants, used, over):
+    """Add the Glue databases/tables of ``GLUE_FIXTURE`` in place; returns their IDs."""
+    rng = random.Random(seed + 7919)
+    prefix = f"arn:aws:glue:us-east-1:{GLUE_ACCOUNT}"
+    buckets = {node.id: node for node in nodes if node.type == NodeType.BUCKET}
+    lake_buckets = sorted(item for item in data_by_topic["data-lake"] if item in buckets)
+    tokens = dict((topic[0], topic[3]) for topic in PLANTED_TOPICS)["data-lake"]
+    added: list[str] = []
+    databases = []
+    for k in range(max(2, n // 4000)):
+        name = f"{rng.choice(tokens)}_{rng.choice(_GLUE_ZONES)}_{k:03d}"
+        node_id = f"{prefix}:database/{name}"
+        tagged = rng.random() < 0.6
+        nodes.append(
+            Node(
+                id=node_id,
+                type=NodeType.DATABASE,
+                name=name,
+                account_id=GLUE_ACCOUNT,
+                provider="aws",
+                sensitivity=Sensitivity.CONFIDENTIAL if rng.random() < 0.7 else rng.choice(SENSITIVITIES),
+                tags=["topic=data-lake", "env=prod"] if tagged else ["env=prod"],
+                metadata={"service": "glue", "resource_type": "glue_database"},
+            )
+        )
+        databases.append((node_id, name, tagged))
+        added.append(node_id)
+    tables_of: dict[str, list[str]] = {}
+    for i in range(max(12, n // 100)):
+        database, db_name, tagged = databases[i % len(databases)]
+        name = f"{rng.choice(_GLUE_TABLES)}_{i:05d}"
+        node_id = f"{prefix}:table/{db_name}/{name}"
+        bucket = rng.choice(lake_buckets) if lake_buckets else ""
+        metadata = {"service": "glue", "resource_type": "glue_table", "database": database}
+        if bucket:
+            metadata["location_bucket"] = bucket
+        if tagged:
+            metadata.update(topic="data-lake", topic_inherited_from="database")
+        elif bucket:
+            anchor = next((t for t in buckets[bucket].tags if t.split("=", 1)[0] in ("topic", "app", "team")), "")
+            if anchor:
+                key, _, value = anchor.partition("=")
+                metadata.update({key: value, "topic_inherited_from": "location_bucket"})
+        pii = rng.random() < 0.1
+        nodes.append(
+            Node(
+                id=node_id,
+                type=NodeType.TABLE,
+                name=f"{db_name}.{name}",
+                account_id=GLUE_ACCOUNT,
+                provider="aws",
+                sensitivity=Sensitivity.CONFIDENTIAL if pii or rng.random() < 0.7 else rng.choice(SENSITIVITIES),
+                tags=["PII"] if pii else [],
+                metadata=metadata,
+            )
+        )
+        tables_of.setdefault(database, []).append(node_id)
+        added.append(node_id)
+    for item in added:
+        topic_of[item] = "data-lake"
+        kind_of[item] = NodeType.DATABASE if ":database/" in item else NodeType.TABLE
+    data_by_topic["data-lake"].extend(added)
+    tables = [item for item in added if ":table/" in item]
+    for role in roles_by_topic["data-lake"]:
+        if role in hubs:
+            continue
+        picked = {tables[zipf_pick(rng, len(tables), 1.02)] for _ in range(1 + zipf_pick(rng, 12, 1.0))}
+        for item in sorted(picked):
+            if item in grants[role]:
+                continue
+            grants[role][item] = "read" if rng.random() < 0.7 else "write"
+            if rng.random() < 0.65:
+                used[role].add(item)
+        database = next(db for db, items in tables_of.items() if min(picked) in items)
+        grants[role].setdefault(database, "read")
+        used[role].add(database)
+    others = sorted(r for topic, rs in roles_by_topic.items() if topic != "data-lake" for r in rs if r not in hubs)
+    for role in rng.sample(others, len(others) // 20):
+        for _ in range(1 + zipf_pick(rng, 3, 1.0)):
+            item = rng.choice(tables)
+            if item not in grants[role]:
+                grants[role][item] = "read"
+                over.add((role, item))
+    return added
+
+
+def generate_topics(n: int = 100_000, seed: int = 11, glue: bool = False) -> tuple[GraphSnapshot, dict, dict]:
     """Planted-topic identity graph with a ground-truth sidecar and synthetic usage.
 
     Returns ``(snapshot, truth, usage)``. ``truth`` holds the planted topic of every
@@ -179,6 +279,8 @@ def generate_topics(n: int = 100_000, seed: int = 11) -> tuple[GraphSnapshot, di
     synthetic observed access over a 90-day window (role -> data used, identity ->
     role assumed); Phase 1 never reads it. Deterministic for the same ``n``/``seed``
     (adapted from the optimizer design scout's ``measure.py`` planted generator).
+    With ``glue``, Glue databases and tables join the data-lake topic (``GLUE_FIXTURE``)
+    from a separate generator, so every base node, edge and label is unchanged.
     """
     rng = random.Random(seed)
     names = [topic[0] for topic in PLANTED_TOPICS]
@@ -324,6 +426,13 @@ def generate_topics(n: int = 100_000, seed: int = 11) -> tuple[GraphSnapshot, di
                 chosen.append(hub)
         assumes[identity], assume_used[identity] = chosen, used_roles
 
+    glue_items: set[str] = set()
+    if glue:
+        added = _plant_glue(
+            n, seed, nodes, kind_of, topic_of, data_by_topic, roles_by_topic, set(hubs), grants, used, over
+        )
+        glue_items = set(added)
+        data = data + added
     edges: dict[str, Edge] = {}
 
     def add(source, target, kind, actions):
@@ -336,12 +445,13 @@ def generate_topics(n: int = 100_000, seed: int = 11) -> tuple[GraphSnapshot, di
     for role in roles:
         for item, access in grants[role].items():
             kind = kind_of[item]
+            read, write = (_GLUE_READ, _GLUE_WRITE) if item in glue_items else (_READ, _WRITE)
             if access == "admin":
                 add(role, item, EdgeType.WRITE, ["*"])
             elif access == "read":
-                add(role, item, EdgeType.READ, list(_READ[kind]))
+                add(role, item, EdgeType.READ, list(read[kind]))
             else:
-                add(role, item, EdgeType.WRITE, list(_WRITE[kind]))
+                add(role, item, EdgeType.WRITE, list(write[kind]))
     snapshot = GraphSnapshot.model_construct(
         nodes=nodes, edges=list(edges.values()), warnings=[], source="snapshot"
     )
@@ -569,6 +679,7 @@ def cloudtrail_records(snapshot: GraphSnapshot, usage: dict, start: datetime, en
     """
     rng = random.Random(seed)
     kinds = {node.id: node.type for node in snapshot.nodes}
+    glue = {node.id for node in snapshot.nodes if node.metadata.get("service") == "glue"}
     grant_kind: dict[tuple[str, str], EdgeType] = {}
     for edge in snapshot.edges:
         if edge.type in (EdgeType.READ, EdgeType.WRITE):
@@ -620,7 +731,22 @@ def cloudtrail_records(snapshot: GraphSnapshot, usage: dict, start: datetime, en
             "eventCategory": "Data" if data else "Management",
         }
 
+    def glue_event(role: str, item: str, kind: EdgeType) -> dict:
+        # Glue events name the database/table in requestParameters (resolved like the collector's IDs).
+        path = item.split(":", 5)[5]
+        if path.startswith("database/"):
+            name, request = "GetDatabase", {"name": path.split("/", 1)[1]}
+        else:
+            _, database, table = path.split("/", 2)
+            if kind == EdgeType.WRITE:
+                name, request = "UpdateTable", {"databaseName": database, "tableInput": {"name": table}}
+            else:
+                name, request = "GetTable", {"databaseName": database, "name": table}
+        return record(session(role), "glue.amazonaws.com", name, request, [], False)
+
     def data_event(role: str, item: str, kind: EdgeType) -> dict:
+        if item in glue:
+            return glue_event(role, item, kind)
         source, name, resource_type = _EVENT[(kinds[item], kind)]
         if source.startswith("s3"):
             request = {"bucketName": item, "key": f"part-{rng.getrandbits(16):04x}"}

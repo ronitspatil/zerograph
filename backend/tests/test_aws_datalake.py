@@ -729,3 +729,35 @@ def test_edge_types_into_workgroups_are_reads_only():
     snapshot = c.collect()
     into = [e for e in snapshot.edges if e.target == WORKGROUP]
     assert into and all(e.type == EdgeType.READ for e in into)
+
+
+def test_planted_fixture_glue_option_keeps_the_base_and_aligns_cloudtrail_ids():
+    import sys
+    from datetime import timedelta
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from qualify_scale import cloudtrail_records, generate_topics
+
+    base, base_truth, _ = generate_topics(4000, 11)
+    snapshot, truth, usage = generate_topics(4000, 11, glue=True)
+    base_ids = {n.id for n in base.nodes}
+    glue = {n.id for n in snapshot.nodes} - base_ids
+    assert base_ids < {n.id for n in snapshot.nodes}
+    assert {e.id for e in base.edges} <= {e.id for e in snapshot.edges}
+    assert all(truth["resource_topic"][k] == v for k, v in base_truth["resource_topic"].items())
+    assert glue and all(truth["resource_topic"][item] == "data-lake" for item in glue)
+    tables = [n for n in snapshot.nodes if n.id in glue and n.type == NodeType.TABLE]
+    assert len(tables) == 40 and all(n.metadata["service"] == "glue" for n in tables)
+    assert any(item in glue for role, item in truth["over_grants"])
+    end = datetime(2026, 10, 1, tzinfo=UTC)
+    records = list(cloudtrail_records(snapshot, usage, end - timedelta(days=90), end))
+    normalized = normalize_export(records, end - timedelta(days=90), end)
+    observed = {resource for (_, resource, _, service) in normalized.access if service == "glue"}
+    used = {item for items in usage["role_data_used"].values() for item in items if item in glue}
+    assert observed == used  # every used Glue asset resolves to its collected-style ID
+    # Phase 1 topics place the Glue tables in data-lake.
+    computed = compute_topics(CompactGraph.from_snapshot(snapshot))
+    graph = computed.graph
+    labels = [computed.topics[computed.resource_topic[graph.index[n.id]]].name for n in tables]
+    assert sum(label == "data-lake" for label in labels) / len(labels) >= 0.95
