@@ -7,6 +7,8 @@ export type NodeType =
   | "Database"
   | "VectorStore"
   | "S3Bucket"
+  | "DataTable"
+  | "QueryWorkgroup"
   | "DataCategory";
 export type Sensitivity = "public" | "internal" | "confidential" | "restricted";
 export interface GraphNode {

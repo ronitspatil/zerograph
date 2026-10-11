@@ -30,6 +30,8 @@ export const nodeColors: Record<string, string> = {
   Database: "#e391bb",
   VectorStore: "#e391bb",
   S3Bucket: "#e391bb",
+  DataTable: "#e391bb",
+  QueryWorkgroup: "#9fb6cc",
   DataCategory: "#73849a",
 };
 export function GraphCanvas({
@@ -537,6 +539,12 @@ export function GraphCanvas({
           <i className="legend-data-asset" />
           Data asset
         </span>
+        {graph.nodes.some((n) => n.type === "QueryWorkgroup") && (
+          <span>
+            <i className="legend-query-workgroup" />
+            Query workgroup
+          </span>
+        )}
         <span>
           <i className="risk-dot" />
           Risk path

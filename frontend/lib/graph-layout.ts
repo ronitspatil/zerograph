@@ -172,7 +172,12 @@ export const OVERVIEW_LABELS = {
   narrow: { limit: 8, backdrops: 4 },
 };
 
-const DATA_STORES = new Set(["Database", "VectorStore", "S3Bucket"]);
+const DATA_STORES = new Set([
+  "Database",
+  "VectorStore",
+  "S3Bucket",
+  "DataTable",
+]);
 
 /**
  * Overview label priority within this visible slice: visible degree (the hubs

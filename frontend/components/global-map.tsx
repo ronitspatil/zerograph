@@ -42,6 +42,8 @@ const typeNames: Record<string, string> = {
   Database: "Databases",
   VectorStore: "Vector stores",
   S3Bucket: "S3 buckets",
+  DataTable: "Data tables",
+  QueryWorkgroup: "Query workgroups",
   DataCategory: "Data categories",
 };
 const noRisk = new Set<string>();
