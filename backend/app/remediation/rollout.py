@@ -555,8 +555,18 @@ def summary_of(plan: Plan, model, evidence: dict, simulation: dict | None) -> di
     epi = None
     if model is not None and plan.included:
         selection = model.selection(row.ordinal for row in plan.included)
-        result = model.evaluate(selection)
-        epi = {"graph": result["graph"], "counts": result["counts"], "applied": result["applied"]}
+        result = model.evaluate(selection, focus=plan.principals)
+        names = {row.subject_id: row.subject_name for row in plan.included}
+        epi = {
+            "graph": result["graph"],
+            "counts": result["counts"],
+            "applied": result["applied"],
+            "affected": result["affected"],
+            "principals": [
+                {**item, "name": names.get(item["id"], item["id"])}
+                for item in result["principals"][:MAX_BUNDLE_PRINCIPALS]
+            ],
+        }
     by_type: dict[str, int] = {}
     for row in plan.included:
         by_type[row.type] = by_type.get(row.type, 0) + 1
@@ -849,8 +859,143 @@ def _md(value) -> str:
     return text.replace("|", "\\|").replace("<", "&lt;").replace("`", "'").replace("\n", " ")[:200]
 
 
-def _pct(value) -> str:
-    return f"{value * 100:.1f}%" if isinstance(value, int | float) else "n/a"
+def _pct2(value) -> str:
+    return f"{value * 100:.2f}%" if isinstance(value, int | float) else "n/a"
+
+
+def _shift(before, after) -> str:
+    """``before -> after`` of an excess-privilege share, never two identical-looking numbers.
+
+    Shares are shown with 2 decimals; a change too small for that is shown as its delta in
+    percentage points with enough decimals (or as below 0.0001 pp)."""
+    if not isinstance(before, int | float) or not isinstance(after, int | float):
+        return f"{_pct2(before)} before, {_pct2(after)} after"
+    delta = (after - before) * 100
+    if abs(delta) < 1e-9:
+        return f"unchanged at {_pct2(before)}"
+    if _pct2(before) != _pct2(after):
+        return f"{_pct2(before)} -> {_pct2(after)} ({delta:+.2f} pp)"
+    for decimals in (3, 4):
+        if round(abs(delta), decimals):
+            return f"{_pct2(before)} before, {delta:+.{decimals}f} pp after this change"
+    sign = "-" if delta < 0 else "+"
+    return f"{_pct2(before)} before, {sign}<0.0001 pp after this change"
+
+
+def _impact_lines(summary: dict) -> list[str]:
+    """The change's own impact first (its principals, the roles and identities that lose
+    access, grants removed), then graph-wide aggregates as context, then the blast radius."""
+    lines: list[str] = []
+    epi = summary.get("epi")
+    if epi:
+        counts = epi.get("counts") or {}
+        lines += [
+            "",
+            "### Impact of this change (what-if, before -> after)",
+            "",
+            f"- Grants removed: {counts.get('grants_removed', 0)}"
+            f" ({counts.get('restricted_grants_removed', 0)} on restricted data);"
+            f" principals disabled: {counts.get('disabled_nodes', 0)}.",
+        ]
+        principals = epi.get("principals") or []
+        for item in principals:
+            label = f"`{_md(item.get('name') or item.get('id'))}`"
+            if item.get("disabled"):
+                lines.append(f"- {label}: disabled (deny-all); its excess privilege no longer applies.")
+            elif item.get("epi_before") is None:
+                lines.append(
+                    f"- {label}: excess privilege not measured (no usage evidence for this principal)."
+                )
+            else:
+                lines.append(
+                    f"- {label} excess privilege: {_shift(item['epi_before'], item.get('epi_after'))}."
+                )
+        affected = epi.get("affected")
+        if affected is not None:
+            roles_less = counts.get("roles_with_less_access", 0)
+            identities_less = counts.get("identities_with_less_access", 0)
+            lines.append(f"- Roles with less access: {roles_less}; identities with less access: {identities_less}.")
+            listed = {kind: sum(1 for item in principals if item.get("kind") == kind) for kind in affected}
+            for kind, number in (("roles", roles_less), ("identities", identities_less)):
+                totals = affected.get(kind) or {}
+                # Only the listed principals lost access: their own lines already say it.
+                if number and totals.get("rows") and number > listed.get(kind, 0):
+                    lines.append(
+                        f"- Excess privilege of those {kind} ({totals['rows']} with usage evidence):"
+                        f" {_shift(totals['before']['epi'], totals['after']['epi'])}."
+                    )
+        roles, identities = epi["graph"]["roles"], epi["graph"]["identities"]
+        lines += [
+            "",
+            "Graph-wide (context; one change moves these little):",
+            "",
+            f"- All roles: {_shift(roles['before']['epi'], roles['after']['epi'])}.",
+            f"- All roles without hub roles:"
+            f" {_shift(roles['before']['epi_excl_hubs'], roles['after']['epi_excl_hubs'])}.",
+            f"- All identities: {_shift(identities['before']['epi'], identities['after']['epi'])}.",
+        ]
+    simulation = summary.get("simulation")
+    if simulation:
+        removed = simulation.get("assets_removed") or 0
+        assets = (
+            f"{simulation.get('assets_before')} -> {simulation.get('assets_after')} ({removed} no longer reachable)"
+            if removed
+            else f"unchanged at {simulation.get('assets_before')}"
+        )
+        risk_before, risk_after = simulation.get("risk_before"), simulation.get("risk_after")
+        if risk_before == risk_after:
+            risk = (
+                f"- Risk score (0-100, relative to the whole graph, rounded) stays {_md(risk_before)}:"
+                " the access removed is too small a share of the graph's weighted data to move it."
+            )
+        else:
+            risk = f"- Risk score (0-100, relative to the whole graph, rounded): {_md(risk_before)} -> {_md(risk_after)}."
+        lines += [
+            "",
+            "### Simulation (blast radius of the principal, conditional grants included)",
+            "",
+            f"- Reachable data assets: {assets}.",
+        ]
+        if isinstance(simulation.get("exposure_before"), int | float):
+            lines.append(
+                "- Sensitivity-weighted share of the graph's data it reaches:"
+                f" {_shift(simulation['exposure_before'], simulation.get('exposure_after'))}."
+            )
+        lines.append(risk)
+    return lines
+
+
+def _restore_lines(summary: dict) -> list[str]:
+    """What merging the revert gives back, from the change's stored what-if summary."""
+    lines: list[str] = []
+    epi = summary.get("epi") or {}
+    counts = epi.get("counts") or {}
+    if counts:
+        lines.append(
+            f"- Grants restored: {counts.get('grants_removed', 0)}"
+            f" ({counts.get('restricted_grants_removed', 0)} on restricted data);"
+            f" principals re-enabled: {counts.get('disabled_nodes', 0)}."
+        )
+    for item in epi.get("principals") or []:
+        label = f"`{_md(item.get('name') or item.get('id'))}`"
+        if item.get("disabled"):
+            lines.append(f"- {label}: the deny-all policy is removed; its access returns.")
+        elif item.get("epi_before") is not None:
+            lines.append(
+                f"- {label} excess privilege returns: {_shift(item.get('epi_after'), item['epi_before'])}."
+            )
+    if counts.get("roles_with_less_access") or counts.get("identities_with_less_access"):
+        lines.append(
+            f"- Access returns to {counts.get('roles_with_less_access', 0)} role(s) and"
+            f" {counts.get('identities_with_less_access', 0)} identity(ies)."
+        )
+    simulation = summary.get("simulation") or {}
+    if simulation.get("assets_removed"):
+        lines.append(
+            f"- Reachable data assets of the principal: {simulation.get('assets_after')} ->"
+            f" {simulation.get('assets_before')} ({simulation['assets_removed']} reachable again)."
+        )
+    return ["", "### What the revert restores", "", *lines] if lines else []
 
 
 def pr_title(change: RolloutChange) -> str:
@@ -891,29 +1036,7 @@ def pr_body(change: RolloutChange, plan_note: str, tenant_key: str, prefix: str)
         f" {_md(', '.join(evidence.get('sufficient_services') or []) or 'none')}.",
         "- Every removed grant was unused for the full attested window; no proposal removes observed access.",
     ]
-    epi = summary.get("epi")
-    if epi:
-        roles, identities = epi["graph"]["roles"], epi["graph"]["identities"]
-        lines += [
-            "",
-            "### Excess privilege (what-if, before -> after this change)",
-            "",
-            f"- Roles: {_pct(roles['before']['epi'])} -> {_pct(roles['after']['epi'])}"
-            f" (without hub roles {_pct(roles['before']['epi_excl_hubs'])} -> {_pct(roles['after']['epi_excl_hubs'])})",
-            f"- Identities: {_pct(identities['before']['epi'])} -> {_pct(identities['after']['epi'])}",
-            f"- Grants removed: {epi['counts'].get('grants_removed', 0)};"
-            f" principals disabled: {epi['counts'].get('disabled_nodes', 0)}",
-        ]
-    simulation = summary.get("simulation")
-    if simulation:
-        lines += [
-            "",
-            "### Simulation (blast radius of the principal, conditional grants included)",
-            "",
-            f"- Risk score {simulation.get('risk_before')} -> {simulation.get('risk_after')};"
-            f" reachable data assets {simulation.get('assets_before')} -> {simulation.get('assets_after')}"
-            f" ({simulation.get('assets_removed')} no longer reachable).",
-        ]
+    lines += _impact_lines(summary)
     lines += ["", "### Canary plan", "", plan_note, ""]
     lines += [
         "### Files",
@@ -969,6 +1092,7 @@ def revert_body(change: RolloutChange, reason: str) -> str:
         "Restores each rewritten inline policy file byte for byte to the stored original document and removes"
         " the added deny-all policy files. Review and merge to roll the change back.",
     ]
+    lines += _restore_lines(change.summary or {})
     flag = change.flag or {}
     if flag:
         lines += ["", f"AccessDenied events in the watch window: {flag.get('events', 0)}"]

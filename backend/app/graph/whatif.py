@@ -25,6 +25,7 @@ import json
 import zlib
 from array import array
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from app.graph.compact import MAX_HOPS
@@ -77,6 +78,7 @@ class WhatIfModel:
     cuts: list[tuple[int, ...]]  # flattened (a, b) hop pairs
     disables: list[tuple[int, ...]]
     _holders_of: dict[int, list[int]] = field(default_factory=dict, repr=False)
+    _index: dict[str, int] = field(default_factory=dict, repr=False)
 
     # -- serialization -------------------------------------------------------
 
@@ -169,6 +171,12 @@ class WhatIfModel:
 
     # -- evaluation ----------------------------------------------------------
 
+    def index_of(self, node_id: str) -> int:
+        """Node index of ``node_id`` (-1 if the model does not know it)."""
+        if not self._index:
+            self._index = {value: position for position, value in enumerate(self.ids)}
+        return self._index.get(node_id, -1)
+
     def holders_of(self, holder: int) -> list[int]:
         """Closure indices that contain ``holder`` (built once per model)."""
         if not self._holders_of:
@@ -216,8 +224,16 @@ class WhatIfModel:
         seen.discard(start)
         return frozenset(seen)
 
-    def evaluate(self, chosen: "Selection") -> dict:
-        """Before/after aggregates (graph-wide and per topic) for a selection."""
+    def evaluate(self, chosen: "Selection", focus: Iterable[str] | None = None) -> dict:
+        """Before/after aggregates (graph-wide and per topic) for a selection.
+
+        With ``focus`` (principal IDs), the result also has ``affected`` (aggregates over
+        only the roles and identities that lose access, disabled ones excluded) and
+        ``principals`` (each focused principal's own excess privilege before and after).
+        """
+        focused = None if focus is None else {i for i in (self.index_of(f) for f in focus) if i >= 0}
+        affected = {"roles": Totals(), "identities": Totals()}
+        own: dict[int, dict] = {}
         removed, disabled, cut = chosen.removed, chosen.disabled, chosen.cut
         direct, weight, hubs = self.direct, self.weight, self.hubs
         touched_closures: set[int] = set()
@@ -309,6 +325,20 @@ class WhatIfModel:
                     counts["changed_" + kind] += 1
             else:
                 after = (g, gc, n, nc)
+            if focused is not None:
+                if start not in disabled and after[0] != g:
+                    affected[kind].add(basis, (g, gc, n, nc), after)
+                if start in focused:
+                    own[start] = {
+                        "id": self.ids[start],
+                        "kind": kind,
+                        "basis": basis,
+                        "disabled": start in disabled,
+                        "epi_before": _epi(g, n) if basis != "none" else None,
+                        "epi_after": _epi(after[0], after[2]) if basis != "none" else None,
+                        "granted_weight_before": g,
+                        "granted_weight_after": after[0],
+                    }
             for totals in (rows[kind], by_topic.setdefault(topic, {}).setdefault(kind, Totals())):
                 totals.add(basis, (g, gc, n, nc), after)
         removed_pairs = sum(len(items & direct.get(h, frozenset())) for h, items in removed.items())
@@ -321,7 +351,16 @@ class WhatIfModel:
         disabled_grants = sum(
             len(grants_ - removed.get(h, set())) for h, grants_ in direct.items() if h in disabled
         )
+        detail = (
+            {}
+            if focused is None
+            else {
+                "affected": {kind: totals.as_dict() for kind, totals in affected.items()},
+                "principals": [own[node] for node in sorted(own, key=self.ids.__getitem__)],
+            }
+        )
         return {
+            **detail,
             "graph": {kind: totals.as_dict() for kind, totals in rows.items()},
             "topics": [
                 {

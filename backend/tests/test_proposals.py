@@ -367,6 +367,36 @@ def test_whatif_model_matches_brute_force(planted):
     assert empty["graph"]["identities"]["before"] == empty["graph"]["identities"]["after"]
 
 
+def test_whatif_focus_reports_each_principal_and_only_the_affected_rows(planted):
+    """``focus`` adds the focused principals' own excess privilege (equal to the proposal's
+    per-role figure for a single removal) and aggregates over only the rows that lose access;
+    the graph-wide result is unchanged by it."""
+    _, _, _, _, _, result, _ = planted
+    model = result.model
+    checked = 0
+    for ordinal, proposal in enumerate(result.proposals):
+        if proposal.kind != P.REMOVE or proposal.epi[0] is None or checked >= 25:
+            continue
+        subject = model.ids[proposal.subject]
+        chosen = model.selection([ordinal])
+        plain, found = model.evaluate(chosen), model.evaluate(chosen, focus=[subject, "absent"])
+        assert "principals" not in plain and "affected" not in plain
+        assert {k: v for k, v in found.items() if k not in ("principals", "affected")} == plain
+        (own,) = found["principals"]
+        assert own["id"] == subject and not own["disabled"]
+        assert own["epi_before"] == pytest.approx(proposal.epi[0], abs=1e-6)
+        assert own["epi_after"] == pytest.approx(proposal.epi[1], abs=1e-6)
+        affected = found["affected"]
+        changed = plain["counts"]["roles_with_less_access"] + plain["counts"]["identities_with_less_access"]
+        assert affected["roles"]["rows"] + affected["identities"]["rows"] <= changed
+        for kind in ("roles", "identities"):
+            graph, part = plain["graph"][kind], affected[kind]
+            lost = graph["before"]["granted_weight"] - graph["after"]["granted_weight"]
+            assert part["before"]["granted_weight"] - part["after"]["granted_weight"] == lost
+        checked += 1
+    assert checked == 25
+
+
 def test_simulate_overlay_matches_a_rebuilt_graph(planted):
     snapshot, _, _, _, _, result, _ = planted
     model = result.model
