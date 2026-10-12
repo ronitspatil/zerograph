@@ -84,6 +84,7 @@ def collect(source: str, payload: dict, tenant: str) -> GraphSnapshot | StagedUp
             expected_account=account,
             expected_role_arn=role_arn,
             access_advisor=settings.aws_access_advisor,
+            data_lake=settings.aws_data_lake,
         ).collect()
     raise ValueError("Unsupported ingestion source")
 

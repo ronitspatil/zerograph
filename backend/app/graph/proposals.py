@@ -99,6 +99,8 @@ TYPES = (
     "break_toxic_path",
 )
 HIGH, MEDIUM, LOW, INFERRED, MANUAL = range(5)
+# Edge actions a collector derived from Lake Formation grants (``lakeformation:SELECT``...).
+LAKEFORMATION_ACTION = "lakeformation:"
 REMOVE, DISABLE_IDENTITY, DISABLE_ROLE, MERGE, SPLIT, WILDCARD, TOXIC = range(7)
 MERGE_JACCARD = 0.8
 MERGE_MIN_GRANTS = 4
@@ -123,6 +125,7 @@ NEVER_AUTO = {
     "seasonal": "Scheduled or seasonal identity (exemption tag); needs a longer window",
     "structure": "Changes role or tool relationships (who can invoke or inherit what)",
     "unevaluated_policy": "An attached policy was too large to evaluate; the identity's access is unknown",
+    "lakeformation": "Granted by Lake Formation permissions (revoke it in Lake Formation, not in IAM)",
 }
 NOTICE = (
     "Proposed, not applied. Every proposal is reviewed by a person; accepted ones become draft pull requests "
@@ -284,11 +287,22 @@ def compute_proposals(
         graph.edge_target,
         graph.edge_actions,
     )
+    # Grant pairs a Lake Formation permission contributes to (revoked there, never in IAM).
+    lakeformation_pairs: set[tuple[int, int]] = set()
+    lakeformation_actions: dict[int, bool] = {}  # by id() of the interned action tuple
     is_data = {item for item in weight}
     for edge in range(graph.edge_count):
         if kinds[edge] in GRANT_CODES and targets[edge] in is_data:
-            if any(a == "*" or a.endswith(":*") for a in actions[edge]):
+            granted = actions[edge]
+            if any(a == "*" or a.endswith(":*") for a in granted):
                 wildcard_pairs.add((sources[edge], targets[edge]))
+            found = lakeformation_actions.get(id(granted))
+            if found is None:
+                found = lakeformation_actions[id(granted)] = any(
+                    a.startswith(LAKEFORMATION_ACTION) for a in granted
+                )
+            if found:
+                lakeformation_pairs.add((sources[edge], targets[edge]))
     grant_actions: dict[tuple[int, int], tuple[str, ...]] = {}
 
     def node_reasons(node: int) -> list[str]:
@@ -337,7 +351,10 @@ def compute_proposals(
         return tier, reasons, evidence
 
     def policy_reasons(holder: int, item: int) -> list[str]:
-        return policies.constraints(ids[holder], grant_actions.get((holder, item), ()), ids[item])
+        found = policies.constraints(ids[holder], grant_actions.get((holder, item), ()), ids[item])
+        if (holder, item) in lakeformation_pairs:
+            found.append("lakeformation")
+        return found
 
     def role_epi(holder: int, removed: Iterable[int]) -> tuple[float | None, float | None]:
         row = row_of(holder)

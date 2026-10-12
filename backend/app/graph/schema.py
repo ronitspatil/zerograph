@@ -17,6 +17,12 @@ class NodeType(StrEnum):
     VECTOR = "VectorStore"
     BUCKET = "S3Bucket"
     CATEGORY = "DataCategory"
+    # A table (or dataset) in a data catalog: AWS Glue Data Catalog tables, and
+    # provider-neutral for other catalogs. Its catalog database is a ``Database``.
+    TABLE = "DataTable"
+    # A query-execution context that reads catalog data on a principal's behalf
+    # (an Athena workgroup); not a data asset itself.
+    WORKGROUP = "QueryWorkgroup"
 
 
 class EdgeType(StrEnum):
@@ -156,7 +162,7 @@ class GraphSnapshot(BaseModel):
         return self
 
 
-DATA_TYPES = {NodeType.DATABASE, NodeType.VECTOR, NodeType.BUCKET}
+DATA_TYPES = {NodeType.DATABASE, NodeType.VECTOR, NodeType.BUCKET, NodeType.TABLE}
 # Non-human identities: the overview's NHI count and blast-radius scoring.
 NHI_TYPES = {NodeType.SERVICE, NodeType.AGENT, NodeType.MCP, NodeType.ROLE}
 # Every identity whose privilege can be analyzed and optimized (humans included).

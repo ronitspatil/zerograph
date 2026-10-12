@@ -10,6 +10,10 @@
     {"Sid": "OptionalOrganizationDescription", "Effect": "Allow", "Action": "organizations:DescribeOrganization", "Resource": "*"},
     {"Sid": "OptionalOrganizationParents", "Effect": "Allow", "Action": "organizations:ListParents", "Resource": ["arn:aws:organizations::111122223333:account/o-example/123456789012", "arn:aws:organizations::111122223333:ou/o-example/*"]},
     {"Sid": "OptionalScpAttachments", "Effect": "Allow", "Action": "organizations:ListPoliciesForTarget", "Resource": ["arn:aws:organizations::111122223333:account/o-example/123456789012", "arn:aws:organizations::111122223333:ou/o-example/*", "arn:aws:organizations::111122223333:root/o-example/*"], "Condition": {"StringEquals": {"organizations:PolicyType": "SERVICE_CONTROL_POLICY"}}},
+    {"Sid": "OptionalGlueCatalogRead", "Effect": "Allow", "Action": ["glue:GetDatabases", "glue:GetTables", "glue:GetTags", "glue:GetResourcePolicy"], "Resource": ["arn:aws:glue:us-east-1:123456789012:catalog", "arn:aws:glue:us-east-1:123456789012:database/*", "arn:aws:glue:us-east-1:123456789012:table/*/*"]},
+    {"Sid": "OptionalLakeFormationRead", "Effect": "Allow", "Action": ["lakeformation:GetDataLakeSettings", "lakeformation:ListPermissions"], "Resource": "*"},
+    {"Sid": "OptionalAthenaWorkgroupList", "Effect": "Allow", "Action": "athena:ListWorkGroups", "Resource": "*"},
+    {"Sid": "OptionalAthenaWorkgroupRead", "Effect": "Allow", "Action": "athena:GetWorkGroup", "Resource": "arn:aws:athena:us-east-1:123456789012:workgroup/*"},
     {"Sid": "OptionalScpDocuments", "Effect": "Allow", "Action": "organizations:DescribePolicy", "Resource": ["arn:aws:organizations::111122223333:policy/o-example/service_control_policy/*", "arn:aws:organizations::aws:policy/service_control_policy/*"], "Condition": {"StringEquals": {"organizations:PolicyType": "SERVICE_CONTROL_POLICY"}}}
   ]
 }

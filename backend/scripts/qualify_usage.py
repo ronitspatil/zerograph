@@ -85,12 +85,12 @@ print(json.dumps({"seconds": time.perf_counter() - started, "results": results,
                   "maxrss": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}))
 """
 
-DATA = {"Database", "VectorStore", "S3Bucket"}
+DATA = {"Database", "VectorStore", "S3Bucket", "DataTable"}
 PRINCIPALS = {"HumanUser", "ServiceAccount", "AIAgent", "MCPServer"}
 GRANTS = {"CAN_READ", "CAN_WRITE"}
 HOPS = {"ASSUMES_ROLE", "INHERITS_PERMISSIONS", "INVOKES_TOOL"}
 WEIGHTS = {"public": 1, "internal": 2, "confidential": 5, "restricted": 10}
-SERVICE = {"S3Bucket": "s3", "Database": "rds-data", "VectorStore": "aoss"}
+SERVICE = {"S3Bucket": "s3", "Database": "rds-data", "VectorStore": "aoss", "DataTable": "glue"}
 MAX_HOPS = 5
 
 
@@ -360,6 +360,9 @@ def main() -> None:  # noqa: C901 - one linear qualification run
     parser.add_argument("--graph-uri", required=True, help="Empty disposable Memgraph bolt URI")
     parser.add_argument("--size", type=int, default=100_000)
     parser.add_argument("--seed", type=int, default=11)
+    parser.add_argument(
+        "--glue", action="store_true", help="Add Glue databases/tables to the data-lake topic (GLUE_FIXTURE)"
+    )
     parser.add_argument("--publish-runs", type=int, default=2, help="Publications per arm (alternating)")
     parser.add_argument("--requests", type=int, default=100)
     parser.add_argument("--chunk-bytes", type=int, default=3_900_000)
@@ -381,13 +384,24 @@ def main() -> None:  # noqa: C901 - one linear qualification run
         rss_bytes,
         run_measured,
     )
-    from qualify_scale import TOPIC_FIXTURE, cloudtrail_files, cloudtrail_records, generate_topics
+    from qualify_scale import (
+        GLUE_FIXTURE,
+        TOPIC_FIXTURE,
+        cloudtrail_files,
+        cloudtrail_records,
+        generate_topics,
+        glue_base_size,
+    )
     from qualify_topics import accuracy, digest, stored_rows
     from sqlalchemy import create_engine, text
 
     if not graph_is_empty(args.graph_uri):
         parser.error(f"Graph at {args.graph_uri} is not empty; use a disposable instance")
-    snapshot, truth, planted_usage = generate_topics(args.size, args.seed)
+    snapshot, truth, planted_usage = (
+        generate_topics(glue_base_size(args.size), args.seed, glue=True, glue_size=args.size)
+        if args.glue
+        else generate_topics(args.size, args.seed)
+    )
     schema = "zg_usage_" + uuid4().hex
     admin = create_engine(args.database_url)
     with admin.begin() as connection:
@@ -414,7 +428,7 @@ def main() -> None:  # noqa: C901 - one linear qualification run
         "platform": platform.platform(),
         "graph": "memgraph/memgraph:3.2.0 (Docker via colima)",
         "app_database": "postgresql",
-        "fixture": TOPIC_FIXTURE,
+        "fixture": TOPIC_FIXTURE + (" " + GLUE_FIXTURE if args.glue else ""),
         "size": args.size,
         "seed": args.seed,
         "nodes": len(snapshot.nodes),
@@ -504,7 +518,7 @@ def main() -> None:  # noqa: C901 - one linear qualification run
             json={
                 "window_start": start.isoformat(),
                 "window_end": end.isoformat(),
-                "attested_services": ["aoss", "rds-data", "s3", "sts"],
+                "attested_services": ["aoss", "rds-data", "s3", "sts", *(["glue"] if args.glue else [])],
             },
         )
         assert created.status_code == 201, created.text

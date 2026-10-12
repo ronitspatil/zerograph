@@ -198,6 +198,7 @@ def cypher_roles(
             "count(DISTINCT CASE WHEN neighbor:HumanUser OR neighbor:ServiceAccount OR neighbor:AIAgent "
             "OR neighbor:MCPServer OR neighbor:CloudRole THEN neighbor.id ELSE null END) AS linked_identities, "
             "count(DISTINCT CASE WHEN neighbor:Database OR neighbor:S3Bucket OR neighbor:VectorStore "
+            "OR neighbor:DataTable "
             "THEN neighbor.id ELSE null END) AS linked_data_assets "
             "ORDER BY role_id LIMIT $limit",
             **params,
