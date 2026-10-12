@@ -195,7 +195,9 @@ def glue_base_size(n: int) -> int:
     return n - sum(glue_counts(n))
 
 
-def _plant_glue(n, seed, nodes, kind_of, topic_of, data_by_topic, roles_by_topic, hubs, grants, used, over):
+def _plant_glue(
+    n, seed, nodes, kind_of, topic_of, data_by_topic, roles_by_topic, hubs, grants, used, over, duplicates
+):
     """Add the Glue databases/tables of ``GLUE_FIXTURE`` in place; returns their IDs."""
     rng = random.Random(seed + 7919)
     prefix = f"arn:aws:glue:us-east-1:{GLUE_ACCOUNT}"
@@ -279,6 +281,20 @@ def _plant_glue(n, seed, nodes, kind_of, topic_of, data_by_topic, roles_by_topic
             if item not in grants[role]:
                 grants[role][item] = "read"
                 over.add((role, item))
+    # Planted near-duplicate roles stay near-duplicates: each takes its peer's Glue grants.
+    glue = set(added)
+    for role, peer in sorted(duplicates.items()):
+        for item in [item for item in grants[role] if item in glue]:
+            grants[role].pop(item)
+            used[role].discard(item)
+            over.discard((role, item))
+        for item, access in grants[peer].items():
+            if item in glue:
+                grants[role][item] = access
+                if item in used[peer]:
+                    used[role].add(item)
+                if (peer, item) in over:
+                    over.add((role, item))
     return added
 
 
@@ -446,7 +462,8 @@ def generate_topics(
     glue_items: set[str] = set()
     if glue:
         added = _plant_glue(
-            glue_size or n, seed, nodes, kind_of, topic_of, data_by_topic, roles_by_topic, set(hubs), grants, used, over
+            glue_size or n, seed, nodes, kind_of, topic_of, data_by_topic, roles_by_topic, set(hubs), grants, used, over,
+            duplicates,
         )
         glue_items = set(added)
         data = data + added
