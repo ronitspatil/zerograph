@@ -72,6 +72,9 @@ else:
     timed(tasks, "load_usage", "usage_load")
 timed(tasks, "compute_topics", "topics_compute")
 timed(tasks, "store_topics", "topics_store")
+from app.graph import proposals
+timed(proposals, "compute_proposals", "proposals_compute")
+timed(proposals, "store_proposals", "proposals_store")
 started = time.perf_counter()
 tasks.process_job(sys.argv[1])
 print(json.dumps({"seconds": time.perf_counter() - started,

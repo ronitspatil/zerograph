@@ -631,6 +631,47 @@ def observed(db: Session, tenant: str):
     )
 
 
+def observed_triples(db: Session, tenant: str):
+    """``(principal, resource, action class)`` of every committed upload, one row per distinct
+    (principal, resource, class, service) as ``observed`` aggregates them (Core rows, no ORM)."""
+    return db.connection().execute(
+        select(ObservedAccess.principal_id, ObservedAccess.resource_id, ObservedAccess.action_class)
+        .where(ObservedAccess.tenant_id == tenant)
+        .group_by(
+            ObservedAccess.principal_id,
+            ObservedAccess.resource_id,
+            ObservedAccess.action_class,
+            ObservedAccess.service,
+        )
+    )
+
+
+def attribution_counts(db: Session, tenant: str):
+    """``(role, attributed events, session events)`` per role over committed uploads."""
+    return db.connection().execute(
+        select(
+            AttributedAccess.role_id,
+            func.sum(AttributedAccess.count).filter(AttributedAccess.identity_id != ""),
+            func.sum(AttributedAccess.count),
+        )
+        .where(AttributedAccess.tenant_id == tenant)
+        .group_by(AttributedAccess.role_id)
+    )
+
+
+def attributed_pairs(db: Session, tenant: str):
+    """``(identity, role, resource, action class)`` of attributed use (unaggregated: a pair
+    may repeat across uploads and bases; Core rows, no ORM)."""
+    return db.connection().execute(
+        select(
+            AttributedAccess.identity_id,
+            AttributedAccess.role_id,
+            AttributedAccess.resource_id,
+            AttributedAccess.action_class,
+        ).where(AttributedAccess.tenant_id == tenant, AttributedAccess.identity_id != "")
+    )
+
+
 def attribution_ready(db: Session, tenant: str) -> bool:
     """Every committed upload of the tenant was attributed (none predates attribution)."""
     counts = db.execute(

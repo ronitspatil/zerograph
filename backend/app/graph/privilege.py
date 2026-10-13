@@ -54,7 +54,15 @@ from sqlalchemy.orm import Session
 
 from app.graph.compact import MAX_HOPS, CompactGraph
 from app.graph.schema import NodeType
-from app.graph.usage import Evidence, attributed, attribution_ready, evidence, observed, utc
+from app.graph.usage import (
+    Evidence,
+    attributed_pairs,
+    attribution_counts,
+    attribution_ready,
+    evidence,
+    observed_triples,
+    utc,
+)
 
 PEER_SHARE = 0.5
 ATTRIBUTION_SHARE = 0.95
@@ -131,24 +139,45 @@ def match_usage(
         elif types[target] in data:
             result.data_used.setdefault(source, set()).add(target)
     if sessions is not None:
-        result.attribution_ready = True
+        counts: dict[str, list[int]] = {}
+        pairs = []
         for identity, role, resource, action_class, count in sessions:
-            node = index.get(role)
-            if node is None:
-                continue
-            counts = result.role_sessions.setdefault(node, [0, 0])
-            counts[1] += count
-            if not identity:
-                continue
-            counts[0] += count
-            source = index.get(identity)
-            if source is None:
-                continue
-            result.attributed_roles.setdefault(source, set()).add(node)
-            target = index.get(resource)
-            if target is not None and action_class != "assume" and types[target] in data:
-                result.attributed.setdefault(source, {}).setdefault(node, set()).add(target)
+            found = counts.setdefault(role, [0, 0])
+            found[1] += count
+            if identity:
+                found[0] += count
+                pairs.append((identity, role, resource, action_class))
+        attach_attribution(result, graph, ((r, a, t) for r, (a, t) in counts.items()), pairs)
     return result
+
+
+def attach_attribution(result: UsageInput, graph: CompactGraph, counts, pairs) -> None:
+    """Add attribution to ``result``: ``counts`` are (role, attributed events, session events),
+    ``pairs`` (identity, role, resource, action class) of attributed use (repeats allowed)."""
+    index, types = graph.index, graph.types
+    data = frozenset(DATA_SERVICE)
+    result.attribution_ready = True
+    for role, attributed_events, total in counts:
+        node = index.get(role)
+        if node is not None:
+            result.role_sessions[node] = [int(attributed_events or 0), int(total or 0)]
+    attributed_roles, attributed_data = result.attributed_roles, result.attributed
+    for identity, role, resource, action_class in pairs:
+        source = index.get(identity)
+        if source is None:
+            continue
+        node = index.get(role)
+        if node is None:
+            continue
+        found = attributed_roles.get(source)
+        if found is None:
+            found = attributed_roles[source] = set()
+        found.add(node)
+        if action_class == "assume":
+            continue
+        target = index.get(resource)
+        if target is not None and types[target] in data:
+            attributed_data.setdefault(source, {}).setdefault(node, set()).add(target)
 
 
 def load_usage(
@@ -166,9 +195,10 @@ def load_usage(
     found = evidence(db, tenant, at)
     if not found.present:
         return UsageInput(found, peer_share=peer_share)
-    rows = ((principal, resource, action) for principal, resource, action, _, _, _ in observed(db, tenant))
-    sessions = attributed(db, tenant) if attribution and attribution_ready(db, tenant) else None
-    return match_usage(graph, found, rows, peer_share, sessions)
+    result = match_usage(graph, found, observed_triples(db, tenant), peer_share)
+    if attribution and attribution_ready(db, tenant):
+        attach_attribution(result, graph, attribution_counts(db, tenant), attributed_pairs(db, tenant))
+    return result
 
 
 def data_service(graph: CompactGraph, node: int) -> str:
