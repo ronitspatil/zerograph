@@ -976,6 +976,7 @@ class DataLakeInventory:
                     tag_counts["unresolved"] += 1
                     continue
                 if key not in matches:
+                    self.c._check_time()
                     matches[key] = self._lf_matches(conditions, resource_type, tables)
                 tag_counts["resolved"] += 1
                 text = lf_expression_text(conditions, name)
