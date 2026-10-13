@@ -160,6 +160,30 @@ def computed_views(result, computed, tenant: str, revision: str) -> list[dict]:
     return views
 
 
+def lf_tag_proposals(views: list[dict], snapshot, truth: dict) -> dict:
+    """Proposals on Lake Formation (tag-expression) grants of the --glue fixture: always manual."""
+    lf = truth["lf_tag"]
+    broad = {tuple(pair) for pair in lf["over_broad_pairs"]}
+    lakeformation = {
+        (e.source, e.target) for e in snapshot.edges if any(a.startswith("lakeformation:") for a in e.actions)
+    }
+    removals = [v for v in views if v["type"] == "remove_grant"]
+    on_lf = [v for v in removals if (v["subject_id"], v["target_id"]) in lakeformation]
+    on_broad = [v for v in on_lf if (v["subject_id"], v["target_id"]) in broad]
+    return {
+        **{key: value for key, value in lf.items() if key != "over_broad_pairs"},
+        "over_broad_pairs": len(broad),
+        "lakeformation_grant_pairs": len(lakeformation),
+        "removals_on_lakeformation_grants": len(on_lf),
+        "removals_on_lakeformation_grants_not_manual": sum(v["tier"] != "manual" for v in on_lf),
+        "removals_on_lakeformation_grants_without_reason": sum(
+            "lakeformation" not in v["reasons"] for v in on_lf
+        ),
+        "over_broad_pairs_proposed": len({(v["subject_id"], v["target_id"]) for v in on_broad}),
+        "over_broad_proposals_manual": sum(v["tier"] == "manual" for v in on_broad),
+    }
+
+
 def main() -> None:  # noqa: C901 - one linear qualification run
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -421,6 +445,9 @@ def main() -> None:  # noqa: C901 - one linear qualification run
             "note": "Hub over-grants are wildcard grants: scope_wildcard proposals, always manual.",
         }
         print(json.dumps(report["accuracy"]), flush=True)
+        if "lf_tag" in truth:
+            report["lf_tag"] = lf_tag_proposals(views, snapshot, truth)
+            print(json.dumps(report["lf_tag"]), flush=True)
         violations = never_auto_violations(views, cases)
         reasons = Counter(r for v in views for r in v["reasons"])
         planted_pairs = {tuple(p) for values in cases["pairs"].values() for p in values}

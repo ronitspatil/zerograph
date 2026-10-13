@@ -674,3 +674,48 @@ def test_botocore_models_accept_lf_tag_requests_and_responses():
     assert any(item.startswith("lakeformation: partial") for item in payments_edge.evidence)
     assert analyst[(SHARED_TABLE, "CAN_READ")].actions == ["lakeformation:SELECT"]
     assert coverage["lakeformation_tag_admin_grants"] == 1
+
+
+def test_planted_fixture_lf_tag_grants_add_edges_but_keep_the_base():
+    import sys
+    from datetime import timedelta
+    from pathlib import Path
+
+    from app.collectors.cloudtrail import normalize_export
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from qualify_scale import cloudtrail_records, generate_topics
+
+    snapshot, truth, usage = generate_topics(4000, 11, glue=True)
+    lf = truth["lf_tag"]
+    assert lf["tagged_tables"] > 0 and lf["tag_grant_roles"] > 1 and lf["over_broad_pairs"]
+    tagged = {n.id for n in snapshot.nodes if n.type == NodeType.TABLE and n.metadata.get("lf_tags")}
+    assert len(tagged) == lf["tagged_tables"]
+    modes = {node(snapshot, item).metadata["lakeformation_mode"] for item in tagged}
+    assert modes <= {"lakeformation", "iam_allowed_principals"}
+    tag_edges = [
+        e for e in snapshot.edges if any(item.startswith("lakeformation: lf-tag") for item in e.evidence)
+    ]
+    assert len({(e.source, e.target) for e in tag_edges}) == lf["tag_grant_pairs"]
+    assert all(
+        e.target in tagged and all(a.startswith("lakeformation:") for a in e.actions) for e in tag_edges
+    )
+    # The over-broad grant reaches every tagged table its holder has no other grant on, unused.
+    broad = {
+        (e.source, e.target) for e in tag_edges if "lakeformation: lf-tag domain=data-lake" in e.evidence
+    }
+    assert {tuple(pair) for pair in lf["over_broad_pairs"]} <= broad
+    used = set(usage["role_data_used"].get(lf["over_broad_role"], []))
+    assert not any(item in used for _, item in lf["over_broad_pairs"])
+    # LF-Tag grants are not planted over-grants: those (and the base graph) are unchanged.
+    assert not {tuple(pair) for pair in truth["over_grants"]} & broad
+    # Used tag grants resolve from CloudTrail like other Glue access.
+    end = datetime(2026, 10, 1, tzinfo=UTC)
+    records = list(cloudtrail_records(snapshot, usage, end - timedelta(days=90), end))
+    observed = {
+        (r, item) for (r, item, _, _) in normalize_export(records, end - timedelta(days=90), end).access
+    }
+    used_tag_pairs = {(e.source, e.target) for e in tag_edges} & {
+        (role, item) for role, items in usage["role_data_used"].items() for item in items
+    }
+    assert used_tag_pairs and used_tag_pairs <= observed

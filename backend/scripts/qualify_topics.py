@@ -201,6 +201,25 @@ def accuracy(db, tenant: str, revision: str, truth: dict) -> dict:
     }
 
 
+def lf_tag_topics(computed, snapshot, truth: dict) -> dict:
+    """Topic placement of the LF-Tag-governed Glue tables and the tag-grant holders (--glue)."""
+    graph = computed.graph
+    tagged = [n.id for n in snapshot.nodes if n.type.value == "DataTable" and n.metadata.get("lf_tags")]
+
+    def label(node_id: str) -> str | None:
+        found = computed.resource_topic[graph.index[node_id]]
+        return computed.topics[found].name if found >= 0 else None
+
+    in_lake = sum(label(item) == "data-lake" for item in tagged)
+    lf = truth["lf_tag"]
+    return {
+        **{key: value for key, value in lf.items() if key != "over_broad_pairs"},
+        "over_broad_pairs": len(lf["over_broad_pairs"]),
+        "tagged_tables_in_data_lake": in_lake,
+        "tagged_tables_in_data_lake_share": round(in_lake / len(tagged), 4) if tagged else None,
+    }
+
+
 def over_grant_overlap(computed, truth: dict) -> dict:
     """Stored cross-topic grants (non-hub roles) against planted over-grants: structural only."""
     from app.graph.topics import GRANT_CODES, HUB
@@ -406,6 +425,9 @@ def main() -> None:
             elapsed = time.perf_counter() - started
             runs.append((digest(computed_rows(computed, "demo", revision)), elapsed))
         report["over_grants"] = over_grant_overlap(computed, truth)
+        if "lf_tag" in truth:
+            report["lf_tag"] = lf_tag_topics(computed, snapshot, truth)
+            print(json.dumps(report["lf_tag"]), flush=True)
         del computed, published
         report["determinism"] = {
             "recomputed_digests": [d for d, _ in runs],
