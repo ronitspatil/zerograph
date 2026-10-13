@@ -76,6 +76,18 @@ KEPT_KEYS = frozenset(
     | {"data-classification", "sensitivity"}
 )
 S3_LOCATION = re.compile(r"^s3[an]?://([a-z0-9][a-z0-9.\-]{1,61}[a-z0-9])(?:/|$)", re.IGNORECASE)
+ACCOUNT_ID = re.compile(r"\d{12}")
+EXTERNAL = "external"  # Lake Formation mode (and marker) of another account's catalog resource.
+LF_TAG_SEARCH_VALUES = 50  # LFTag.TagValues bound of the Lake Formation model, per search.
+MAX_NODE_LF_TAGS = 32  # ``key=value`` LF-Tags kept as node metadata.
+MAX_EXPRESSION_TEXT = 512
+MAX_EVIDENCE_EXPRESSIONS = 4
+# Grant scopes that give part of a table (some columns, or filtered rows/cells), never all of it.
+PARTIAL_SCOPES = frozenset({"column-scoped", "data-filtered", "lf-tag column-scoped"})
+LF_TAG = "lf-tag"
+# Grants on LF-Tags or saved tag expressions themselves (ASSOCIATE, DESCRIBE...): administration
+# of the tags, not data access.
+TAG_ADMIN_RESOURCES = ("LFTag", "LFTagExpression")
 
 
 class LakeTruncated(Exception):
@@ -115,6 +127,66 @@ def _topic_pairs(tags: list[str]) -> dict[str, str]:
     return found
 
 
+Conditions = tuple[tuple[str, frozenset[str]], ...]  # LF-Tag expression: (key, values) ANDed.
+TagMap = dict[str, frozenset[str]]  # LF-Tag key -> assigned values of one resource.
+
+
+def lf_tag_map(pairs: Any) -> TagMap:
+    """``{key: values}`` of an LF-Tag pair list (keys and values compare case-insensitively)."""
+    found: dict[str, set[str]] = {}
+    for pair in pairs if isinstance(pairs, list) else []:
+        key = pair.get("TagKey") if isinstance(pair, dict) else None
+        values = pair.get("TagValues") if isinstance(pair, dict) else None
+        if isinstance(key, str) and key and isinstance(values, list):
+            found.setdefault(_key(key), set()).update(_key(str(v)) for v in values)
+    return {key: frozenset(values) for key, values in found.items()}
+
+
+def lf_conditions(expression: Any) -> Conditions | None:
+    """A tag expression's conditions; None when it is malformed or empty (it matches nothing)."""
+    if not isinstance(expression, list) or not expression:
+        return None
+    merged: dict[str, set[str]] = {}
+    for condition in expression:
+        key = condition.get("TagKey") if isinstance(condition, dict) else None
+        values = condition.get("TagValues") if isinstance(condition, dict) else None
+        if not isinstance(key, str) or not key or not isinstance(values, list) or not values:
+            return None
+        values = {_key(str(v)) for v in values}
+        if _key(key) in merged:  # The same key twice: both conditions must hold.
+            merged[_key(key)] &= values
+        else:
+            merged[_key(key)] = values
+    return tuple(sorted((key, frozenset(values)) for key, values in merged.items()))
+
+
+def lf_matches(conditions: Conditions, tags: TagMap) -> bool:
+    """LF-Tag expression semantics: every key must be assigned (AND), with one of its values (OR).
+
+    A ``*`` value matches any value of its key.
+    """
+    for key, values in conditions:
+        assigned = tags.get(key)
+        if not assigned or ("*" not in values and not assigned & values):
+            return False
+    return True
+
+
+def lf_expression_text(conditions: Conditions, name: str = "") -> str:
+    """``key=value AND key=(a OR b)``, prefixed with a saved expression's name."""
+    parts = []
+    for key, values in conditions:
+        ordered = sorted(values)
+        parts.append(f"{key}={ordered[0]}" if len(ordered) == 1 else f"{key}=({' OR '.join(ordered)})")
+    text = " AND ".join(parts)
+    return (f"{name}: {text}" if name else text)[:MAX_EXPRESSION_TEXT]
+
+
+def lf_tag_strings(tags: TagMap) -> list[str]:
+    found = sorted(f"{key}={value}"[:256] for key, values in tags.items() for value in values)
+    return found[:MAX_NODE_LF_TAGS]
+
+
 class DataLakeInventory:
     """One data lake pass for an ``AWSCollector`` (shares its budgets, warnings and coverage)."""
 
@@ -135,10 +207,33 @@ class DataLakeInventory:
             "athena_workgroups": "unknown",
             "permission_edges": "complete",
             "skipped_resource_links": 0,
+            # LF-Tag resolution: read only when a tag-expression grant exists ("not_needed" otherwise).
+            "lakeformation_lf_tags": "not_needed",
+            "lakeformation_lf_tag_assignments": "not_needed",
+            "lakeformation_lf_tag_expressions": "not_needed",
+            "lakeformation_lf_tag_grants": {"resolved": 0, "unresolved": 0, "matched_resources": 0},
+            "lakeformation_data_filter_grants": 0,
+            "lakeformation_external_grants": 0,
+            "lakeformation_tag_admin_grants": 0,
         }
         collector.coverage["data_lake"] = self.coverage
-        for key in ("glue_databases", "glue_tables", "athena_workgroups", "lakeformation_permissions"):
+        for key in (
+            "glue_databases",
+            "glue_tables",
+            "athena_workgroups",
+            "lakeformation_permissions",
+            "lakeformation_lf_tags",
+            "lakeformation_lf_tag_assignments",
+        ):
             collector.counts[key] = 0
+        # LF-Tag assignments read from the tag searches (as assigned at each level).
+        self.lf_databases: dict[str, TagMap] = {}
+        self.lf_tables: dict[tuple[str, str], TagMap] = {}
+        self.lf_columns: dict[tuple[str, str], dict[str, TagMap]] = {}
+        self.lf_named: dict[str, Conditions | None] = {}  # Saved tag expressions by name.
+        # A tag-expression grant could not be resolved for want of tag data: Lake Formation
+        # mode cannot be proven anywhere, so IAM edges stand (over-stated, never under-stated).
+        self.lf_tag_gap = False
 
     # -- budgets ---------------------------------------------------------------------------
 
@@ -175,6 +270,14 @@ class DataLakeInventory:
 
     def _arn(self, service: str, resource: str) -> str:
         return f"arn:{self.partition}:{service}:{self.region}:{self.account}:{resource}"
+
+    def _catalog_arn(self, catalog: Any, resource: str) -> str:
+        """A Glue ARN in this account's catalog or another account's (same region); "" if malformed."""
+        if catalog == self.account:
+            return self._arn("glue", resource)
+        if isinstance(catalog, str) and ACCOUNT_ID.fullmatch(catalog):
+            return f"arn:{self.partition}:glue:{self.region}:{catalog}:{resource}"
+        return ""
 
     def catalog_arn(self) -> str:
         return self._arn("glue", "catalog")
@@ -359,6 +462,218 @@ class DataLakeInventory:
             return entries, "truncated"
         return entries, "complete"
 
+    # -- LF-Tags ---------------------------------------------------------------------------
+
+    def _lf_tag_inventory(self, entries: list[dict]) -> None:
+        """LF-Tags, their assignments and saved expressions, read only for tag-expression grants."""
+        policies = [
+            (entry.get("Resource") or {}).get("LFTagPolicy")
+            for entry in entries
+            if isinstance(entry.get("Resource"), dict)
+        ]
+        policies = [policy for policy in policies if isinstance(policy, dict)]
+        if not policies:
+            return
+        stages = ["lakeformation_lf_tags", "lakeformation_lf_tag_assignments"]
+        if any(policy.get("ExpressionName") and not policy.get("Expression") for policy in policies):
+            stages.append("lakeformation_lf_tag_expressions")
+        for stage in stages:
+            self.coverage[stage] = "unknown"
+        try:
+            keys = self._lf_tag_keys()
+            if keys is not None:
+                self._lf_tag_assignments(keys)
+            if "lakeformation_lf_tag_expressions" in stages:
+                self._lf_tag_expressions()
+        except LakeTruncated:
+            for stage in stages:
+                if self.coverage[stage] == "unknown":
+                    self.coverage[stage] = "truncated"
+            self._truncated(
+                "data_lake_budget",
+                "Collector request or page budget ran out during the data lake inventory; it is truncated",
+            )
+
+    def _lf_tag_keys(self) -> dict[str, set[str]] | None:
+        """LF-Tag keys and values of the account's catalog (``ListLFTags``); None when unavailable."""
+        keys: dict[str, set[str]] = {}
+        limit = self.c.limits.max_lf_tags
+        try:
+            for page in self._pages(
+                self.lakeformation, "list_lf_tags", CatalogId=self.account, MaxResults=1000
+            ):
+                for pair in page.get("LFTags", []):
+                    key = pair.get("TagKey") if isinstance(pair, dict) else None
+                    values = pair.get("TagValues") if isinstance(pair, dict) else None
+                    if not isinstance(key, str) or not key or not isinstance(values, list):
+                        raise self.c.incomplete("Malformed LF-Tag inventory")
+                    if pair.get("CatalogId", self.account) != self.account:
+                        continue
+                    if key not in keys and len(keys) >= limit:
+                        self.coverage["lakeformation_lf_tags"] = "truncated"
+                        self._truncated(
+                            "lakeformation_lf_tags_truncated",
+                            f"LF-Tags beyond max_lf_tags ({limit}) were not read; LF-Tag grants are not "
+                            "fully resolved and IAM edges stand",
+                        )
+                        self.c.counts["lakeformation_lf_tags"] = len(keys)
+                        return keys
+                    keys.setdefault(key, set()).update(str(v) for v in values if isinstance(v, str))
+        except (ClientError, BotoCoreError):
+            self._denied(
+                "lakeformation_lf_tags_unknown",
+                "LF-Tags unavailable; LF-Tag grants are not resolved and IAM edges stand",
+            )
+            return None
+        self.coverage["lakeformation_lf_tags"] = "complete"
+        self.c.counts["lakeformation_lf_tags"] = len(keys)
+        return keys
+
+    def _lf_tag_assignments(self, keys: dict[str, set[str]]) -> None:
+        """Tagged databases, tables and columns: ``SearchDatabasesByLFTags``/``SearchTablesByLFTags``
+        once per tag key (its values in chunks), so requests scale with tags, not tables."""
+        limit = self.c.limits.max_lf_tag_assignments
+        seen: set[tuple[str, str]] = set()
+
+        def admit(item: tuple[str, str]) -> bool:
+            if item in seen:
+                return True
+            if len(seen) >= limit:
+                self.coverage["lakeformation_lf_tag_assignments"] = "truncated"
+                self._truncated(
+                    "lakeformation_lf_tag_assignments_truncated",
+                    f"LF-Tag assignments beyond max_lf_tag_assignments ({limit}) were not read; LF-Tag "
+                    "grants are not fully resolved and IAM edges stand",
+                )
+                return False
+            seen.add(item)
+            self.c.counts["lakeformation_lf_tag_assignments"] = len(seen)
+            return True
+
+        try:
+            for key in sorted(keys):
+                values = sorted(keys[key])
+                for start in range(0, len(values), LF_TAG_SEARCH_VALUES):
+                    expression = [{"TagKey": key, "TagValues": values[start : start + LF_TAG_SEARCH_VALUES]}]
+                    for page in self._pages(
+                        self.lakeformation,
+                        "search_databases_by_lf_tags",
+                        CatalogId=self.account,
+                        Expression=expression,
+                        MaxResults=100,
+                    ):
+                        for item in page.get("DatabaseList", []):
+                            database = (item or {}).get("Database") if isinstance(item, dict) else None
+                            name = database.get("Name") if isinstance(database, dict) else None
+                            if not isinstance(name, str) or not name:
+                                raise self.c.incomplete("Malformed LF-Tag database search")
+                            if database.get("CatalogId", self.account) != self.account:
+                                continue
+                            if not admit(("", name)):
+                                return
+                            self.lf_databases[name] = lf_tag_map(item.get("LFTags"))
+                    for page in self._pages(
+                        self.lakeformation,
+                        "search_tables_by_lf_tags",
+                        CatalogId=self.account,
+                        Expression=expression,
+                        MaxResults=100,
+                    ):
+                        for item in page.get("TableList", []):
+                            table = (item or {}).get("Table") if isinstance(item, dict) else None
+                            database = table.get("DatabaseName") if isinstance(table, dict) else None
+                            name = table.get("Name") if isinstance(table, dict) else None
+                            if not isinstance(database, str) or not database or not isinstance(name, str):
+                                raise self.c.incomplete("Malformed LF-Tag table search")
+                            if table.get("CatalogId", self.account) != self.account:
+                                continue
+                            if not admit((database, name)):
+                                return
+                            if item.get("LFTagOnDatabase"):
+                                self.lf_databases.setdefault(database, lf_tag_map(item["LFTagOnDatabase"]))
+                            self.lf_tables[(database, name)] = lf_tag_map(item.get("LFTagsOnTable"))
+                            columns = {
+                                str(column["Name"]): lf_tag_map(column.get("LFTags"))
+                                for column in item.get("LFTagsOnColumns") or []
+                                if isinstance(column, dict) and column.get("Name") and column.get("LFTags")
+                            }
+                            if columns:
+                                self.lf_columns[(database, name)] = columns
+        except (ClientError, BotoCoreError):
+            self._denied(
+                "lakeformation_lf_tag_assignments_unknown",
+                "LF-Tag assignments unavailable; LF-Tag grants are not resolved and IAM edges stand",
+            )
+            return
+        self.coverage["lakeformation_lf_tag_assignments"] = "complete"
+
+    def _lf_tag_expressions(self) -> None:
+        """Saved LF-Tag expressions (``ListLFTagExpressions``) that grants name instead of inlining."""
+        limit = self.c.limits.max_lf_tag_expressions
+        try:
+            for page in self._pages(
+                self.lakeformation, "list_lf_tag_expressions", CatalogId=self.account, MaxResults=1000
+            ):
+                for item in page.get("LFTagExpressions", []):
+                    name = item.get("Name") if isinstance(item, dict) else None
+                    if not isinstance(name, str) or not name:
+                        raise self.c.incomplete("Malformed LF-Tag expression inventory")
+                    if name not in self.lf_named and len(self.lf_named) >= limit:
+                        self.coverage["lakeformation_lf_tag_expressions"] = "truncated"
+                        self._truncated(
+                            "lakeformation_lf_tag_expressions_truncated",
+                            f"Saved LF-Tag expressions beyond max_lf_tag_expressions ({limit}) were not read; "
+                            "grants naming them are not resolved and IAM edges stand",
+                        )
+                        return
+                    self.lf_named[name] = lf_conditions(item.get("Expression"))
+        except (ClientError, BotoCoreError):
+            self._denied(
+                "lakeformation_lf_tag_expressions_unknown",
+                "Saved LF-Tag expressions unavailable; grants naming them are not resolved and IAM edges stand",
+            )
+            return
+        self.coverage["lakeformation_lf_tag_expressions"] = "complete"
+
+    def _lf_effective(self, database: str, table: str, column: str = "") -> TagMap:
+        """Tags in force: the database's, overridden per key by the table's, then by the column's."""
+        tags = dict(self.lf_databases.get(database, {}))
+        tags.update(self.lf_tables.get((database, table), {}))
+        if column:
+            tags.update(self.lf_columns.get((database, table), {}).get(column, {}))
+        return tags
+
+    def _lf_matches(
+        self, conditions: Conditions, resource_type: str, tables: dict[str, list[dict]]
+    ) -> list[tuple[str, str]]:
+        """(target key, scope) of every inventoried database or table a tag expression matches.
+
+        ``DATABASE`` expressions match database tags. ``TABLE`` expressions match a table's
+        tags in force (inherited from its database unless the table overrides the key); when
+        only some columns' tags match (a column overrides the key, either way) the grant is
+        column-scoped: partial access.
+        """
+        found: list[tuple[str, str]] = []
+        if resource_type == "DATABASE":
+            for database in sorted(tables):
+                if lf_matches(conditions, self.lf_databases.get(database, {})):
+                    found.append((self.database_arn(database), LF_TAG))
+            return found
+        for database, items in sorted(tables.items()):
+            for table in items:
+                name = table["Name"]
+                tags = self._lf_effective(database, name)
+                whole = lf_matches(conditions, tags)
+                columns = [
+                    lf_matches(conditions, self._lf_effective(database, name, column))
+                    for column in self.lf_columns.get((database, name), {})
+                ]
+                if whole and all(columns):
+                    found.append((self.table_arn(database, name), LF_TAG))
+                elif whole or any(columns):
+                    found.append((self.table_arn(database, name), "lf-tag column-scoped"))
+        return found
+
     def _workgroups(self) -> list[dict]:
         found: dict[str, dict] = {}
         limit = self.c.limits.max_athena_workgroups
@@ -436,6 +751,7 @@ class DataLakeInventory:
         try:
             admins, _ = self._settings()
             entries, permissions = self._permissions()
+            self._lf_tag_inventory(entries)
             workgroups = self._workgroups()
         except LakeTruncated:
             self._truncated(
@@ -458,8 +774,20 @@ class DataLakeInventory:
                 )
         self.coverage["lakeformation_admins"] = len(admins)
 
-        grants, iam_allowed_tables, iam_allowed_databases = self._grants(entries, by_arn)
-        complete = permissions == "complete"
+        grants, iam_allowed_tables, iam_allowed_databases, external = self._grants(entries, by_arn, tables)
+        # Mode is provable only from a complete listing whose tag-expression grants all resolved.
+        complete = permissions == "complete" and not self.lf_tag_gap
+        if self.lf_tag_gap:
+            self._truncated(
+                "lakeformation_lf_tag_unresolved",
+                "Some LF-Tag grants could not be resolved (tags, assignments or saved expressions unavailable "
+                "or truncated); Lake Formation modes are unknown and IAM edges stand",
+            )
+        tagged = self.coverage["lakeformation_lf_tag_assignments"] == "complete"
+        filtered: dict[str, int] = {}
+        for (_, target), found in grants.items():
+            if found["filters"]:
+                filtered[target] = filtered.get(target, 0) + 1
         database_nodes: dict[str, str] = {}
         for database in databases:
             node = self._database_node(database, database_tags.get(database["Name"], []), nodes)
@@ -470,7 +798,10 @@ class DataLakeInventory:
                 if not complete
                 else ("iam_allowed_principals" if node.id in iam_allowed_databases else LAKEFORMATION)
             )
-            node = node.model_copy(update={"metadata": {**node.metadata, "lakeformation_mode": mode}})
+            metadata = {**node.metadata, "lakeformation_mode": mode}
+            if tagged and self.lf_databases.get(database["Name"]):
+                metadata["lf_tags"] = lf_tag_strings(self.lf_databases[database["Name"]])
+            node = node.model_copy(update={"metadata": metadata})
             nodes[node.id] = node
             database_nodes[database["Name"]] = node.id
         table_nodes: list[tuple[str, str, str]] = []  # (database, table arn, mode)
@@ -492,7 +823,17 @@ class DataLakeInventory:
                         "iam_allowed_principals" if wildcard or arn in iam_allowed_tables else LAKEFORMATION
                     )
                 self.coverage["lakeformation_table_modes"][mode] += 1
-                nodes[arn] = self._table_node(arn, database_name, table, parent, mode, nodes)
+                node = self._table_node(arn, database_name, table, parent, mode, nodes)
+                extra: dict[str, Any] = {}
+                if tagged and self._lf_effective(database_name, table["Name"]):
+                    extra["lf_tags"] = lf_tag_strings(self._lf_effective(database_name, table["Name"]))
+                if tagged and self.lf_columns.get((database_name, table["Name"])):
+                    extra["lf_tagged_columns"] = len(self.lf_columns[(database_name, table["Name"])])
+                if filtered.get(arn):
+                    extra["lakeformation_data_filter_grants"] = filtered[arn]
+                if extra:
+                    node = node.model_copy(update={"metadata": {**node.metadata, **extra}})
+                nodes[arn] = node
                 table_nodes.append((database_name, arn, mode))
         self.c.counts["glue_databases"] = len(database_nodes)
         self.c.counts["glue_tables"] = len(table_nodes)
@@ -504,6 +845,7 @@ class DataLakeInventory:
                 workgroup_nodes.append(node.id)
         self.c.counts["athena_workgroups"] = len(workgroup_nodes)
         self.c.counts["lakeformation_permissions"] = len(entries)
+        external_nodes = self._external_nodes(external, nodes)
         try:
             self._edges(
                 edges,
@@ -516,6 +858,7 @@ class DataLakeInventory:
                 | {arn: nodes[arn] for arn in database_nodes.values()},
                 grants,
             )
+            self._external_edges(edges, by_arn, grants, external_nodes)
         except LakeTruncated as exc:
             self.coverage["permission_edges"] = "truncated"
             self._truncated(
@@ -523,17 +866,40 @@ class DataLakeInventory:
                 f"Data lake permission edges truncated: the collector's {exc.args[0]} budget ran out",
             )
 
-    def _grants(self, entries: list[dict], by_arn: dict[str, dict]):
+    def _grants(self, entries: list[dict], by_arn: dict[str, dict], tables: dict[str, list[dict]]):
         """Lake Formation grants per (principal, resource ARN), and IAM_ALLOWED_PRINCIPALS coverage.
 
-        A ``TableWildcard`` grant is keyed by its database ARN + ``ALL_TABLES``.
+        A ``TableWildcard`` grant is keyed by its database ARN + ``ALL_TABLES``. An
+        LF-Tag expression grant (``LFTagPolicy``) is resolved to every inventoried
+        database or table its expression matches. A grant on another account's catalog
+        resource is keyed by that resource's ARN and listed in ``external``.
         ``iam_allowed_tables`` holds the table (and all-tables) keys granting
         IAM_ALLOWED_PRINCIPALS; ``iam_allowed_databases`` the database ARNs.
         """
         grants: dict[tuple[str, str], dict] = {}
+        external: dict[str, dict] = {}  # ARN -> {catalog, database, table}
         iam_allowed_tables: set[str] = set()
         iam_allowed_databases: set[str] = set()
         unresolved = unmatched = 0
+        tag_counts = self.coverage["lakeformation_lf_tag_grants"]
+        matches: dict[tuple[Conditions, str], list[tuple[str, str]]] = {}
+        tags_known = (
+            self.coverage["lakeformation_lf_tags"] == "complete"
+            and self.coverage["lakeformation_lf_tag_assignments"] == "complete"
+        )
+        matched: set[str] = set()
+
+        def grant(principal: str, target: str, scope: str, entry: dict, permissions: set[str]) -> dict:
+            found = grants.setdefault(
+                (principal, target),
+                {"permissions": set(), "scopes": set(), "expressions": set(), "filters": set()},
+            )
+            found["permissions"] |= permissions
+            found["scopes"].add(scope or "table")
+            if entry.get("Condition"):
+                found["scopes"].add("conditional")
+            return found
+
         for entry in entries:
             principal = (entry.get("Principal") or {}).get("DataLakePrincipalIdentifier")
             resource = entry.get("Resource") or {}
@@ -541,58 +907,123 @@ class DataLakeInventory:
                 str(p)
                 for p in [*(entry.get("Permissions") or []), *(entry.get("PermissionsWithGrantOption") or [])]
             }
-            target, scope = "", ""
+            if any(kind in resource for kind in TAG_ADMIN_RESOURCES):
+                self.coverage["lakeformation_tag_admin_grants"] += 1
+                continue
+            if "LFTagPolicy" in resource:
+                policy = resource["LFTagPolicy"] or {}
+                name = str(policy.get("ExpressionName") or "")[:255]
+                resource_type = policy.get("ResourceType")
+                missing = False  # A saved expression the (incomplete) listing did not return.
+                if policy.get("Expression"):
+                    conditions = lf_conditions(policy["Expression"])
+                elif name:
+                    conditions = self.lf_named.get(name)
+                    missing = name not in self.lf_named and (
+                        self.coverage["lakeformation_lf_tag_expressions"] != "complete"
+                    )
+                else:
+                    conditions = None
+                if (
+                    policy.get("CatalogId", self.account) != self.account
+                    or resource_type not in ("DATABASE", "TABLE")
+                    or (conditions is None and not missing)
+                ):
+                    # Malformed or empty expressions match nothing; other catalogs' tags are not read.
+                    unresolved += 1
+                    tag_counts["unresolved"] += 1
+                    continue
+                if principal != IAM_ALLOWED and principal not in by_arn:
+                    unmatched += 1
+                    continue
+                key = (conditions, resource_type)
+                bounded = (
+                    conditions is not None
+                    and key not in matches
+                    and len(matches) >= self.c.limits.max_lf_tag_expressions
+                )
+                if missing or not tags_known or bounded:
+                    if bounded:
+                        self._truncated(
+                            "lakeformation_lf_tag_expressions_truncated",
+                            "Distinct LF-Tag expressions beyond max_lf_tag_expressions "
+                            f"({self.c.limits.max_lf_tag_expressions}) were not resolved; IAM edges stand",
+                        )
+                    # Tag data missing: the grant may reach Lake Formation-governed tables.
+                    self.lf_tag_gap = True
+                    unresolved += 1
+                    tag_counts["unresolved"] += 1
+                    continue
+                if key not in matches:
+                    matches[key] = self._lf_matches(conditions, resource_type, tables)
+                tag_counts["resolved"] += 1
+                text = lf_expression_text(conditions, name)
+                for target, scope in matches[key]:
+                    matched.add(target)
+                    if principal == IAM_ALLOWED:
+                        allowed = iam_allowed_databases if resource_type == "DATABASE" else iam_allowed_tables
+                        allowed.add(target)
+                        continue
+                    grant(principal, target, scope, entry, permissions)["expressions"].add(text)
+                continue
+            target, scope, catalog, place = "", "", self.account, {}
             if "Table" in resource:
                 table = resource["Table"] or {}
-                database = table.get("DatabaseName")
-                if table.get("CatalogId", self.account) != self.account or not isinstance(database, str):
-                    unresolved += 1
-                    continue
-                if "TableWildcard" in table:
-                    target, scope = self.database_arn(database) + ALL_TABLES, "all tables"
-                elif isinstance(table.get("Name"), str):
-                    target = self.table_arn(database, table["Name"])
+                catalog, database = table.get("CatalogId", self.account), table.get("DatabaseName")
+                if isinstance(database, str):
+                    if "TableWildcard" in table:
+                        target = self._catalog_arn(catalog, f"database/{database}")
+                        target, scope = (target + ALL_TABLES if target else ""), "all tables"
+                        place = {"database": database}
+                    elif isinstance(table.get("Name"), str):
+                        target = self._catalog_arn(catalog, f"table/{database}/{table['Name']}")
+                        place = {"database": database, "table": table["Name"]}
             elif "TableWithColumns" in resource:
                 table = resource["TableWithColumns"] or {}
-                if table.get("CatalogId", self.account) == self.account and isinstance(
-                    table.get("DatabaseName"), str
-                ):
-                    target = self.table_arn(table["DatabaseName"], str(table.get("Name", "")))
-                    scope = "column-scoped"
+                catalog, database = table.get("CatalogId", self.account), table.get("DatabaseName")
+                if isinstance(database, str) and isinstance(table.get("Name"), str):
+                    target = self._catalog_arn(catalog, f"table/{database}/{table['Name']}")
+                    scope, place = "column-scoped", {"database": database, "table": table["Name"]}
             elif "DataCellsFilter" in resource:
                 cells = resource["DataCellsFilter"] or {}
-                if cells.get("TableCatalogId", self.account) == self.account and isinstance(
-                    cells.get("DatabaseName"), str
-                ):
-                    target = self.table_arn(cells["DatabaseName"], str(cells.get("TableName", "")))
-                    scope = "data-filtered"
+                catalog, database = cells.get("TableCatalogId", self.account), cells.get("DatabaseName")
+                if isinstance(database, str) and isinstance(cells.get("TableName"), str):
+                    target = self._catalog_arn(catalog, f"table/{database}/{cells['TableName']}")
+                    scope, place = "data-filtered", {"database": database, "table": cells["TableName"]}
             elif "Database" in resource:
                 database = resource["Database"] or {}
-                if database.get("CatalogId", self.account) == self.account and isinstance(
-                    database.get("Name"), str
-                ):
-                    target, scope = self.database_arn(database["Name"]), "database"
+                catalog = database.get("CatalogId", self.account)
+                if isinstance(database.get("Name"), str):
+                    target = self._catalog_arn(catalog, f"database/{database['Name']}")
+                    scope, place = "database", {"database": database["Name"]}
             if not target:
-                # Catalog, data location and LF-Tag based grants are not resolved to tables.
+                # Catalog and data location grants are not resolved to tables.
                 unresolved += 1
                 continue
+            foreign = catalog != self.account
             if principal == IAM_ALLOWED:
-                (iam_allowed_databases if scope == "database" else iam_allowed_tables).add(target)
+                if not foreign:
+                    (iam_allowed_databases if scope == "database" else iam_allowed_tables).add(target)
                 continue
             if principal not in by_arn:
                 unmatched += 1
                 continue
-            grant = grants.setdefault((principal, target), {"permissions": set(), "scopes": set()})
-            grant["permissions"] |= permissions
-            grant["scopes"].add(scope or "table")
-            if entry.get("Condition"):
-                grant["scopes"].add("conditional")
+            if foreign:
+                self.coverage["lakeformation_external_grants"] += 1
+                external.setdefault(target.removesuffix(ALL_TABLES), {"catalog": catalog, **place})
+                scope = f"{scope or 'table'}, {EXTERNAL} catalog {catalog}"
+            found = grant(principal, target, scope, entry, permissions)
+            if "DataCellsFilter" in resource:
+                self.coverage["lakeformation_data_filter_grants"] += 1
+                found["filters"].add(str((resource["DataCellsFilter"] or {}).get("Name") or "unnamed")[:255])
+        tag_counts["matched_resources"] = len(matched)
         self.coverage["lakeformation_unresolved_grants"] = unresolved
         self.coverage["lakeformation_unmatched_principals"] = unmatched
         if unresolved:
             self.c._warning(
                 "lakeformation_unresolved",
-                "Some Lake Formation grants (catalog, data location or LF-Tag based) were not resolved to tables",
+                "Some Lake Formation grants (catalog, data location, or LF-Tag grants whose expression or "
+                "tags could not be read) were not resolved to tables",
             )
         if unmatched:
             self.c._warning(
@@ -600,7 +1031,7 @@ class DataLakeInventory:
                 "Some Lake Formation grants name principals outside the IAM inventory (other accounts, "
                 "SAML or Identity Center); they are not represented",
             )
-        return grants, iam_allowed_tables, iam_allowed_databases
+        return grants, iam_allowed_tables, iam_allowed_databases, external
 
     def _classified(self, node: Node, fields: list[str], pairs: list[tuple[str, str]]) -> Node:
         enriched = enrich_node(node, fields, tags=pairs)
@@ -751,6 +1182,58 @@ class DataLakeInventory:
             metadata=metadata,
         )
 
+    def _external_nodes(self, external: dict[str, dict], nodes: dict[str, Node]) -> set[str]:
+        """Nodes for other accounts' catalog resources that inventoried principals hold grants on.
+
+        They carry ``external: true`` and Lake Formation mode ``external``: the resource
+        belongs to that account, so nothing here proposes changing it.
+        """
+        limit, added = self.c.limits.max_glue_tables, set()
+        for arn, place in sorted(external.items()):
+            if arn in nodes or len(arn) > 512:
+                continue
+            if len(added) >= limit:
+                self._truncated(
+                    "lakeformation_external_truncated",
+                    f"Cross-account catalog resources beyond max_glue_tables ({limit}) were not represented",
+                )
+                break
+            catalog, database, table = place["catalog"], place["database"], place.get("table")
+            metadata: dict[str, Any] = {
+                "service": "glue",
+                "resource_type": "glue_table" if table else "glue_database",
+                "catalog_id": catalog,
+                "region": self.region,
+                EXTERNAL: True,
+                "lakeformation_mode": EXTERNAL,
+            }
+            if table:
+                metadata["database"] = self._catalog_arn(catalog, f"database/{database}")
+            nodes[arn] = Node(
+                id=arn,
+                name=(f"{database}.{table}" if table else database)[:256],
+                type=NodeType.TABLE if table else NodeType.DATABASE,
+                account_id=catalog,
+                provider="aws",
+                metadata=metadata,
+            )
+            added.add(arn)
+        self.coverage["lakeformation_external_resources"] = len(added)
+        return added
+
+    def _external_edges(
+        self, edges: dict, by_arn: dict[str, dict], grants: dict[tuple[str, str], dict], external: set[str]
+    ) -> None:
+        """Lake Formation edges into other accounts' catalog resources (IAM there is not evaluated)."""
+        none: dict[EdgeType, list[str]] = {EdgeType.READ: [], EdgeType.WRITE: []}
+        for (principal, target), found in sorted(grants.items()):
+            node = target.removesuffix(ALL_TABLES)
+            if node not in external:
+                continue
+            # A database's all-tables grant carries table permissions; a database grant its own.
+            database = ":database/" in target and not target.endswith(ALL_TABLES)
+            self._emit(edges, by_arn[principal], node, none, found, EXTERNAL, database=database)
+
     # -- permission edges ------------------------------------------------------------------
 
     def _edges(
@@ -856,10 +1339,7 @@ class DataLakeInventory:
         wildcard = grants.get((principal, database_arn + ALL_TABLES))
         if direct is None or wildcard is None:
             return direct or wildcard
-        return {
-            "permissions": direct["permissions"] | wildcard["permissions"],
-            "scopes": direct["scopes"] | wildcard["scopes"],
-        }
+        return {key: direct[key] | wildcard[key] for key in direct}
 
     def _emit(
         self,
@@ -889,8 +1369,12 @@ class DataLakeInventory:
                     f"(Lake Formation mode: {mode}); session context unresolved"
                 )
             if lf_actions:
-                scopes = ", ".join(sorted(lf["scopes"]))
-                evidence.append(f"lakeformation: ListPermissions grant ({scopes})")
+                evidence.extend(self._lf_evidence(lf))
+            if mode == EXTERNAL:
+                evidence.append(
+                    "lakeformation: external resource in another account's catalog (cross-account grant); "
+                    "its owner changes it there, never from this account"
+                )
             if mode == LAKEFORMATION:
                 evidence.append(
                     "lakeformation: governed by Lake Formation (no IAM_ALLOWED_PRINCIPALS grant); IAM alone "
@@ -915,6 +1399,31 @@ class DataLakeInventory:
                     evidence=evidence,
                 ),
             )
+
+    @staticmethod
+    def _lf_evidence(lf: dict) -> list[str]:
+        """Evidence of a Lake Formation grant: named resources, tag expressions, data filters, partiality."""
+        found = []
+        named = sorted(scope for scope in lf["scopes"] if not scope.startswith(LF_TAG))
+        if named and named != ["conditional"]:
+            found.append(f"lakeformation: ListPermissions grant ({', '.join(named)})")
+        expressions = sorted(lf.get("expressions", ()))
+        found.extend(f"lakeformation: lf-tag {text}" for text in expressions[:MAX_EVIDENCE_EXPRESSIONS])
+        if len(expressions) > MAX_EVIDENCE_EXPRESSIONS:
+            found.append(
+                f"lakeformation: lf-tag and {len(expressions) - MAX_EVIDENCE_EXPRESSIONS} more tag expressions"
+            )
+        filters = sorted(lf.get("filters", ()))
+        if filters:
+            shown = ", ".join(filters[:MAX_EVIDENCE_EXPRESSIONS]) + (" ..." if len(filters) > 4 else "")
+            found.append(f"lakeformation: data cells filter {shown} (rows or cells filtered)")
+        scopes = {scope.split(",")[0] for scope in lf["scopes"]} - {"conditional"}
+        if scopes and scopes <= PARTIAL_SCOPES:
+            found.append(
+                "lakeformation: partial access only (column-scoped, data-filtered or column LF-Tag grant), "
+                "not the whole table"
+            )
+        return found
 
     def _edge(self, edges: dict, edge: Edge) -> None:
         if edge.id not in edges and len(edges) >= self.c.limits.max_edges:

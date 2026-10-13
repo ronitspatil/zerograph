@@ -67,6 +67,9 @@ HARD_LIMITS = {
     "max_glue_tables": 10000,
     "max_lakeformation_permissions": 50000,
     "max_athena_workgroups": 500,
+    "max_lf_tags": 5000,
+    "max_lf_tag_assignments": 50000,
+    "max_lf_tag_expressions": 5000,
 }
 MAX_TAGS = 32  # Node.tags bound; raw tags beyond it are dropped and counted.
 ACCESS_ADVISOR_POLLS = 10
@@ -111,6 +114,11 @@ class CollectionLimits:
     max_glue_tables: int = 2000
     max_lakeformation_permissions: int = 10000
     max_athena_workgroups: int = 50
+    # LF-Tag resolution: tag keys (ListLFTags), tagged databases/tables read from the
+    # tag searches, and distinct tag expressions resolved (inline or named).
+    max_lf_tags: int = 1000
+    max_lf_tag_assignments: int = 10000
+    max_lf_tag_expressions: int = 1000
 
     def __post_init__(self):
         for key, value in asdict(self).items():
