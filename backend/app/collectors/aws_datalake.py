@@ -28,12 +28,31 @@ exist) in the collector's region. It adds:
   Lake Formation grant. With the listing denied or truncated the mode is unknown
   and IAM edges stand (over-stated, never under-stated).
 
+* **LF-Tag grants** (``LFTagPolicy`` resources, inline expressions or saved ones from
+  ``ListLFTagExpressions``) are resolved to every inventoried database or table they
+  match: tags come from ``ListLFTags`` and one ``SearchDatabasesByLFTags``/
+  ``SearchTablesByLFTags`` per tag key (not per table). An expression is an AND across
+  keys and an OR within a key's values (``*`` any value); a table inherits its
+  database's tags unless it assigns the key itself, and a column likewise from its
+  table. Where only some columns match, the grant is column-scoped. They become the
+  same ``lakeformation:`` edges as named grants, with evidence
+  ``lakeformation: lf-tag <expression>``. If any tag-expression grant cannot be
+  resolved for want of tag data (denied or truncated), Lake Formation mode is
+  unknown everywhere and IAM edges stand.
+* **Partial and external grants.** Column-scoped, data cells filter and column LF-Tag
+  grants are marked partial in evidence (filter names, and per-table
+  ``lakeformation_data_filter_grants`` metadata), never whole-table access. Grants on
+  another account's catalog resources become Lake Formation-only edges to
+  ``external`` nodes (``account_id`` the owning account); proposals touching them are
+  manual, as for every Lake Formation grant.
+
 Every API denial or service error is a warning with the coverage marked unknown;
-inventory beyond a bound (databases, tables, permissions, workgroups) and the
-collector's request, page, evaluation or edge budgets truncates the data lake part
-with an explicit warning instead of failing the whole collection. Malformed pages
-and repeated continuation tokens still fail closed. LF-Tag based grants, data
-filters' row predicates, cross-account catalogs and resource links are not resolved.
+inventory beyond a bound (databases, tables, permissions, workgroups, LF-Tags, tag
+assignments, tag expressions) and the collector's request, page, evaluation or edge
+budgets truncates the data lake part with an explicit warning instead of failing the
+whole collection. Malformed pages and repeated continuation tokens still fail closed.
+Data filters' row predicates, catalog and data location grants, and resource links
+are not resolved.
 """
 
 import re
@@ -153,10 +172,12 @@ def lf_conditions(expression: Any) -> Conditions | None:
         if not isinstance(key, str) or not key or not isinstance(values, list) or not values:
             return None
         values = {_key(str(v)) for v in values}
-        if _key(key) in merged:  # The same key twice: both conditions must hold.
-            merged[_key(key)] &= values
-        else:
-            merged[_key(key)] = values
+        before = merged.get(_key(key))
+        if before is not None:  # The same key twice: both conditions must hold.
+            values = before if "*" in values else values if "*" in before else before & values
+            if not values:
+                return None  # Contradictory: matches nothing.
+        merged[_key(key)] = values
     return tuple(sorted((key, frozenset(values)) for key, values in merged.items()))
 
 

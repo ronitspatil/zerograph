@@ -485,6 +485,9 @@ def test_expression_parsing_and_text():
     assert lf_expression_text(conditions) == "domain=sales AND tier=(gold OR silver)"
     assert lf_expression_text(conditions, "named") == "named: domain=sales AND tier=(gold OR silver)"
     assert lf_conditions([]) is None and lf_conditions([{"TagKey": "k", "TagValues": []}]) is None
+    repeated = [{"TagKey": "k", "TagValues": ["*"]}, {"TagKey": "k", "TagValues": ["a", "b"]}]
+    assert lf_conditions(repeated) == (("k", frozenset({"a", "b"})),)
+    assert lf_conditions([{"TagKey": "k", "TagValues": ["a"]}, {"TagKey": "k", "TagValues": ["b"]}]) is None
     assert lf_matches(conditions, {"tier": frozenset({"gold"}), "domain": frozenset({"sales"})})
     assert not lf_matches(conditions, {"tier": frozenset({"gold"})})  # AND across keys
 
