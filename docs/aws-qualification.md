@@ -175,10 +175,10 @@ Formation-governed catalog, `GetTables` and `ListPermissions` return only
 resources the caller holds permissions on, and the LF-Tag listing and searches
 return only tags the caller may describe. Make the collector role a Lake
 Formation **read-only administrator** (`ReadOnlyAdmins` in the data lake
-settings) so the inventory is complete; that grants no data access. The
-LF-Tag searches also check Glue read access to the tables they return, which the
-`glue:GetDatabases`/`glue:GetTables` grants already give; a live qualification
-must confirm that no other action is required.
+settings) so the inventory is complete; that grants no data access. The LF-Tag
+searches may also need Glue read access to the tables they return (the template's
+`glue:GetDatabases`/`glue:GetTables`); these actions are taken from the SDK model,
+not yet from a live account, so a live qualification must confirm the exact set.
 
 Bounds (per collection; beyond them the data lake part is **truncated with a
 warning**, never the whole collection): `max_glue_databases` 100 (hard 1,000),
