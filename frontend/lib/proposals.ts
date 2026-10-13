@@ -34,6 +34,13 @@ export const TYPE_LABELS: Record<ProposalType, string> = {
   split_role: "Split over-broad role",
   scope_wildcard: "Scope wildcard grant",
   break_toxic_path: "Break toxic path",
+  remove_assumption: "Remove never-assumed role",
+};
+
+/** How an identity's use was credited (proposal evidence "attribution"). */
+export const ATTRIBUTION_LABELS: Record<string, string> = {
+  attributed: "Attributed to this identity (its own role sessions)",
+  role_level: "Role-level (unattributed): role use credited to every assumer",
 };
 
 export const TYPES = Object.keys(TYPE_LABELS) as ProposalType[];

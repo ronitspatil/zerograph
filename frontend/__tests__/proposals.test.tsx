@@ -33,6 +33,7 @@ const summary: ProposalSummary = {
     split_role: 27,
     scope_wildcard: 3,
     break_toxic_path: 0,
+    remove_assumption: 0,
   },
   topics: {
     t000000000000001: {

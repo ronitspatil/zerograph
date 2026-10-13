@@ -8,7 +8,13 @@ grant, and pull requests come in a later phase. Types:
 * ``remove_grant``: a role's (or identity's own) grant on a data asset that was not
   observed used.
 * ``disable_identity`` / ``disable_role``: an identity or role with no observed use in a
-  sufficient window (disable or detach; deletion is never proposed).
+  sufficient window (disable or detach; deletion is never proposed). An identity's use
+  includes its attributed role-session use; its evidence says on what basis.
+* ``remove_assumption``: an identity's ``ASSUMES_ROLE`` edge to a role it never assumed
+  in a sufficient STS window, by its own ``AssumeRole`` calls or attributed role
+  sessions (chains included), however busy the role was. It changes who may assume the
+  role, so it is always ``manual`` (``trust``); its base tier is ``high`` across topics,
+  ``medium`` inside, ``low`` when the role's sessions are not attributed well enough.
 * ``merge_roles``: two roles of the same topic whose grants have Jaccard similarity of
   at least ``MERGE_JACCARD``; the kept role keeps the retired role's used grants and
   its assumers.
@@ -87,7 +93,8 @@ from app.graph.sweep import SWEEP_TENANTS, run_sweep
 from app.graph.whatif import BASIS_CODES, IDENTITY_RECORD, ROLE_RECORD, WhatIfModel
 
 # Bump when proposal types, tiers, evidence or stored fields change: other versions read as missing.
-PROPOSAL_VERSION = 1
+# 2: remove_assumption; identity use includes attributed role-session use.
+PROPOSAL_VERSION = 2
 TIERS = ("high", "medium", "low", "inferred", "manual")
 TYPES = (
     "remove_grant",
@@ -97,11 +104,12 @@ TYPES = (
     "split_role",
     "scope_wildcard",
     "break_toxic_path",
+    "remove_assumption",
 )
 HIGH, MEDIUM, LOW, INFERRED, MANUAL = range(5)
 # Edge actions a collector derived from Lake Formation grants (``lakeformation:SELECT``...).
 LAKEFORMATION_ACTION = "lakeformation:"
-REMOVE, DISABLE_IDENTITY, DISABLE_ROLE, MERGE, SPLIT, WILDCARD, TOXIC = range(7)
+REMOVE, DISABLE_IDENTITY, DISABLE_ROLE, MERGE, SPLIT, WILDCARD, TOXIC, UNASSUME = range(8)
 MERGE_JACCARD = 0.8
 MERGE_MIN_GRANTS = 4
 MERGE_MAX_PER_ROLE = 5
@@ -266,6 +274,8 @@ def compute_proposals(
                 unexplained.add(item)
 
     reaching_users: dict[int, set[int]] = {}
+    # Roles some principal was observed assuming or using in a session (busy roles).
+    session_roles: set[int] = set(usage.assumed_by_any) | set(usage.role_sessions) if present else set()
 
     def protected(holder: int, item: int) -> bool:
         """Removing ``holder``'s grant on ``item`` could remove observed access."""
@@ -479,6 +489,11 @@ def compute_proposals(
                 "granted_weight": row["reach_weight"],
                 "type": types[node],
             }
+            if kind == DISABLE_IDENTITY and present:
+                roles = [r for r in context.hops.get(node, ()) if r in role_rows]
+                evidence["attribution"] = "attributed" if usage.attribution_ready else "role_level"
+                evidence["roles_assumable"] = len(roles)
+                evidence["roles_used_by_others"] = sum(1 for r in roles if r in session_roles)
             proposals.append(
                 Proposal(
                     kind,
@@ -500,6 +515,64 @@ def compute_proposals(
                     ),
                 )
             )
+
+    # 3b. Remove an identity's assumption of a role it never assumed (always manual: trust).
+    sts = usage.evidence.services.get("sts") if present else None
+    if sts is not None and sts.sufficient and usage.attribution_ready:
+        assume_code = EDGE_CODE[EdgeType.ASSUMES.value]
+        assumes: dict[int, set[int]] = {}
+        for edge in range(graph.edge_count):
+            source = sources[edge]
+            if kinds[edge] == assume_code and source in identity_rows and targets[edge] in role_rows:
+                assumes.setdefault(source, set()).add(targets[edge])
+        for node in sorted(assumes, key=ids.__getitem__):
+            row = identity_rows[node]
+            if row["dormant"]:
+                continue  # Disabled as a whole instead.
+            used_roles = assumed.get(node, set()) | usage.attributed_roles.get(node, set())
+            own_use = data_used.get(node, ())
+            for role in sorted(assumes[node] - used_roles, key=ids.__getitem__):
+                behind = set()
+                for holder in holders_of.get(role, ()) | ({role} if role in direct else set()):
+                    behind |= direct.get(holder, set())
+                if any(item in behind for item in own_use):
+                    guards["unassume_skipped_observed"] += 1
+                    continue
+                attributed_role = usage.role_attributed(role)
+                identity_topic, role_topic = row["topic"], topic_of(role)
+                if not attributed_role:
+                    base = LOW
+                elif identity_topic >= 0 and role_topic >= 0 and identity_topic != role_topic:
+                    base = HIGH
+                else:
+                    base = MEDIUM
+                reasons = ["trust", *node_reasons(node), *node_reasons(role)]
+                if graph.account[node] != graph.account[role]:
+                    reasons.append("cross_account")
+                attributed_events, session_events = usage.role_sessions.get(role, (0, 0))
+                proposals.append(
+                    Proposal(
+                        UNASSUME,
+                        MANUAL,
+                        base,
+                        node,
+                        role,
+                        identity_topic,
+                        role_rows[role]["reach_weight"],
+                        1,
+                        tuple(dict.fromkeys(reasons)),
+                        cuts=(node, role),
+                        detail={
+                            "basis": "never_assumed",
+                            "attribution": "attributed" if attributed_role else "role_level",
+                            "role_session_events": session_events,
+                            "role_attributed_events": attributed_events,
+                            "role_used_by_others": role in session_roles,
+                            "role_granted_weight": role_rows[role]["reach_weight"],
+                            "identity_roles_used": len(used_roles),
+                        },
+                    )
+                )
 
     # 4. Merge near-duplicate roles of the same topic (exact Jaccard join, prefix filtered).
     candidates = [
