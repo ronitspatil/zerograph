@@ -17,6 +17,7 @@ from alembic.script import ScriptDirectory
 from app.collectors.publication import derived_bounds
 from app.core.config import get_settings
 from app.db.models import (
+    AttributedAccess,
     AuditEvent,
     IngestionJob,
     ObservedAccess,
@@ -185,6 +186,7 @@ def metadata():
                     # and so do accept/reject decisions on proposals (by stable proposal ID).
                     UsageUpload,
                     ObservedAccess,
+                    AttributedAccess,
                     UsageCoverage,
                     ProposalDecision,
                 )

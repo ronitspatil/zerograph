@@ -21,6 +21,15 @@ Definitions (weights are sensitivity weights 1/2/5/10 of data assets):
   peer-assumed when at least ``k`` of same-topic identities that can assume ``r``
   were observed assuming it; ``Inferred(i)`` = its own peer-needed grants plus
   ``Inferred(r)`` of its peer-assumed roles, within ``Granted(i)``.
+* Attribution (identities only): a role's **attribution coverage** is the share of its
+  role-session events attributed to an assuming principal (``app.graph.usage``); it is
+  sufficient when every committed upload was attributed and the share is at least
+  ``ATTRIBUTION_SHARE`` (95%), or the role had no session events. For an identity ``i``,
+  ``Used(i)`` = data used by ``i`` itself, plus for each attribution-sufficient role ``r``
+  the data ``i``'s own sessions of ``r`` used (``A(i, r)``, chains included), plus for
+  each other role of ``V(i)`` its role-level use (as before; the row is labelled
+  ``role_level``), within ``Granted(i)``. ``Used'(i)`` excludes hub roles' contributions
+  and grants. Roles keep role-level ``Used``.
 * ``Needed(x)`` = ``Used(x)`` when every service of ``Granted(x)`` (and ``sts`` when
   ``x`` can assume roles) has sufficient evidence (attested, complete, >= 90 days,
   fresh within 7); otherwise ``Inferred(x)`` and the basis is "inferred". Without any
@@ -30,8 +39,9 @@ Definitions (weights are sensitivity weights 1/2/5/10 of data assets):
   with and without hubs.
 
 Counts: unused grants (a holder's own grants not in its needed set), unused grants on
-restricted data, dormant identities (no observed event as principal in a sufficient
-window) and dormant roles (never a principal nor assumed). ``RoleLastUsed`` is a hint:
+restricted data, dormant identities (no observed event as principal and no attributed
+role-session use in a sufficient window: an identity that never assumed a role is dormant
+however busy the role is) and dormant roles (never a principal nor assumed). ``RoleLastUsed`` is a hint:
 a dormant role whose hint falls inside the window is counted as a conflict, never
 used to decide need.
 """
@@ -44,9 +54,10 @@ from sqlalchemy.orm import Session
 
 from app.graph.compact import MAX_HOPS, CompactGraph
 from app.graph.schema import NodeType
-from app.graph.usage import Evidence, evidence, observed, utc
+from app.graph.usage import Evidence, attributed, attribution_ready, evidence, observed, utc
 
 PEER_SHARE = 0.5
+ATTRIBUTION_SHARE = 0.95
 USAGE_MIN_LABELED = 3
 USAGE_MIN_SHARE = 0.6
 STRONG_SEEDS = frozenset({"tag", "metadata", "name"})
@@ -58,6 +69,7 @@ DATA_SERVICE = {
 }
 ASSUME_SERVICE = "sts"
 BASES = ("used", "inferred", "none")
+ROLE_TYPE = NodeType.ROLE.value
 
 
 @dataclass
@@ -72,16 +84,33 @@ class UsageInput:
     matched: int = 0
     unmatched: int = 0
     peer_share: float = PEER_SHARE
+    # Attribution of role-session use (``app.graph.usage.attributed``), when every upload has it.
+    attribution_ready: bool = False
+    attributed: dict[int, dict[int, set[int]]] = field(default_factory=dict)  # identity -> role -> data
+    attributed_roles: dict[int, set[int]] = field(default_factory=dict)  # identity -> roles it used
+    role_sessions: dict[int, list[int]] = field(default_factory=dict)  # role -> [attributed, total]
+    attribution_share: float = ATTRIBUTION_SHARE
 
     @property
     def present(self) -> bool:
         return self.evidence.present
 
+    def role_attributed(self, role: int) -> bool:
+        """The role's session use is attributed well enough to credit identities individually."""
+        if not self.attribution_ready:
+            return False
+        found = self.role_sessions.get(role)
+        return found is None or not found[1] or found[0] >= self.attribution_share * found[1]
+
 
 def match_usage(
-    graph: CompactGraph, found: Evidence, rows, peer_share: float = PEER_SHARE
+    graph: CompactGraph, found: Evidence, rows, peer_share: float = PEER_SHARE, sessions=None
 ) -> UsageInput:
-    """Match ``(principal, resource, action class)`` observations to ``graph`` node indices."""
+    """Match ``(principal, resource, action class)`` observations to ``graph`` node indices.
+
+    ``sessions`` (optional): attributed role-session use ``(identity, role, resource,
+    action class, count)`` (``identity`` ``""``: unattributed); given, attribution is ready.
+    """
     result = UsageInput(found, peer_share=peer_share)
     index, types = graph.index, graph.types
     data = frozenset(DATA_SERVICE)
@@ -101,18 +130,45 @@ def match_usage(
             result.assumed_by_any.add(target)
         elif types[target] in data:
             result.data_used.setdefault(source, set()).add(target)
+    if sessions is not None:
+        result.attribution_ready = True
+        for identity, role, resource, action_class, count in sessions:
+            node = index.get(role)
+            if node is None:
+                continue
+            counts = result.role_sessions.setdefault(node, [0, 0])
+            counts[1] += count
+            if not identity:
+                continue
+            counts[0] += count
+            source = index.get(identity)
+            if source is None:
+                continue
+            result.attributed_roles.setdefault(source, set()).add(node)
+            target = index.get(resource)
+            if target is not None and action_class != "assume" and types[target] in data:
+                result.attributed.setdefault(source, {}).setdefault(node, set()).add(target)
     return result
 
 
 def load_usage(
-    db: Session, tenant: str, graph: CompactGraph, at: datetime | None = None, peer_share: float = PEER_SHARE
+    db: Session,
+    tenant: str,
+    graph: CompactGraph,
+    at: datetime | None = None,
+    peer_share: float = PEER_SHARE,
+    attribution: bool = True,
 ) -> UsageInput:
-    """The tenant's committed observed access, matched to ``graph`` by stable IDs."""
+    """The tenant's committed observed access, matched to ``graph`` by stable IDs.
+
+    Attributed role-session use is loaded when every committed upload has it (and
+    ``attribution``); otherwise identities keep role-level credit."""
     found = evidence(db, tenant, at)
     if not found.present:
         return UsageInput(found, peer_share=peer_share)
     rows = ((principal, resource, action) for principal, resource, action, _, _, _ in observed(db, tenant))
-    return match_usage(graph, found, rows, peer_share)
+    sessions = attributed(db, tenant) if attribution and attribution_ready(db, tenant) else None
+    return match_usage(graph, found, rows, peer_share, sessions)
 
 
 def data_service(graph: CompactGraph, node: int) -> str:
@@ -221,6 +277,7 @@ class PrivilegeContext:
 def _empty(row: dict, basis: str) -> None:
     row.update(
         basis=basis,
+        attribution="",
         needed_weight=0,
         needed_weight_excl_hubs=0,
         used_resources=0,
@@ -395,6 +452,7 @@ def compute_privilege(context: PrivilegeContext, usage: UsageInput | None) -> di
             unused_restricted=unused_restricted,
             dormant=dormant,
             hint_conflict=conflict,
+            attribution="",
         )
     role_ms = round((time.perf_counter() - role_started) * 1000)
 
@@ -412,14 +470,47 @@ def compute_privilege(context: PrivilegeContext, usage: UsageInput | None) -> di
             assumable[(row["topic"], role)] += 1
             if role in observed_roles:
                 assumed_peers[(row["topic"], role)] += 1
+    types = graph.types
+    attributed_use = usage.attributed
+
+    def identity_used(node: int, holders: frozenset[int], reach: frozenset[int], skip) -> tuple[int, int]:
+        """(weight, count) of data ``node`` used itself, in its own attributed sessions of
+        attribution-sufficient roles, and role-level through the other roles of ``reach``."""
+        items: set[int] = set(data_used.get(node, ()))
+        for member in reach:
+            if member == node or member in skip:
+                continue
+            if types[member] == ROLE_TYPE and usage.role_attributed(member):
+                continue
+            items |= data_used.get(member, ())
+        for role, used_items in attributed_use.get(node, {}).items():
+            if role not in skip and usage.role_attributed(role):
+                items |= used_items
+        items = {item for item in items if granted(item, holders)}
+        return sum(weight[item] for item in items), len(items)
+
     for node, row in context.identity_rows.items():
         holders = holders_of[node]
         core = frozenset(h for h in holders if h not in hubs)
         basis = "used" if services_of(node, holders) <= sufficient else "inferred"
+        attribution = ""
         if basis == "used":
             reach = observed_reach(node)
-            needed, count = used(holders, reach)
-            needed_core, _ = used(core, frozenset(v for v in reach if v not in hubs))
+            if usage.attribution_ready:
+                needed, count = identity_used(node, holders, reach, ())
+                needed_core, _ = identity_used(node, core, reach, hubs)
+                roles = [
+                    v for v in reach if v != node and types[v] == ROLE_TYPE
+                ] + list(usage.attributed_roles.get(node, ()))
+                if roles:
+                    attribution = (
+                        "attributed" if all(usage.role_attributed(v) for v in roles) else "role_level"
+                    )
+            else:
+                needed, count = used(holders, reach)
+                needed_core, _ = used(core, frozenset(v for v in reach if v not in hubs))
+                if len(reach) > 1:
+                    attribution = "role_level"
             needed_direct = data_used.get(node, frozenset())
         else:
             topic = row["topic"]
@@ -451,8 +542,12 @@ def compute_privilege(context: PrivilegeContext, usage: UsageInput | None) -> di
             unused_grants=unused,
             unused_restricted=unused_restricted,
             # Zero use is only meaningful where some of its access is covered.
-            dormant=basis == "used" and bool(services_of(node, holders)) and node not in usage.active,
+            dormant=basis == "used"
+            and bool(services_of(node, holders))
+            and node not in usage.active
+            and node not in usage.attributed_roles,
             hint_conflict=False,
+            attribution=attribution,
         )
     return {
         "basis": "evidence",
