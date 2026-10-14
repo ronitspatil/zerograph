@@ -1224,8 +1224,9 @@ def probe_gaps(boto3, world: dict) -> dict:
     probes["glue_resource_policy_absent"] = outcome(lambda: other.get_resource_policy())
     if probes["glue_resource_policy_absent"] == "ok":
         body = other.get_resource_policy()
-        probes["glue_resource_policy_absent"] = "ok, keys " + ",".join(
-            sorted(k for k in body if k != "ResponseMetadata")
+        keys = sorted(k for k in body if k != "ResponseMetadata")
+        probes["glue_resource_policy_absent"] = "HTTP 200 " + (
+            f"with {', '.join(keys)}" if keys else "with an empty body"
         )
     if "EntityNotFoundException" not in probes["glue_resource_policy_absent"]:
         gap(
