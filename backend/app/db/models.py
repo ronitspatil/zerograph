@@ -378,6 +378,9 @@ class UsageUpload(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Role-session use was attributed to assuming principals at commit (``attributed_access``);
+    # uploads committed before attribution existed have none and keep role-level credit only.
+    attributed: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class UsageUploadChunk(Base):
@@ -420,6 +423,71 @@ class ObservedAccess(Base):
     last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     count: Mapped[int] = mapped_column(Integer)
     source: Mapped[str] = mapped_column(String(32))
+
+
+class UsageSessionIssued(Base):
+    """Role sessions issued (successful STS ``AssumeRole*``) in one uploaded file, before commit."""
+
+    __tablename__ = "usage_session_issued"
+    upload_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    chunk: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ordinal: Mapped[int] = mapped_column(Integer, primary_key=True)
+    access_key: Mapped[str] = mapped_column(String(128))
+    session_arn: Mapped[str] = mapped_column(String(512))
+    role_id: Mapped[str] = mapped_column(String(512))
+    principal_id: Mapped[str] = mapped_column(String(512))  # "" when assumed from a role session
+    parent_key: Mapped[str] = mapped_column(String(128))
+    parent_role: Mapped[str] = mapped_column(String(512))
+    source_identity: Mapped[str] = mapped_column(String(128))
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class UsageSessionStaged(Base):
+    """Role-session access of one uploaded file per session, before commit attributes it."""
+
+    __tablename__ = "usage_session_staged"
+    upload_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    chunk: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ordinal: Mapped[int] = mapped_column(Integer, primary_key=True)
+    role_id: Mapped[str] = mapped_column(String(512))
+    access_key: Mapped[str] = mapped_column(String(128))
+    session_arn: Mapped[str] = mapped_column(String(512))
+    source_identity: Mapped[str] = mapped_column(String(128))
+    on_behalf_of: Mapped[str] = mapped_column(String(512))
+    resource_id: Mapped[str] = mapped_column(String(512))
+    action_class: Mapped[str] = mapped_column(String(16))
+    service: Mapped[str] = mapped_column(String(32))
+    first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    count: Mapped[int] = mapped_column(Integer)
+
+
+class AttributedAccess(Base):
+    """Role-session use of a committed upload attributed to the principal that assumed the role.
+
+    ``identity_id`` is the root principal of the session's assumption chain (IAM user or
+    root ARN, or a ``service:``, ``web-identity:``, ``saml:`` or ``identity-center:``
+    principal); ``""`` is use whose session could not be attributed (its ``AssumeRole``
+    outside the window or upload, a broken or too deep chain), which keeps role-level
+    credit. ``basis`` says how it was attributed; ``depth`` is the chain length (1 =
+    assumed directly). Role-level rows stay in ``observed_access``.
+    """
+
+    __tablename__ = "attributed_access"
+    __table_args__ = (Index("ix_attributed_access_role", "tenant_id", "role_id"),)
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    upload_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    ordinal: Mapped[int] = mapped_column(Integer, primary_key=True)
+    identity_id: Mapped[str] = mapped_column(String(512))
+    role_id: Mapped[str] = mapped_column(String(512))
+    resource_id: Mapped[str] = mapped_column(String(512))
+    action_class: Mapped[str] = mapped_column(String(16))
+    service: Mapped[str] = mapped_column(String(32))
+    basis: Mapped[str] = mapped_column(String(16))
+    depth: Mapped[int] = mapped_column(Integer)
+    first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    count: Mapped[int] = mapped_column(Integer)
 
 
 class UsageCoverage(Base):

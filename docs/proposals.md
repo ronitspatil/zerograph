@@ -12,11 +12,12 @@ draft pull requests through the rollout ([rollout.md](rollout.md)). Code: `app/g
 | Type | Proposes | Tier |
 |---|---|---|
 | `remove_grant` | Remove a holder's (role's, or an identity's own) grant on a data asset never observed used | from the evidence (below) |
-| `disable_identity`, `disable_role` | Disable or detach an identity or role with no observed use in a sufficient window. **Never delete.** | `high`; `low` when `RoleLastUsed` falls inside the window |
+| `disable_identity`, `disable_role` | Disable or detach an identity or role with no observed use in a sufficient window (an identity's use includes its attributed role-session use; evidence `attribution` says whether it was attributed or role-level). **Never delete.** | `high`; `low` when `RoleLastUsed` falls inside the window |
 | `merge_roles` | Two roles of one topic whose grants have Jaccard similarity ≥ 0.8 (exact join): the kept role keeps the retired role's *used* grants and its assumers; the retired role is disabled | `manual` (trust policy edits) |
 | `split_role` | A role whose used assets span ≥ 2 topics with ≥ 25% each: one role per topic with that topic's used grants | `manual` (trust policy edits) |
 | `scope_wildcard` | Scope grants with wildcard actions (`*`, `service:*`) to the assets actually used | `manual` (wildcard rewrite) |
 | `break_toxic_path` | On each toxic-combination path, remove the edge with the lowest observed-use weight (preferring grants over trust edges, then the edge nearest the data) | as `remove_grant` for a grant; `manual` for a hop |
+| `remove_assumption` | Remove an identity's `ASSUMES_ROLE` edge to a role it never assumed in a sufficient STS window, by its own `AssumeRole` calls or attributed role sessions (chains included), however busy the role was. Needs attributed usage ([usage-evidence.md](usage-evidence.md#role-session-attribution)); a dormant identity gets `disable_identity` instead | `manual` (trust); evidence tier `high` across topics, `medium` inside, `low` when the role's sessions are not attributed well enough |
 
 Thresholds are the captain's: 90-day window, 7-day freshness, merge Jaccard ≥ 0.8, split
 ≥ 25% per topic.

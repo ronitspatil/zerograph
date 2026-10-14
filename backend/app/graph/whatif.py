@@ -35,7 +35,7 @@ BASIS_CODES = ("used", "inferred", "none")
 ROLE_RECORD, IDENTITY_RECORD = 0, 1
 # Proposal types whose effect is modelled (others restructure roles; see module docstring).
 MODELLED = frozenset(
-    {"remove_grant", "disable_identity", "disable_role", "scope_wildcard", "break_toxic_path"}
+    {"remove_grant", "disable_identity", "disable_role", "scope_wildcard", "break_toxic_path", "remove_assumption"}
 )
 
 

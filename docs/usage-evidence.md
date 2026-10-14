@@ -58,7 +58,7 @@ use is never understated) and OpenSearch Serverless `ReadDocument`/`WriteDocumen
 
 - **Principal**: an assumed-role session's role (`sessionContext.sessionIssuer.arn`), else
   the IAM user or root ARN. Service principals and callers without an ARN count as
-  unresolved.
+  unresolved (their role sessions can still be attributed to them, below).
 - **Resource**: the S3 bucket (`resources[]` or `bucketName`), the assumed role, the Glue
   table or database, the Athena workgroup, the Lake Formation table, the RDS Data API
   resource, else the first `resources[].ARN`.
@@ -67,6 +67,36 @@ use is never understated) and OpenSearch Serverless `ReadDocument`/`WriteDocumen
 - **Unmapped** events are counted per service and make that service's coverage
   incomplete, as do malformed records (existing behaviour of the single-identity
   normalizer). An unattested service is never complete.
+
+## Role-session attribution
+
+The principal of a role session's events is the role, so role-level rows credit a
+role's use to the role. Each upload also attributes that use to the principal that
+assumed the role (`attributed_access`, kept beside the role-level rows):
+
+- Every successful in-window `AssumeRole`, `AssumeRoleWithWebIdentity` and
+  `AssumeRoleWithSAML` is an issuance: the new session's key
+  (`responseElements.credentials.accessKeyId`) and ARN
+  (`responseElements.assumedRoleUser.arn`), the role, the `sourceIdentity` set, and the
+  caller: an IAM user or root ARN, `service:<host>` (an AWS service), `web-identity:<provider>:<user>`,
+  `saml:<provider>:<user>`, or a role session (role chaining: its key and role).
+- Every successful mapped event made in a role session (`userIdentity.type`
+  `AssumedRole`) is matched by its `accessKeyId` to an issuance of the same upload (any
+  file), and the chain of issuances is followed to its **root principal** (at most 5
+  sessions; a missing parent, a parent of another role or a cycle stops it). An
+  `onBehalfOf` user (IAM Identity Center, `identity-center:<store>:<user>`) takes
+  precedence. Fallbacks: a session whose key has no issuance but whose `sourceIdentity`
+  only one root principal set in the upload, and an event without a key whose session
+  ARN only one root principal used.
+- Anything else (the session was issued before the window or in another upload, a broken
+  or too deep chain) is stored as `unattributed` and keeps role-level credit.
+
+Rows hold (identity, role, resource, action class, service, basis, chain depth) with
+first/last seen and a count; commit stats report issuances, resolved sessions and
+events by basis. A role's **attribution coverage** is the share of its session events
+that were attributed. Uploads committed before attribution existed have none, and
+until they are deleted identities keep role-level credit
+([privilege.md](privilege.md)).
 
 ## Sufficiency
 
@@ -85,7 +115,10 @@ sufficient on their own and never used to decide that access is unneeded.
 ## Planted fixture
 
 `qualify_scale.cloudtrail_records()` writes the planted fixture's usage sidecar as
-realistic CloudTrail records (assumed-role S3/RDS Data/OpenSearch data events, IAM user
-`AssumeRole` calls, plus EC2 noise and AccessDenied attempts) and
+realistic CloudTrail records (IAM user `AssumeRole` calls issuing role sessions with
+access keys, each identity's share of its roles' S3/RDS Data/OpenSearch/Glue use in its
+own sessions, AWS service sessions for roles without an assumer, sessions issued before
+the window for 3% of used roles, plus EC2 noise and AccessDenied attempts;
+`qualify_scale.ATTRIBUTION_FIXTURE`) and
 `cloudtrail_files()` packs them as gzip export files, so qualification exercises the
 real upload path. The synthetic node IDs stand in for ARNs.

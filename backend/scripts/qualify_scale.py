@@ -803,18 +803,108 @@ _EVENT = {
 }
 
 
+ATTRIBUTION_FIXTURE = (
+    "Role sessions: every used (identity, role) pair gets 1-3 AssumeRole calls (each a session with its own "
+    "access key, roleSessionName = the identity's name); each used (role, data) pair is used by a seeded random "
+    "non-empty subset of the role's observed assumers (each with probability 0.5) in their own sessions; roles "
+    "with use but no observed assumer are used in an AWS service session (AssumeRole by ecs-tasks.amazonaws.com); "
+    "3% of used roles (seeded) are used only in sessions whose AssumeRole precedes the window (unattributed). "
+    "plant_never_assumed adds, for 3% of non-dormant identities with an observed assumption, an ASSUMES_ROLE "
+    "edge to a busy same-topic role they never assume."
+)
+SERVICE_PRINCIPAL = "ecs-tasks.amazonaws.com"
+
+
+def attribution_plan(usage: dict, seed: int = 29) -> dict:
+    """Who used each used (role, data) pair in their own role sessions (``ATTRIBUTION_FIXTURE``).
+
+    Returns ``{"identity_data_used": {identity: {role: [data]}}, "service_roles": [role],
+    "unattributed_roles": [role]}``; deterministic for the same usage and seed, and the
+    union over identities and service sessions of each role's data is the role's used set.
+    """
+    rng = random.Random(seed)
+    assumers: dict[str, list[str]] = {}
+    for identity, roles in sorted(usage["identity_role_used"].items()):
+        for role in roles:
+            assumers.setdefault(role, []).append(identity)
+    used_roles = sorted(usage["role_data_used"])
+    unattributed = set(rng.sample(used_roles, len(used_roles) * 3 // 100))
+    identity_data: dict[str, dict[str, list[str]]] = {}
+    service_roles = []
+    for role in used_roles:
+        if role in unattributed:
+            continue
+        users = assumers.get(role, [])
+        if not users:
+            service_roles.append(role)
+            continue
+        for item in usage["role_data_used"][role]:
+            chosen = [user for user in users if rng.random() < 0.5] or [rng.choice(users)]
+            for user in chosen:
+                identity_data.setdefault(user, {}).setdefault(role, []).append(item)
+    return {
+        "identity_data_used": identity_data,
+        "service_roles": service_roles,
+        "unattributed_roles": sorted(unattributed),
+    }
+
+
+def plant_never_assumed(snapshot: GraphSnapshot, truth: dict, usage: dict, share: float = 0.03, seed: int = 31):
+    """Give some active identities an ASSUMES_ROLE edge to a busy same-topic role they never assume.
+
+    Adds the edges to ``snapshot`` and returns the planted ``[identity, role]`` pairs
+    (also ``truth["never_assumed"]``). Busy: some other identity was observed assuming it.
+    """
+    rng = random.Random(seed)
+    dormant = set(truth["dormant_identities"])
+    busy_by_topic: dict[str, list[str]] = {}
+    for role in sorted({role for roles in usage["identity_role_used"].values() for role in roles}):
+        topic = truth["role_topic"].get(role)
+        if topic is not None:
+            busy_by_topic.setdefault(topic, []).append(role)
+    has = {}
+    for edge in snapshot.edges:
+        if edge.type == EdgeType.ASSUMES:
+            has.setdefault(edge.source, set()).add(edge.target)
+    candidates = sorted(i for i in usage["identity_role_used"] if i not in dormant)
+    planted = []
+    for identity in rng.sample(candidates, int(len(candidates) * share)):
+        pool = [r for r in busy_by_topic.get(truth["identity_topic"][identity], []) if r not in has.get(identity, ())]
+        if not pool:
+            continue
+        role = rng.choice(pool)
+        snapshot.edges.append(
+            Edge(
+                source=identity,
+                target=role,
+                type=EdgeType.ASSUMES,
+                actions=["sts:AssumeRole"],
+                evidence=[f"policy:{identity}"],
+            )
+        )
+        has.setdefault(identity, set()).add(role)
+        planted.append([identity, role])
+    truth["never_assumed"] = planted
+    return planted
+
+
 def cloudtrail_records(snapshot: GraphSnapshot, usage: dict, start: datetime, end: datetime, seed: int = 13):
     """CloudTrail records (data events and STS AssumeRole) for the planted usage sidecar.
 
-    Every used (role, data) pair gets 1-3 events from an assumed-role session of the role
-    (S3 GetObject/PutObject, RDS Data API or OpenSearch Serverless by the asset's type and
-    the grant's kind; hub "admin" grants read), and every used (identity, role) pair 1-3
-    ``AssumeRole`` calls by the identity as an IAM user, spread over ``[start, end]``.
-    The synthetic graph's node IDs stand in for ARNs. A little realistic noise is added:
-    EC2 management events (an unattested service) and AccessDenied attempts on unused
-    grants, neither of which is use. Deterministic for the same inputs.
+    Every used (identity, role) pair gets 1-3 ``AssumeRole`` calls by the identity as an
+    IAM user, each issuing a role session (access key and session ARN in
+    ``responseElements``); every used (role, data) pair gets 1-3 events per user of it
+    (``attribution_plan``) in that user's sessions (S3 GetObject/PutObject, RDS Data API,
+    OpenSearch Serverless or Glue by the asset's type and the grant's kind; hub "admin"
+    grants read). Roles used without an observed assumer are used in an AWS service
+    session, and the plan's unattributed roles in sessions issued before the window, so
+    those events cannot be attributed. Events are spread over ``[start, end]``; the
+    synthetic graph's node IDs stand in for ARNs. A little realistic noise is added: EC2
+    management events (an unattested service) and AccessDenied attempts on unused grants,
+    neither of which is use. Deterministic for the same inputs.
     """
     rng = random.Random(seed)
+    plan = attribution_plan(usage)
     kinds = {node.id: node.type for node in snapshot.nodes}
     glue = {node.id for node in snapshot.nodes if node.metadata.get("service") == "glue"}
     grant_kind: dict[tuple[str, str], EdgeType] = {}
@@ -827,20 +917,27 @@ def cloudtrail_records(snapshot: GraphSnapshot, usage: dict, start: datetime, en
         moment = start.timestamp() + rng.random() * span
         return datetime.fromtimestamp(moment, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    def session(role: str) -> dict:
-        name = role.rsplit(":", 1)[-1]
+    def new_key() -> str:
+        return f"ASIA{rng.getrandbits(64):016X}"
+
+    def session_arn(role: str, name: str) -> str:
+        return f"arn:aws:sts::{CLOUDTRAIL_ACCOUNT}:assumed-role/{role.rsplit(':', 1)[-1]}/{name}"
+
+    def session(role: str, key: str, name: str) -> dict:
+        role_name = role.rsplit(":", 1)[-1]
         return {
             "type": "AssumedRole",
-            "principalId": f"AROA{name.upper()}:session",
-            "arn": f"arn:aws:sts::{CLOUDTRAIL_ACCOUNT}:assumed-role/{name}/session",
+            "principalId": f"AROA{role_name.upper()}:{name}",
+            "arn": session_arn(role, name),
             "accountId": CLOUDTRAIL_ACCOUNT,
+            "accessKeyId": key,
             "sessionContext": {
                 "sessionIssuer": {
                     "type": "Role",
-                    "principalId": f"AROA{name.upper()}",
+                    "principalId": f"AROA{role_name.upper()}",
                     "arn": role,
                     "accountId": CLOUDTRAIL_ACCOUNT,
-                    "userName": name,
+                    "userName": role_name,
                 },
                 "attributes": {"creationDate": when(), "mfaAuthenticated": "false"},
             },
@@ -868,7 +965,23 @@ def cloudtrail_records(snapshot: GraphSnapshot, usage: dict, start: datetime, en
             "eventCategory": "Data" if data else "Management",
         }
 
-    def glue_event(role: str, item: str, kind: EdgeType) -> dict:
+    def assume(caller: dict, role: str, key: str, name: str) -> dict:
+        event = record(
+            caller,
+            "sts.amazonaws.com",
+            "AssumeRole",
+            {"roleArn": role, "roleSessionName": name},
+            [{"accountId": CLOUDTRAIL_ACCOUNT, "type": "AWS::IAM::Role", "ARN": role}],
+            False,
+        )
+        role_name = role.rsplit(":", 1)[-1]
+        event["responseElements"] = {
+            "credentials": {"accessKeyId": key, "expiration": when()},
+            "assumedRoleUser": {"assumedRoleId": f"AROA{role_name.upper()}:{name}", "arn": session_arn(role, name)},
+        }
+        return event
+
+    def glue_event(identity: dict, item: str, kind: EdgeType) -> dict:
         # Glue events name the database/table in requestParameters (resolved like the collector's IDs).
         path = item.split(":", 5)[5]
         if path.startswith("database/"):
@@ -879,11 +992,11 @@ def cloudtrail_records(snapshot: GraphSnapshot, usage: dict, start: datetime, en
                 name, request = "UpdateTable", {"databaseName": database, "tableInput": {"name": table}}
             else:
                 name, request = "GetTable", {"databaseName": database, "name": table}
-        return record(session(role), "glue.amazonaws.com", name, request, [], False)
+        return record(identity, "glue.amazonaws.com", name, request, [], False)
 
-    def data_event(role: str, item: str, kind: EdgeType) -> dict:
+    def data_event(identity: dict, item: str, kind: EdgeType) -> dict:
         if item in glue:
-            return glue_event(role, item, kind)
+            return glue_event(identity, item, kind)
         source, name, resource_type = _EVENT[(kinds[item], kind)]
         if source.startswith("s3"):
             request = {"bucketName": item, "key": f"part-{rng.getrandbits(16):04x}"}
@@ -897,38 +1010,53 @@ def cloudtrail_records(snapshot: GraphSnapshot, usage: dict, start: datetime, en
         else:
             request = {"collection": item}
             resources = [{"accountId": CLOUDTRAIL_ACCOUNT, "type": resource_type, "ARN": item}]
-        return record(session(role), source, name, request, resources, True)
+        return record(identity, source, name, request, resources, True)
 
-    for role, items in usage["role_data_used"].items():
-        for item in items:
-            kind = grant_kind.get((role, item), EdgeType.READ)
-            for _ in range(1 + (rng.random() < 0.5) + (rng.random() < 0.2)):
-                yield data_event(role, item, kind)
+    def events() -> int:
+        return 1 + (rng.random() < 0.5) + (rng.random() < 0.2)
+
+    # Identity sessions: AssumeRole calls, then each session's share of the identity's data use.
     for identity, roles in usage["identity_role_used"].items():
+        name = identity.rsplit(":", 1)[-1]
         user = {
             "type": "IAMUser",
-            "principalId": f"AIDA{identity.rsplit(':', 1)[-1]}",
+            "principalId": f"AIDA{name}",
             "arn": identity,
             "accountId": CLOUDTRAIL_ACCOUNT,
             "userName": identity,
         }
+        mine = plan["identity_data_used"].get(identity, {})
         for role in roles:
-            for _ in range(1 + (rng.random() < 0.5) + (rng.random() < 0.2)):
-                yield record(
-                    user,
-                    "sts.amazonaws.com",
-                    "AssumeRole",
-                    {"roleArn": role, "roleSessionName": "session"},
-                    [{"accountId": CLOUDTRAIL_ACCOUNT, "type": "AWS::IAM::Role", "ARN": role}],
-                    False,
-                )
+            sessions = [session(role, new_key(), name) for _ in range(events())]
+            for caller_session in sessions:
+                yield assume(user, role, caller_session["accessKeyId"], name)
+            for item in mine.get(role, ()):
+                kind = grant_kind.get((role, item), EdgeType.READ)
+                for _ in range(events()):
+                    yield data_event(rng.choice(sessions), item, kind)
+    # AWS service sessions, and sessions issued before the window (no AssumeRole: unattributed).
+    service = {"type": "AWSService", "invokedBy": SERVICE_PRINCIPAL}
+    for role in plan["service_roles"]:
+        caller_session = session(role, new_key(), "ecs-task")
+        yield assume(service, role, caller_session["accessKeyId"], "ecs-task")
+        for item in usage["role_data_used"][role]:
+            kind = grant_kind.get((role, item), EdgeType.READ)
+            for _ in range(events()):
+                yield data_event(caller_session, item, kind)
+    for role in plan["unattributed_roles"]:
+        earlier = session(role, new_key(), "before-window")
+        for item in usage["role_data_used"][role]:
+            kind = grant_kind.get((role, item), EdgeType.READ)
+            for _ in range(events()):
+                yield data_event(earlier, item, kind)
     roles = sorted(usage["role_data_used"])
     for _ in range(max(10, len(roles) // 50)):
         role = rng.choice(roles)
-        yield record(session(role), "ec2.amazonaws.com", "DescribeInstances", {}, [], False)
+        caller_session = session(role, new_key(), "noise")
+        yield record(caller_session, "ec2.amazonaws.com", "DescribeInstances", {}, [], False)
         denied = [item for (source, item) in grant_kind if source == role][:1]
         if denied:
-            event = data_event(role, denied[0], grant_kind[(role, denied[0])])
+            event = data_event(caller_session, denied[0], grant_kind[(role, denied[0])])
             event["errorCode"], event["errorMessage"] = "AccessDenied", "Access Denied"
             yield event
 

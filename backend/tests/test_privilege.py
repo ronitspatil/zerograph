@@ -319,7 +319,9 @@ def test_gzip_and_json_files_are_equivalent_for_the_generator():
     begin, end = NOW - timedelta(days=91), NOW
     files = list(cloudtrail_files(cloudtrail_records(snapshot, planted, begin, end), 10_000))
     records = json.loads(gzip.decompress(files[0]))["Records"]
-    assert records[0]["eventCategory"] == "Data" and records[0]["userIdentity"]["type"] == "AssumedRole"
+    assert records[0]["eventName"] == "AssumeRole" and records[0]["userIdentity"]["type"] == "IAMUser"
+    data = next(r for r in records if r["eventCategory"] == "Data")
+    assert data["userIdentity"]["type"] == "AssumedRole" and data["userIdentity"]["accessKeyId"]
 
 
 def test_unused_grants_do_not_vote_in_co_access_when_evidence_suffices():

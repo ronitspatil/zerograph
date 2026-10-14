@@ -19,6 +19,21 @@ incomplete, and events outside the declared window are ignored.
   are aggregated separately per (principal, resource, service, error code) with
   first/last seen and a count (bounded per file), for the optimizer rollout's
   AccessDenied watch after a least-privilege change is merged.
+
+**Role sessions** (``userIdentity.type`` ``AssumedRole``) are also kept per session so
+the upload's commit can attribute each access to the principal that assumed the role
+(``app.graph.usage.attribute``):
+
+* every successful ``AssumeRole``/``AssumeRoleWithWebIdentity``/``AssumeRoleWithSAML``
+  in the window is an **issuance**: the new session's key
+  (``responseElements.credentials.accessKeyId``) and ARN
+  (``responseElements.assumedRoleUser.arn``), the role, the ``sourceIdentity`` set, and
+  who assumed it: an IAM user or root ARN, ``service:<host>`` (AWS service),
+  ``web-identity:<provider>:<user>``, ``saml:<provider>:<user>``, or, for role chaining,
+  the parent session's key and its role;
+* every successful mapped event made in a role session is aggregated per (role,
+  session key, session ARN, ``sourceIdentity``, ``onBehalfOf``, resource, action
+  class, service). Its role-level row in ``access`` is unchanged.
 """
 
 import gzip
@@ -34,6 +49,8 @@ MAX_RECORDS = 500_000
 MAX_ID = 512
 MAX_DENIED_PAIRS = 20_000  # Distinct denied (principal, resource, service, code) per file.
 MAX_ERROR_CODE = 64
+MAX_KEY = 128  # Access key IDs (AWS: 16-128 characters) and session descriptors.
+ISSUING = frozenset({"AssumeRole", "AssumeRoleWithWebIdentity", "AssumeRoleWithSAML"})
 
 
 class ExportError(ValueError):
@@ -144,6 +161,61 @@ def resource_of(record: dict, service: str, principal: str) -> str:
     return ""
 
 
+def _text(value, limit: int = MAX_ID) -> str:
+    return value if isinstance(value, str) and 0 < len(value) <= limit else ""
+
+
+def issuer_of(identity: dict) -> tuple[str, str, str]:
+    """(principal, parent session key, parent role) of the caller of an STS issuing call.
+
+    The principal is set for a non-session caller (IAM user or root ARN, ``service:``,
+    ``web-identity:`` or ``saml:`` principal); a role session (role chaining) gives its own
+    session key and role instead. Unidentifiable callers give empty strings.
+    """
+    kind = identity.get("type")
+    if kind == "AssumedRole":
+        issuer = (identity.get("sessionContext") or {}).get("sessionIssuer") or {}
+        role = _text(issuer.get("arn")) if isinstance(issuer, dict) else ""
+        return "", _text(identity.get("accessKeyId"), MAX_KEY), role
+    if kind in ("IAMUser", "Root"):
+        return _text(identity.get("arn")), "", ""
+    if kind == "AWSService":
+        host = _text(identity.get("invokedBy"), 256)
+        return (f"service:{host}" if host else ""), "", ""
+    if kind in ("WebIdentityUser", "SAMLUser"):
+        provider = _text(identity.get("identityProvider"), 256)
+        user = _text(identity.get("userName"), 256)
+        if provider and user:
+            prefix = "web-identity" if kind == "WebIdentityUser" else "saml"
+            return _text(f"{prefix}:{provider}:{user}"), "", ""
+    return "", "", ""
+
+
+def on_behalf_of(identity: dict) -> str:
+    """IAM Identity Center user a session acts for (``onBehalfOf``), as ``identity-center:...``."""
+    found = identity.get("onBehalfOf")
+    if not isinstance(found, dict):
+        return ""
+    user = _text(found.get("userId"), 256)
+    store = _text(found.get("identityStoreArn"), 256)
+    return _text(f"identity-center:{store}:{user}") if user else ""
+
+
+def session_of(identity: dict) -> tuple[str, str, str, str] | None:
+    """(key, session ARN, sourceIdentity, onBehalfOf) of a role-session caller, else None."""
+    if identity.get("type") != "AssumedRole":
+        return None
+    context = identity.get("sessionContext")
+    context = context if isinstance(context, dict) else {}
+    source = _text(context.get("sourceIdentity"), MAX_KEY) or _text(identity.get("sourceIdentity"), MAX_KEY)
+    return (
+        _text(identity.get("accessKeyId"), MAX_KEY),
+        _text(identity.get("arn")),
+        source,
+        on_behalf_of(identity),
+    )
+
+
 @dataclass
 class Normalized:
     """Aggregated observed access of one export file, and how every record was classified."""
@@ -163,6 +235,12 @@ class Normalized:
     # (principal, resource, service, error code) -> [first seen, last seen, count]; never use.
     denied_access: dict[tuple[str, str, str, str], list] = field(default_factory=dict)
     denied_unrecorded: int = 0
+    # Session key -> [session ARN, role, principal, parent key, parent role, sourceIdentity, issued at].
+    issued: dict[str, list] = field(default_factory=dict)
+    # (role, key, session ARN, sourceIdentity, onBehalfOf, resource, action class, service)
+    # -> [first seen, last seen, count]: the role-session part of ``access``.
+    sessions: dict[tuple[str, str, str, str, str, str, str, str], list] = field(default_factory=dict)
+    issued_unkeyed: int = 0
 
     def stats(self) -> dict:
         return {
@@ -179,6 +257,9 @@ class Normalized:
             "pairs": len(self.access),
             "denied_pairs": len(self.denied_access),
             "denied_unrecorded": self.denied_unrecorded,
+            "sessions_issued": len(self.issued),
+            "issued_unkeyed": self.issued_unkeyed,
+            "session_events": sum(row[2] for row in self.sessions.values()),
         }
 
 
@@ -217,6 +298,41 @@ def _record_denial(result: Normalized, record: dict, service: str, occurred: dat
     row[0], row[1], row[2] = min(row[0], occurred), max(row[1], occurred), row[2] + 1
 
 
+def _record_issuance(result: Normalized, record: dict, occurred: datetime) -> None:
+    """Remember who assumed which role session (key, ARN) from a successful STS call."""
+    response = record.get("responseElements")
+    response = response if isinstance(response, dict) else {}
+    credentials = response.get("credentials")
+    key = _text(credentials.get("accessKeyId"), MAX_KEY) if isinstance(credentials, dict) else ""
+    assumed = response.get("assumedRoleUser")
+    arn = _text(assumed.get("arn")) if isinstance(assumed, dict) else ""
+    request = record.get("requestParameters")
+    request = request if isinstance(request, dict) else {}
+    role = _text(request.get("roleArn"))
+    identity = record.get("userIdentity")
+    principal, parent, parent_role = issuer_of(identity) if isinstance(identity, dict) else ("", "", "")
+    if not key or not role or not (principal or parent):
+        result.issued_unkeyed += 1
+        return
+    source = _text(request.get("sourceIdentity"), MAX_KEY)
+    found = result.issued.get(key)
+    if found is None or occurred < found[6]:
+        result.issued[key] = [arn, role, principal, parent, parent_role, source, occurred]
+
+
+def _record_session(result: Normalized, identity: dict, key: tuple, occurred: datetime) -> None:
+    session = session_of(identity)
+    if session is None:
+        return
+    principal, resource, action_class, service = key
+    full = (principal, *session, resource, action_class, service)
+    row = result.sessions.get(full)
+    if row is None:
+        result.sessions[full] = [occurred, occurred, 1]
+    else:
+        row[0], row[1], row[2] = min(row[0], occurred), max(row[1], occurred), row[2] + 1
+
+
 def normalize_export(records: list[dict], start: datetime, end: datetime) -> Normalized:
     """Aggregate one file's records observed inside ``[start, end]`` (timezone-aware)."""
     if start.tzinfo is None or end.tzinfo is None:
@@ -243,6 +359,8 @@ def normalize_export(records: list[dict], start: datetime, end: datetime) -> Nor
             result.denied += 1
             _record_denial(result, record, service, occurred)
             continue
+        if service == "sts" and record.get("eventName") in ISSUING:
+            _record_issuance(result, record, occurred)
         principal = principal_of(record)
         if not principal or len(principal) > MAX_ID:
             result.unresolved_principal += 1
@@ -262,4 +380,7 @@ def normalize_export(records: list[dict], start: datetime, end: datetime) -> Nor
             if occurred > row[1]:
                 row[1] = occurred
             row[2] += 1
+        identity = record["userIdentity"]
+        if identity.get("type") == "AssumedRole":
+            _record_session(result, identity, key, occurred)
     return result
