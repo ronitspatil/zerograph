@@ -27,6 +27,7 @@ from urllib.parse import unquote
 import boto3
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
+from botocore.parsers import ResponseParserError
 
 from app.collectors.aws_datalake import DataLakeInventory
 from app.collectors.data_classifier import enrich_node
@@ -92,6 +93,17 @@ class CollectionIncomplete(ValueError):
 
 class PolicyTooLarge(CollectionIncomplete):
     """A policy document exceeds its byte or statement bound."""
+
+
+class UnparsableResponse(BotoCoreError):
+    """An AWS response botocore could not parse (for example an HTML error page).
+
+    botocore raises ``ResponseParserError``, which is not a ``BotoCoreError``; re-raised as
+    one, every optional phase treats it like any other service error (a warning, coverage
+    unknown) and required inventory still fails closed.
+    """
+
+    fmt = "Unparsable AWS response to {operation}"
 
 
 @dataclass(frozen=True)
@@ -295,7 +307,10 @@ class AWSCollector:
         if self.requests >= self.limits.max_requests:
             raise CollectionIncomplete("Collection request budget exhausted")
         self.requests += 1
-        result = getattr(client, operation)(**kwargs)
+        try:
+            result = getattr(client, operation)(**kwargs)
+        except ResponseParserError:
+            raise UnparsableResponse(operation=operation) from None
         self._check_time()
         return result
 
