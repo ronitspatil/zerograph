@@ -169,6 +169,16 @@ _WRITE = {
 }
 _PREFIX = {NodeType.BUCKET: "bucket", NodeType.DATABASE: "db", NodeType.VECTOR: "index"}
 # Optional Glue Data Catalog part of the data-lake topic (``generate_topics(glue=True)``).
+LF_TAG_FIXTURE = (
+    "LF-Tags (with --glue): a third of the Glue databases are tagged domain=data-lake and zone=<zone> in Lake "
+    "Formation and their tables tier=gold/silver/bronze (10% with a tagged column); tables no IAM grant reaches "
+    "are Lake Formation-governed, the rest hybrid. 15% of data-lake roles (not hubs or planted duplicates) hold "
+    "a tag-expression grant domain=data-lake AND tier=gold AND zone=<zone> (DESCRIBE+SELECT on every matching "
+    "table, 65% used), and one data-lake role holds the over-broad domain=data-lake grant (SELECT on every "
+    "tagged table, none used beyond its other grants). Edges carry lakeformation: actions and "
+    "'lakeformation: lf-tag <expression>' evidence, as the collector emits them; they add no nodes and no planted "
+    "over-grants (truth['lf_tag'] lists them), from their own seeded generator."
+)
 GLUE_FIXTURE = (
     "With --glue: the base fixture shrinks to n - n/100 - n/4000 nodes and n/100 Glue tables in n/4000 Glue "
     "databases of the data-lake topic, IDs as the AWS collector "
@@ -176,7 +186,8 @@ GLUE_FIXTURE = (
     "topic=data-lake (their tables inherit it as metadata, as the collector does), else tables inherit their "
     "S3 location bucket's topic tag when it has one; database names carry data-lake tokens. Data-lake roles get "
     "1-12 table grants (70% read) and a database read, 65% used; 5% of other roles get 1-3 unused Glue "
-    "over-grants. Glue comes from a separate seeded generator; the base generator is unchanged."
+    "over-grants. Glue comes from a separate seeded generator; the base generator is unchanged. "
+    + LF_TAG_FIXTURE
 )
 GLUE_ACCOUNT = "123456789012"  # = CLOUDTRAIL_ACCOUNT, so CloudTrail Glue events resolve to these IDs.
 _GLUE_READ = {NodeType.TABLE: ["glue:GetTable", "glue:GetPartitions"], NodeType.DATABASE: ["glue:GetDatabase"]}
@@ -296,6 +307,82 @@ def _plant_glue(
                 if (peer, item) in over:
                     over.add((role, item))
     return added
+
+
+def _plant_lf_tags(seed, nodes, added, roles_by_topic, hubs, grants, used, duplicates):
+    """LF-Tags and tag-expression grants of ``LF_TAG_FIXTURE`` on the planted Glue part.
+
+    Returns ``({(role, table): (edge type, actions, expression)}, truth)``; tags go on the
+    nodes' metadata in place. Uses its own generator, so nothing planted before changes.
+    """
+    rng = random.Random(seed + 104729)
+    glue = set(added)
+    by_id = {node.id: node for node in nodes if node.id in glue}
+    databases = sorted(item for item in added if ":database/" in item)
+    governed = sorted(rng.sample(databases, max(1, len(databases) // 3)))
+    zone_of = {
+        db: next((zone for zone in _GLUE_ZONES if f"_{zone}_" in by_id[db].name), _GLUE_ZONES[0])
+        for db in governed
+    }
+    iam_granted = {item for role_grants in grants.values() for item in role_grants if item in glue}
+    tables: list[tuple[str, str, str]] = []  # (table, zone, tier)
+    for db in governed:
+        by_id[db].metadata.update(
+            lf_tags=["domain=data-lake", f"zone={zone_of[db]}"], lakeformation_mode="lakeformation"
+        )
+    for item in added:
+        database = by_id[item].metadata.get("database")
+        if ":table/" not in item or database not in zone_of:
+            continue
+        tier = rng.choice(("gold", "silver", "bronze"))
+        metadata = by_id[item].metadata
+        metadata.update(
+            lf_tags=["domain=data-lake", f"tier={tier}", f"zone={zone_of[database]}"],
+            lakeformation_mode="iam_allowed_principals" if item in iam_granted else "lakeformation",
+        )
+        if rng.random() < 0.1:
+            metadata["lf_tagged_columns"] = 1
+        tables.append((item, zone_of[database], tier))
+    excluded = set(hubs) | set(duplicates) | set(duplicates.values())
+    roles = sorted(role for role in roles_by_topic["data-lake"] if role not in excluded)
+    zones = sorted(set(zone_of.values()))
+    lf: dict[tuple[str, str], tuple[EdgeType, list[str], str]] = {}
+    holders = []
+    for role in roles:
+        if rng.random() >= 0.15:
+            continue
+        zone = rng.choice(zones)
+        expression = f"domain=data-lake AND tier=gold AND zone={zone}"
+        holders.append(role)
+        for item, table_zone, tier in tables:
+            if table_zone == zone and tier == "gold" and item not in grants[role]:
+                lf[(role, item)] = (
+                    EdgeType.READ,
+                    ["lakeformation:DESCRIBE", "lakeformation:SELECT"],
+                    expression,
+                )
+                if rng.random() < 0.65:
+                    used[role].add(item)
+    broad = rng.choice([role for role in roles if role not in holders])
+    over_broad = []
+    for item, _, _ in tables:
+        if item not in grants[broad]:
+            lf[(broad, item)] = (EdgeType.READ, ["lakeformation:SELECT"], "domain=data-lake")
+            if item not in used[broad]:
+                over_broad.append(item)
+    truth = {
+        "governed_databases": len(governed),
+        "tagged_tables": len(tables),
+        "lakeformation_governed_tables": sum(
+            by_id[item].metadata["lakeformation_mode"] == "lakeformation" for item, _, _ in tables
+        ),
+        "tag_grant_roles": len(holders) + 1,
+        "tag_grant_pairs": len(lf),
+        "over_broad_role": broad,
+        "over_broad_expression": "domain=data-lake",
+        "over_broad_pairs": sorted([broad, item] for item in over_broad),
+    }
+    return lf, truth
 
 
 def generate_topics(
@@ -460,6 +547,8 @@ def generate_topics(
         assumes[identity], assume_used[identity] = chosen, used_roles
 
     glue_items: set[str] = set()
+    lf_grants: dict = {}
+    lf_truth: dict = {}
     if glue:
         added = _plant_glue(
             glue_size or n, seed, nodes, kind_of, topic_of, data_by_topic, roles_by_topic, set(hubs), grants, used, over,
@@ -467,6 +556,9 @@ def generate_topics(
         )
         glue_items = set(added)
         data = data + added
+        lf_grants, lf_truth = _plant_lf_tags(
+            seed, nodes, added, roles_by_topic, set(hubs), grants, used, duplicates
+        )
     edges: dict[str, Edge] = {}
 
     def add(source, target, kind, actions):
@@ -486,6 +578,15 @@ def generate_topics(
                 add(role, item, EdgeType.READ, list(read[kind]))
             else:
                 add(role, item, EdgeType.WRITE, list(write[kind]))
+    for (role, item), (kind, actions, expression) in sorted(lf_grants.items()):
+        edge = Edge(
+            source=role,
+            target=item,
+            type=kind,
+            actions=actions,
+            evidence=[f"lakeformation: lf-tag {expression}"],
+        )
+        edges.setdefault(edge.id, edge)
     snapshot = GraphSnapshot.model_construct(
         nodes=nodes, edges=list(edges.values()), warnings=[], source="snapshot"
     )
@@ -501,6 +602,8 @@ def generate_topics(
         "duplicate_of": dict(sorted(duplicates.items())),
         "dormant_identities": sorted(dormant),
     }
+    if glue:
+        truth["lf_tag"] = lf_truth
     usage = {
         "seed": seed,
         "window_days": 90,

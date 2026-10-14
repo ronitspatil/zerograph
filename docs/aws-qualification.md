@@ -118,9 +118,53 @@ only after the IAM and S3 inventory:
   `unknown` and IAM edges stand (over-stated, never under-stated). Proposals to
   remove a grant that a Lake Formation permission contributes to are always
   `manual` (never-auto reason `lakeformation`: revoke it in Lake Formation, not
-  IAM). LF-Tag based grants, catalog and data-location grants and principals
-  outside the inventory (other accounts, SAML, Identity Center) are counted and
-  warned about, not resolved.
+  IAM). Catalog and data-location grants and principals outside the inventory
+  (other accounts, SAML, Identity Center) are counted and warned about, not
+  resolved.
+- **LF-Tag grants (LF-TBAC).** Only when `ListPermissions` returns a tag-expression
+  grant (`LFTagPolicy` resource), the collector reads the catalog's LF-Tags
+  (`ListLFTags`, 1,000 per page), their assignments with one
+  `SearchDatabasesByLFTags` and one `SearchTablesByLFTags` per tag key (up to 50
+  values per search, 100 results per page; requests scale with tags, not tables),
+  and saved expressions (`ListLFTagExpressions`) when a grant names one
+  (`ExpressionName`). An expression is an AND across keys and an OR within a key's
+  values (`*` matches any value). A table's tags in force are its database's,
+  overridden per key by the table's own; a column's are the table's, overridden by
+  the column's. `TABLE` expressions resolve to every inventoried table they match
+  and `DATABASE` expressions to every matching database. When only some columns
+  match (a column overrides a key, either way) the grant is `lf-tag column-scoped`
+  partial access. The result is the same `CAN_READ`/`CAN_WRITE` edges as named
+  grants (`lakeformation:SELECT`...), with evidence
+  `lakeformation: lf-tag domain=sales AND tier=(gold OR silver)` (a saved expression
+  is prefixed with its name); `IAM_ALLOWED_PRINCIPALS` granted by tag puts the
+  matched tables in hybrid mode, as a named grant does. Tables and databases get
+  `lf_tags` metadata (`key=value`, tags in force) and `lf_tagged_columns`. Grants on
+  the tags themselves (`LFTag`, `LFTagExpression` resources: `ASSOCIATE`,
+  `DESCRIBE`) administer tags, not data, and are only counted. If any
+  tag-expression grant cannot be resolved for want of tag data (denied or
+  truncated tags, assignments or saved expressions, or the expression bound), Lake
+  Formation mode is `unknown` for every table and IAM edges stand (warning
+  `lakeformation_lf_tag_unresolved`): over-stated, never under-stated. Malformed or
+  empty expressions match nothing and are counted as unresolved. Tables tagged only
+  at column level are found only if Lake Formation's table search returns them;
+  live qualification must confirm that.
+- **Partial grants.** Column grants (`TableWithColumns`), data cells filter grants
+  (`DataCellsFilter`) and column LF-Tag grants give part of a table: their edges
+  say `lakeformation: partial access only ... not the whole table`, filter grants
+  name the filter (`lakeformation: data cells filter eu_rows (rows or cells
+  filtered)`) and the table counts them in `lakeformation_data_filter_grants`. A
+  whole-table grant beside them makes the edge whole. Row filter expressions are
+  not read. Proposals touching them are `manual` (Lake Formation grants).
+- **Cross-account catalogs.** A grant whose resource is in another account's
+  catalog (`CatalogId`, or a filter's `TableCatalogId`, is another 12-digit
+  account; for example a database shared through RAM) becomes a Lake
+  Formation-only edge to an `external` node: a `Database` or `DataTable` with
+  `account_id` the owning account and metadata `external: true`,
+  `lakeformation_mode: external`; its evidence says the owner changes it there.
+  IAM is not evaluated against the other catalog. Proposals touching those edges
+  are `manual` (never-auto reason `lakeformation`); nothing proposes changing the
+  other account's resources. External nodes share the `max_glue_tables` bound
+  (warning `lakeformation_external_truncated`).
 - **Athena workgroups.** `ListWorkGroups` (50 per page) and `GetWorkGroup` become
   `QueryWorkgroup` nodes (not data assets) with state, engine version, whether
   the configuration is enforced and the result location (`output_bucket` when
@@ -128,24 +172,39 @@ only after the IAM and S3 inventory:
 
 Glue and Lake Formation only list what the collector may see: in a Lake
 Formation-governed catalog, `GetTables` and `ListPermissions` return only
-resources the caller holds permissions on. Make the collector role a Lake
+resources the caller holds permissions on, and the LF-Tag listing and searches
+return only tags the caller may describe. Make the collector role a Lake
 Formation **read-only administrator** (`ReadOnlyAdmins` in the data lake
-settings) so the inventory is complete; that grants no data access.
+settings) so the inventory is complete; that grants no data access. The LF-Tag
+searches may also need Glue read access to the tables they return (the template's
+`glue:GetDatabases`/`glue:GetTables`); these actions are taken from the SDK model,
+not yet from a live account, so a live qualification must confirm the exact set.
 
 Bounds (per collection; beyond them the data lake part is **truncated with a
 warning**, never the whole collection): `max_glue_databases` 100 (hard 1,000),
 `max_glue_tables` 2,000 (10,000), `max_lakeformation_permissions` 10,000
-(50,000), `max_athena_workgroups` 50 (500). The data lake phase runs last and
+(50,000), `max_athena_workgroups` 50 (500), `max_lf_tags` 1,000 tag keys (5,000),
+`max_lf_tag_assignments` 10,000 tagged databases and tables (50,000) and
+`max_lf_tag_expressions` 1,000 saved and distinct resolved expressions (5,000);
+beyond the LF-Tag bounds the warnings are `lakeformation_lf_tags_truncated`,
+`lakeformation_lf_tag_assignments_truncated` and
+`lakeformation_lf_tag_expressions_truncated`, and modes become `unknown`. The data lake phase runs last and
 shares the request, page, evaluation and edge budgets; if one runs out there it
 stops with warning `data_lake_budget` or `data_lake_edges_truncated` and keeps
 everything collected before. Every denial or service error is a warning with
 coverage `unknown` (`glue_catalog_unknown`, `glue_tables_unknown`,
 `glue_tags_unknown`, `glue_resource_policy_unknown`, `lakeformation_settings_unknown`,
-`lakeformation_permissions_unknown`, `athena_workgroups_unknown`); malformed pages
-and repeated continuation tokens still fail closed. The artifact adds
-`coverage.data_lake` (inventory status, modes per table, unresolved grants) and
-counts `glue_databases`, `glue_tables`, `athena_workgroups` and
-`lakeformation_permissions`, never names.
+`lakeformation_permissions_unknown`, `lakeformation_lf_tags_unknown`,
+`lakeformation_lf_tag_assignments_unknown`, `lakeformation_lf_tag_expressions_unknown`,
+`athena_workgroups_unknown`); malformed pages and repeated continuation tokens still
+fail closed. The artifact adds `coverage.data_lake` (inventory status, modes per
+table, unresolved grants; LF-Tag stages `lakeformation_lf_tags`,
+`lakeformation_lf_tag_assignments`, `lakeformation_lf_tag_expressions` as
+`not_needed`/`complete`/`truncated`/`unknown`; `lakeformation_lf_tag_grants`
+resolved/unresolved/matched resources; data filter, external and tag
+administration grant counts) and counts `glue_databases`, `glue_tables`,
+`athena_workgroups`, `lakeformation_permissions`, `lakeformation_lf_tags` and
+`lakeformation_lf_tag_assignments`, never names.
 
 Tests use synthetic credentials with botocore Stubber and mocks; live authentication,
 permissions, regional behavior and account-scale timing remain qualification gates.
@@ -187,6 +246,8 @@ SDK calls match the supplied permissions:
 | GetDatabases / GetTables (optional) | glue:GetDatabases / glue:GetTables | catalog, `database/*`, `table/*/*` ARNs |
 | GetTags (optional) | glue:GetTags | database ARNs |
 | GetDataLakeSettings / ListPermissions (optional) | lakeformation:GetDataLakeSettings / lakeformation:ListPermissions | `*` |
+| ListLFTags / ListLFTagExpressions (optional, only with LF-Tag grants) | lakeformation:ListLFTags / lakeformation:ListLFTagExpressions | `*` |
+| SearchDatabasesByLFTags / SearchTablesByLFTags (optional, only with LF-Tag grants) | lakeformation:SearchDatabasesByLFTags / lakeformation:SearchTablesByLFTags | `*` |
 | ListWorkGroups (optional) | athena:ListWorkGroups | `*` |
 | GetWorkGroup (optional) | athena:GetWorkGroup | workgroup ARNs |
 

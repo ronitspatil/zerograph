@@ -218,6 +218,8 @@ def collector(limits: CollectionLimits | None = None):
         }
     }
     lf.list_permissions.return_value = {"PrincipalResourcePermissions": lf_permissions()}
+    # No LF-Tags defined: the one (empty) tag-expression grant matches nothing.
+    lf.list_lf_tags.return_value = {"LFTags": []}
     athena.list_work_groups.return_value = {"WorkGroups": [{"Name": "analysts", "State": "ENABLED"}]}
     athena.get_work_group.return_value = {
         "WorkGroup": {
