@@ -14,6 +14,26 @@ def test_metadata_classification_and_no_downgrade():
 
 
 @pytest.mark.parametrize(
+    ("fields", "labels"),
+    [
+        # Glue columns are snake_case or camelCase; found against an emulated Glue catalog,
+        # where ``user_email`` and ``card_number`` beside other words were not classified.
+        (["event_id", "user_email", "payload"], {"PII"}),
+        (["customer_ssn"], {"PII"}),
+        (["phone_number", "date_of_birth"], {"PII"}),
+        (["userEmail", "customerSSN"], {"PII"}),
+        (["entry_id", "customer_card_number", "amount"], {"PCI"}),
+        (["patient_id"], {"PHI"}),
+        (["db_password", "stripeApiKey"], {"Credentials"}),
+        (["s3://lake/emails.parquet"], set()),  # "emails" is another word
+        (["company", "span_id", "adobe_id", "secretary"], set()),
+    ],
+)
+def test_classification_terms_match_snake_and_camel_case_words(fields, labels):
+    assert set(classify_metadata(fields).tags) == labels
+
+
+@pytest.mark.parametrize(
     ("key", "value", "labels", "sensitivity"),
     [
         ("data-class", "PII", {"PII"}, Sensitivity.CONFIDENTIAL),

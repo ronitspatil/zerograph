@@ -16,13 +16,22 @@ class Classification:
     basis: str = "metadata_heuristic"
 
 
+# A term counts only as a whole word: letters or digits around it continue another word, but
+# "_", "-", "." and spaces separate words, so snake_case Glue columns (``user_email``,
+# ``customer_ssn``) match; camelCase is split first (``userEmail``).
+WORD = r"(?<![a-z0-9])({})(?![a-z0-9])"
+CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 RULES = {
     "PII": re.compile(
-        r"\b(email|e-mail|ssn|social[_ -]?security|passport|phone|date[_ -]?of[_ -]?birth|dob)\b", re.I
+        WORD.format(r"email|e-mail|ssn|social[_ -]?security|passport|phone|date[_ -]?of[_ -]?birth|dob"), re.I
     ),
-    "PCI": re.compile(r"\b(card[_ -]?number|credit[_ -]?card|cvv|pan|payment[_ -]?card)\b", re.I),
-    "PHI": re.compile(r"\b(patient|diagnosis|medical[_ -]?record|health[_ -]?record|prescription)\b", re.I),
-    "Credentials": re.compile(r"\b(password|api[_ -]?key|private[_ -]?key|access[_ -]?token|secret)\b", re.I),
+    "PCI": re.compile(WORD.format(r"card[_ -]?number|credit[_ -]?card|cvv|pan|payment[_ -]?card"), re.I),
+    "PHI": re.compile(
+        WORD.format(r"patient|diagnosis|medical[_ -]?record|health[_ -]?record|prescription"), re.I
+    ),
+    "Credentials": re.compile(
+        WORD.format(r"password|api[_ -]?key|private[_ -]?key|access[_ -]?token|secret"), re.I
+    ),
 }
 
 
@@ -69,7 +78,7 @@ def classify_metadata(
 ) -> Classification:
     """Labels from metadata words and, when given, explicit ``(key, value)`` classification tags."""
     # Only labels/schema metadata are accepted. Matched values are never returned or logged.
-    text = " ".join(fields)[:20000]
+    text = CAMEL.sub(" ", " ".join(fields)[:20000])
     labels = {tag for tag, pattern in RULES.items() if pattern.search(text)}
     if analyzer is not None:
         for result in analyzer.analyze(text=text, language="en"):
