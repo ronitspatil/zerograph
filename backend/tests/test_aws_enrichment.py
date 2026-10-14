@@ -264,6 +264,27 @@ def test_access_advisor_denial_is_a_warning_not_a_failure():
     assert all("access_advisor" not in n.metadata for n in snapshot.nodes)
 
 
+def test_unparsable_optional_responses_are_warnings_but_required_inventory_fails_closed():
+    """Found against a local AWS emulator: an HTML error page (botocore ``ResponseParserError``,
+    not a ``BotoCoreError``) from an optional call aborted the whole collection."""
+    from botocore.parsers import ResponseParserError
+
+    unparsable = ResponseParserError("Unable to parse response (syntax error), invalid XML received")
+    c, iam = collector(access_advisor=True, sleep=lambda _: None)
+    iam.generate_service_last_accessed_details.side_effect = unparsable
+    c.organizations.describe_organization.side_effect = unparsable
+    c.s3.get_bucket_encryption.side_effect = unparsable
+    snapshot = c.collect()
+    assert c.warning_counts["access_advisor_unknown"] == 1
+    assert c.warning_counts["organizations_unknown"] == 1
+    assert c.coverage["encryption_configuration"]["unknown"] == 1
+    assert node(snapshot, ROLE).metadata["policy_count"] == 2
+    c, iam = collector()
+    iam.get_account_authorization_details.side_effect = unparsable
+    with pytest.raises(Exception, match="Unparsable AWS response to get_account_authorization_details"):
+        c.collect()
+
+
 def test_botocore_model_accepts_user_group_tag_and_last_used_shapes():
     import boto3
     from botocore.stub import Stubber
