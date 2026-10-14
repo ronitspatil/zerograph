@@ -503,6 +503,13 @@ def compute_privilege(context: PrivilegeContext, usage: UsageInput | None) -> di
     types = graph.types
     attributed_use = usage.attributed
 
+    # Roles whose session use is not attributed well enough (computed once; see role_attributed).
+    weak_roles = (
+        {r for r, (got, total) in usage.role_sessions.items() if total and got < usage.attribution_share * total}
+        if usage.attribution_ready
+        else set()
+    )
+
     def identity_used(node: int, holders: frozenset[int], reach: frozenset[int], skip) -> tuple[int, int]:
         """(weight, count) of data ``node`` used itself, in its own attributed sessions of
         attribution-sufficient roles, and role-level through the other roles of ``reach``."""
@@ -510,14 +517,19 @@ def compute_privilege(context: PrivilegeContext, usage: UsageInput | None) -> di
         for member in reach:
             if member == node or member in skip:
                 continue
-            if types[member] == ROLE_TYPE and usage.role_attributed(member):
+            if types[member] == ROLE_TYPE and member not in weak_roles:
                 continue
             items |= data_used.get(member, ())
+        found: set[int] = {item for item in items if granted(item, holders)} if items else set()
         for role, used_items in attributed_use.get(node, {}).items():
-            if role not in skip and usage.role_attributed(role):
-                items |= used_items
-        items = {item for item in items if granted(item, holders)}
-        return sum(weight[item] for item in items), len(items)
+            if role in skip or role in weak_roles:
+                continue
+            # A role the identity reaches as a holder grants its own grants without a search.
+            own_grants = direct.get(role, ()) if role in holders else ()
+            for item in used_items:
+                if item not in found and (item in own_grants or granted(item, holders)):
+                    found.add(item)
+        return sum(weight[item] for item in found), len(found)
 
     for node, row in context.identity_rows.items():
         holders = holders_of[node]

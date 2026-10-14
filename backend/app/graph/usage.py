@@ -631,10 +631,27 @@ def observed(db: Session, tenant: str):
     )
 
 
-def observed_triples(db: Session, tenant: str):
+def _fetch(db: Session, statement) -> list[tuple]:
+    """All rows of ``statement`` through the DBAPI cursor: the publish-time usage reads are
+    hundreds of thousands of plain string tuples, where result-row processing dominates."""
+    connection = db.connection()
+    compiled = statement.compile(dialect=connection.dialect)
+    params = compiled.params
+    if compiled.positional:
+        params = tuple(params[name] for name in compiled.positiontup)
+    cursor = connection.connection.cursor()
+    try:
+        cursor.execute(str(compiled), params)
+        return cursor.fetchall()
+    finally:
+        cursor.close()
+
+
+def observed_triples(db: Session, tenant: str) -> list[tuple]:
     """``(principal, resource, action class)`` of every committed upload, one row per distinct
-    (principal, resource, class, service) as ``observed`` aggregates them (Core rows, no ORM)."""
-    return db.connection().execute(
+    (principal, resource, class, service) as ``observed`` aggregates them."""
+    return _fetch(
+        db,
         select(ObservedAccess.principal_id, ObservedAccess.resource_id, ObservedAccess.action_class)
         .where(ObservedAccess.tenant_id == tenant)
         .group_by(
@@ -642,33 +659,35 @@ def observed_triples(db: Session, tenant: str):
             ObservedAccess.resource_id,
             ObservedAccess.action_class,
             ObservedAccess.service,
-        )
+        ),
     )
 
 
-def attribution_counts(db: Session, tenant: str):
+def attribution_counts(db: Session, tenant: str) -> list[tuple]:
     """``(role, attributed events, session events)`` per role over committed uploads."""
-    return db.connection().execute(
+    return _fetch(
+        db,
         select(
             AttributedAccess.role_id,
             func.sum(AttributedAccess.count).filter(AttributedAccess.identity_id != ""),
             func.sum(AttributedAccess.count),
         )
         .where(AttributedAccess.tenant_id == tenant)
-        .group_by(AttributedAccess.role_id)
+        .group_by(AttributedAccess.role_id),
     )
 
 
-def attributed_pairs(db: Session, tenant: str):
+def attributed_pairs(db: Session, tenant: str) -> list[tuple]:
     """``(identity, role, resource, action class)`` of attributed use (unaggregated: a pair
-    may repeat across uploads and bases; Core rows, no ORM)."""
-    return db.connection().execute(
+    may repeat across uploads and bases)."""
+    return _fetch(
+        db,
         select(
             AttributedAccess.identity_id,
             AttributedAccess.role_id,
             AttributedAccess.resource_id,
             AttributedAccess.action_class,
-        ).where(AttributedAccess.tenant_id == tenant, AttributedAccess.identity_id != "")
+        ).where(AttributedAccess.tenant_id == tenant, AttributedAccess.identity_id != ""),
     )
 
 

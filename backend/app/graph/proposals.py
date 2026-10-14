@@ -532,10 +532,11 @@ def compute_proposals(
             used_roles = assumed.get(node, set()) | usage.attributed_roles.get(node, set())
             own_use = data_used.get(node, ())
             for role in sorted(assumes[node] - used_roles, key=ids.__getitem__):
-                behind = set()
-                for holder in holders_of.get(role, ()) | ({role} if role in direct else set()):
-                    behind |= direct.get(holder, set())
-                if any(item in behind for item in own_use):
+                if own_use and any(
+                    item in direct.get(holder, ())
+                    for holder in holders_of.get(role, frozenset()) | {role}
+                    for item in own_use
+                ):
                     guards["unassume_skipped_observed"] += 1
                     continue
                 attributed_role = usage.role_attributed(role)
