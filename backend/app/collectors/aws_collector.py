@@ -1,5 +1,8 @@
 """Bounded, read-only IAM (roles, users, groups) and S3-metadata inventory; never confirmed access.
 
+With ``data_lake`` it also inventories the Glue Data Catalog, Lake Formation
+permissions and Athena workgroups (``app.collectors.aws_datalake``).
+
 Besides the graph, a collection keeps what the optimizer needs as evidence: raw role,
 user and bucket tags (``key=value``), each role's ``RoleLastUsed`` and (optionally)
 IAM Access Advisor service last-accessed data as **hints** in node metadata, and
@@ -25,6 +28,7 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
+from app.collectors.aws_datalake import DataLakeInventory
 from app.collectors.data_classifier import enrich_node
 from app.collectors.execution_audit import AccessAdvisorCollector
 from app.collectors.iam_evaluator import Decision, Request, evaluate
@@ -59,6 +63,13 @@ HARD_LIMITS = {
     "max_seconds": 600,
     "max_policy_attachments": MAX_SNAPSHOT_POLICIES,
     "max_access_advisor_jobs": 1000,
+    "max_glue_databases": 1000,
+    "max_glue_tables": 10000,
+    "max_lakeformation_permissions": 50000,
+    "max_athena_workgroups": 500,
+    "max_lf_tags": 5000,
+    "max_lf_tag_assignments": 50000,
+    "max_lf_tag_expressions": 5000,
 }
 MAX_TAGS = 32  # Node.tags bound; raw tags beyond it are dropped and counted.
 ACCESS_ADVISOR_POLLS = 10
@@ -98,6 +109,16 @@ class CollectionLimits:
     max_seconds: int = 600
     max_policy_attachments: int = 10000
     max_access_advisor_jobs: int = 200
+    # Data lake inventory (optional): beyond these it is truncated with a warning.
+    max_glue_databases: int = 100
+    max_glue_tables: int = 2000
+    max_lakeformation_permissions: int = 10000
+    max_athena_workgroups: int = 50
+    # LF-Tag resolution: tag keys (ListLFTags), tagged databases/tables read from the
+    # tag searches, and distinct tag expressions resolved (inline or named).
+    max_lf_tags: int = 1000
+    max_lf_tag_assignments: int = 10000
+    max_lf_tag_expressions: int = 1000
 
     def __post_init__(self):
         for key, value in asdict(self).items():
@@ -212,6 +233,7 @@ class AWSCollector:
         expected_account: str | None = None,
         expected_role_arn: str | None = None,
         access_advisor: bool = False,
+        data_lake: bool = False,
         sleep=time.sleep,
     ):
         self.session, self.limits = session, limits or CollectionLimits()
@@ -220,6 +242,12 @@ class AWSCollector:
         self.s3 = session.client("s3", config=SDK_CONFIG)
         self.sts = session.client("sts", config=SDK_CONFIG)
         self.organizations = session.client("organizations", config=SDK_CONFIG)
+        # Glue Data Catalog, Lake Formation and Athena in the session's region (optional).
+        self.data_lake = data_lake
+        if data_lake:
+            self.glue = session.client("glue", config=SDK_CONFIG)
+            self.lakeformation = session.client("lakeformation", config=SDK_CONFIG)
+            self.athena = session.client("athena", config=SDK_CONFIG)
         self.expected_account, self.expected_role_arn = expected_account, expected_role_arn
         self._reset()
 
@@ -248,6 +276,10 @@ class AWSCollector:
         self.counts = {"roles": 0, "users": 0, "groups": 0, "buckets": 0, "edges": 0, "evaluations": 0}
         self.attachments: list[PolicyAttachment] = []
         self.attachment_ids: set[str] = set()
+
+    @staticmethod
+    def incomplete(message: str) -> "CollectionIncomplete":
+        return CollectionIncomplete(message)
 
     def _warning(self, code: str, message: str):
         if code not in self.warning_counts:
@@ -829,11 +861,22 @@ class AWSCollector:
                             ],
                         ),
                     )
+        if self.data_lake:
+            # Last, so it can only truncate itself: earlier phases keep their whole budgets.
+            DataLakeInventory(self, account, partition).collect(nodes, edges, principals)
         self.counts["edges"] = len(edges)
         self.counts["policy_attachments"] = len(self.attachments)
         self._warning(
             "scope_incomplete",
-            "Initial AWS scope: IAM roles, users and groups and general-purpose S3 metadata; no object contents, cross-account inventory or database grants; RCPs, VPC endpoint policies, ACLs and session policies are not collected; all AWS edges conditional; RoleLastUsed and Access Advisor are hints, never proof of non-use",
+            "Initial AWS scope: IAM roles, users and groups and general-purpose S3 metadata"
+            + (
+                ", plus Glue Data Catalog, Lake Formation and Athena workgroups in the collector's region"
+                if self.data_lake
+                else ""
+            )
+            + "; no object contents, query results, cross-account inventory or relational database grants; "
+            "RCPs, VPC endpoint policies, ACLs, LF-Tag grants and session policies are not collected; all AWS "
+            "edges conditional; RoleLastUsed and Access Advisor are hints, never proof of non-use",
         )
         return GraphSnapshot(
             nodes=list(nodes.values()),
@@ -876,6 +919,14 @@ def access_advisor_default() -> bool:
     return TypeAdapter(bool).validate_python(value) if value else False
 
 
+def data_lake_default() -> bool:
+    """``ZG_AWS_DATA_LAKE`` parsed as ``Settings.aws_data_lake`` is (default true)."""
+    from pydantic import TypeAdapter
+
+    value = os.environ.get("ZG_AWS_DATA_LAKE", "").strip()
+    return TypeAdapter(bool).validate_python(value) if value else True
+
+
 def expected_target(role_arn: str, account: str = "") -> tuple[str, str]:
     """``(expected_account, expected_role_arn)`` the STS caller identity must match.
 
@@ -909,11 +960,21 @@ def main() -> None:
         default=None,
         help="Collect IAM Access Advisor hints (default: ZG_AWS_ACCESS_ADVISOR, as the in-app collector)",
     )
+    parser.add_argument(
+        "--data-lake",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Collect Glue Data Catalog, Lake Formation and Athena (default: ZG_AWS_DATA_LAKE, true)",
+    )
     args = parser.parse_args()
     try:
         access_advisor = access_advisor_default() if args.access_advisor is None else args.access_advisor
     except ValueError:
         parser.error("ZG_AWS_ACCESS_ADVISOR must be a boolean")
+    try:
+        data_lake = data_lake_default() if args.data_lake is None else args.data_lake
+    except ValueError:
+        parser.error("ZG_AWS_DATA_LAKE must be a boolean")
     match = ROLE_ARN.fullmatch(args.role_arn)
     if (
         not match
@@ -968,6 +1029,7 @@ def main() -> None:
             expected_account=args.account,
             expected_role_arn=args.role_arn,
             access_advisor=access_advisor,
+            data_lake=data_lake,
         )
         collector.collect()  # STS target confirmation is checked before any inventory call.
         artifact = collector.qualification_artifact(

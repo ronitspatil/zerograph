@@ -6,12 +6,12 @@ the observed access and the proposals' stored changes (edge pairs and disabled n
 
 from collections import defaultdict
 
-DATA = {"Database", "VectorStore", "S3Bucket"}
+DATA = {"Database", "VectorStore", "S3Bucket", "DataTable"}
 GRANTS = {"CAN_READ", "CAN_WRITE"}
 HOPS = {"ASSUMES_ROLE", "INHERITS_PERMISSIONS", "INVOKES_TOOL"}
 WEIGHTS = {"public": 1, "internal": 2, "confidential": 5, "restricted": 10}
 MAX_HOPS = 5
-NEVER_AUTO_TYPES = {"merge_roles", "split_role", "scope_wildcard"}
+NEVER_AUTO_TYPES = {"merge_roles", "split_role", "scope_wildcard", "remove_assumption"}
 
 
 def structure(snapshot):

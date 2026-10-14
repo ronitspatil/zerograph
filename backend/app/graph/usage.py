@@ -14,10 +14,24 @@ Each committed upload attests coverage per service over its declared window
 then can observed use stand for needed access. Otherwise the privilege analysis
 falls back to an inferred peer baseline. IAM Access Advisor and ``RoleLastUsed``
 stay hints in node metadata: they are never sufficient on their own.
+
+**Attribution.** Role-level rows credit a role's use to the role. At commit, each
+role-session access is also attributed to the principal that assumed the role
+(``attribute``): the session's key is matched to the upload's in-window ``AssumeRole*``
+issuance and the chain is followed through role chaining (at most ``MAX_CHAIN``
+sessions) to its root principal. An ``onBehalfOf`` user (IAM Identity Center) takes
+precedence; a ``sourceIdentity`` that only one root principal set in the upload is a
+fallback for a session whose key is unknown, and a session ARN that only one root
+principal used is one for an event without a key.
+Sessions that cannot be attributed (``AssumeRole`` outside the window or upload, a
+broken or too deep chain) are stored as ``unattributed`` and keep role-level credit.
+Attribution is per upload: a session issued in one upload and used in another is
+unattributed.
 """
 
 import hashlib
 import json
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -29,8 +43,11 @@ from app.collectors.cloudtrail import Normalized
 from app.collectors.execution_audit import SERVICES
 from app.db.models import (
     AccessDenial,
+    AttributedAccess,
     ObservedAccess,
     UsageCoverage,
+    UsageSessionIssued,
+    UsageSessionStaged,
     UsageStaged,
     UsageUpload,
     UsageUploadChunk,
@@ -44,6 +61,10 @@ MAX_CHUNKS = 10_000
 MAX_UPLOAD_PAIRS = 5_000_000
 CONTIGUOUS_GAP = timedelta(days=1)
 INSERT_BATCH = 5000
+MAX_CHAIN = 5  # Role sessions followed per assumption chain (= the graph hop bound).
+ATTRIBUTION_BASES = ("session", "on-behalf-of", "session-arn", "source-identity", "unattributed")
+UNATTRIBUTED = "unattributed"
+STAGING = (UsageStaged, UsageUploadChunk, AccessDenial, UsageSessionIssued, UsageSessionStaged)
 COUNT_KEYS = (
     "records",
     "matched",
@@ -65,8 +86,8 @@ def utc(value: datetime) -> datetime:
 
 
 def stage_chunk(db: Session, upload: UsageUpload, chunk: int, size: int, normalized: Normalized) -> None:
-    """Replace one file's staged aggregates, denied attempts and classification counts."""
-    for model in (UsageStaged, UsageUploadChunk, AccessDenial):
+    """Replace one file's staged aggregates, role sessions, denied attempts and counts."""
+    for model in STAGING:
         db.execute(delete(model).where(model.upload_id == upload.id, model.chunk == chunk))
     denials = [
         {
@@ -105,6 +126,52 @@ def stage_chunk(db: Session, upload: UsageUpload, chunk: int, size: int, normali
             batch = []
     if batch:
         db.execute(insert(UsageStaged), batch)
+    issued = [
+        {
+            "upload_id": upload.id,
+            "chunk": chunk,
+            "ordinal": ordinal,
+            "access_key": key,
+            "session_arn": arn,
+            "role_id": role,
+            "principal_id": principal,
+            "parent_key": parent,
+            "parent_role": parent_role,
+            "source_identity": source,
+            "issued_at": issued_at,
+        }
+        for ordinal, (key, (arn, role, principal, parent, parent_role, source, issued_at)) in enumerate(
+            sorted(normalized.issued.items())
+        )
+    ]
+    for start in range(0, len(issued), INSERT_BATCH):
+        db.execute(insert(UsageSessionIssued), issued[start : start + INSERT_BATCH])
+    batch = []
+    for ordinal, (key, (first, last, count)) in enumerate(normalized.sessions.items()):
+        role, access_key, arn, source, behalf, resource, action_class, service = key
+        batch.append(
+            {
+                "upload_id": upload.id,
+                "chunk": chunk,
+                "ordinal": ordinal,
+                "role_id": role,
+                "access_key": access_key,
+                "session_arn": arn,
+                "source_identity": source,
+                "on_behalf_of": behalf,
+                "resource_id": resource,
+                "action_class": action_class,
+                "service": service,
+                "first_seen": first,
+                "last_seen": last,
+                "count": count,
+            }
+        )
+        if len(batch) >= INSERT_BATCH:
+            db.execute(insert(UsageSessionStaged), batch)
+            batch = []
+    if batch:
+        db.execute(insert(UsageSessionStaged), batch)
     db.add(UsageUploadChunk(upload_id=upload.id, chunk=chunk, size_bytes=size, stats=normalized.stats()))
     db.flush()
 
@@ -164,6 +231,163 @@ def coverage_rows(upload: UsageUpload, stats: dict) -> list[dict]:
     return rows
 
 
+@dataclass(frozen=True)
+class Issuance:
+    session_arn: str
+    role: str
+    principal: str
+    parent_key: str
+    parent_role: str
+    source_identity: str
+
+
+def resolve_sessions(issued: dict[str, Issuance]) -> dict[str, tuple[str, int]]:
+    """Root principal and chain depth (1 = assumed directly) of every resolvable session key.
+
+    A session assumed from another role session resolves through its parent (whose role
+    must be the parent role the call was made with); a missing parent, a cycle or a chain
+    longer than ``MAX_CHAIN`` leaves it (and its descendants) unresolved.
+    """
+    resolved: dict[str, tuple[str, int] | None] = {}
+    for start in issued:
+        chain: list[str] = []
+        current, outcome = start, None
+        while True:
+            if current in resolved:
+                outcome = resolved[current]
+                break
+            entry = issued.get(current)
+            if entry is None or current in chain or len(chain) >= MAX_CHAIN:
+                break
+            chain.append(current)
+            if entry.principal:
+                outcome = (entry.principal, 0)
+                break
+            parent = issued.get(entry.parent_key)
+            if parent is None or parent.role != entry.parent_role:
+                break
+            current = entry.parent_key
+        # ``outcome`` is the root and depth of the element after the chain (0 for a principal).
+        for key in reversed(chain):
+            if outcome is None:
+                resolved[key] = None
+                continue
+            depth = outcome[1] + 1
+            outcome = (outcome[0], depth) if depth <= MAX_CHAIN else None
+            resolved[key] = outcome
+    return {key: value for key, value in resolved.items() if value is not None}
+
+
+def attribute(db: Session, upload: UsageUpload) -> dict:
+    """Attribute the upload's staged role-session use to assuming principals; returns stats."""
+    issued: dict[str, Issuance] = {}
+    for row in db.execute(
+        select(
+            UsageSessionIssued.access_key,
+            UsageSessionIssued.session_arn,
+            UsageSessionIssued.role_id,
+            UsageSessionIssued.principal_id,
+            UsageSessionIssued.parent_key,
+            UsageSessionIssued.parent_role,
+            UsageSessionIssued.source_identity,
+        )
+        .where(UsageSessionIssued.upload_id == upload.id)
+        .order_by(UsageSessionIssued.issued_at, UsageSessionIssued.chunk, UsageSessionIssued.ordinal)
+    ):
+        issued.setdefault(row[0], Issuance(*row[1:]))
+    roots = resolve_sessions(issued)
+    # Fallbacks: a session ARN or sourceIdentity that only one root principal used.
+    by_arn: dict[str, set[str]] = {}
+    by_source: dict[str, set[str]] = {}
+    for key, (root, _) in roots.items():
+        entry = issued[key]
+        if entry.session_arn:
+            by_arn.setdefault(entry.session_arn, set()).add(root)
+        if entry.source_identity:
+            by_source.setdefault(entry.source_identity, set()).add(root)
+    depth_of_arn = {}
+    for key, (_, depth) in roots.items():
+        arn = issued[key].session_arn
+        if arn and len(by_arn.get(arn, ())) == 1:
+            depth_of_arn[arn] = max(depth_of_arn.get(arn, 0), depth)
+    aggregated: dict[tuple, list] = {}
+    events: Counter = Counter()
+    for (
+        role, key, arn, source, behalf, resource, action_class, service, first, last, count
+    ) in db.execute(
+        select(
+            UsageSessionStaged.role_id,
+            UsageSessionStaged.access_key,
+            UsageSessionStaged.session_arn,
+            UsageSessionStaged.source_identity,
+            UsageSessionStaged.on_behalf_of,
+            UsageSessionStaged.resource_id,
+            UsageSessionStaged.action_class,
+            UsageSessionStaged.service,
+            UsageSessionStaged.first_seen,
+            UsageSessionStaged.last_seen,
+            UsageSessionStaged.count,
+        )
+        .where(UsageSessionStaged.upload_id == upload.id)
+        .execution_options(yield_per=INSERT_BATCH)
+    ):  # fmt: skip
+        found = roots.get(key) if key else None
+        if behalf:
+            identity, depth, basis = behalf, (found[1] if found else 1), "on-behalf-of"
+        elif found is not None and issued[key].role == role:
+            identity, depth, basis = found[0], found[1], "session"
+        elif not key and arn and len(by_arn.get(arn, ())) == 1:
+            identity, depth, basis = next(iter(by_arn[arn])), depth_of_arn[arn], "session-arn"
+        elif source and len(by_source.get(source, ())) == 1:
+            identity, depth, basis = next(iter(by_source[source])), 0, "source-identity"
+        else:
+            identity, depth, basis = "", 0, UNATTRIBUTED
+        events[basis] += count
+        group = (identity, role, resource, action_class, service, basis)
+        row = aggregated.get(group)
+        if row is None:
+            aggregated[group] = [first, last, count, depth]
+        else:
+            row[0], row[1] = min(row[0], first), max(row[1], last)
+            row[2] += count
+            row[3] = max(row[3], depth)
+    batch = []
+    for ordinal, (group, (first, last, count, depth)) in enumerate(sorted(aggregated.items())):
+        identity, role, resource, action_class, service, basis = group
+        batch.append(
+            {
+                "tenant_id": upload.tenant_id,
+                "upload_id": upload.id,
+                "ordinal": ordinal,
+                "identity_id": identity,
+                "role_id": role,
+                "resource_id": resource,
+                "action_class": action_class,
+                "service": service,
+                "basis": basis,
+                "depth": depth,
+                "first_seen": first,
+                "last_seen": last,
+                "count": count,
+            }
+        )
+        if len(batch) >= INSERT_BATCH:
+            db.execute(insert(AttributedAccess), batch)
+            batch = []
+    if batch:
+        db.execute(insert(AttributedAccess), batch)
+    total = sum(events.values())
+    return {
+        "sessions_issued": len(issued),
+        "sessions_resolved": len(roots),
+        "session_events": total,
+        "attributed_events": total - events[UNATTRIBUTED],
+        "unattributed_events": events[UNATTRIBUTED],
+        "by_basis": {basis: events.get(basis, 0) for basis in ATTRIBUTION_BASES},
+        "rows": len(aggregated),
+    }
+
+
 def commit(db: Session, upload: UsageUpload, timestamp: datetime) -> dict:
     """Aggregate the staged files into observed access and record coverage; returns stats."""
     stats = progress(db, upload.id)
@@ -198,7 +422,10 @@ def commit(db: Session, upload: UsageUpload, timestamp: datetime) -> dict:
     rows = coverage_rows(upload, stats)
     if rows:
         db.execute(insert(UsageCoverage), rows)
-    db.execute(delete(UsageStaged).where(UsageStaged.upload_id == upload.id))
+    stats["attribution"] = attribute(db, upload)
+    for model in (UsageStaged, UsageSessionIssued, UsageSessionStaged):
+        db.execute(delete(model).where(model.upload_id == upload.id))
+    upload.attributed = True
     stats["pairs"] = pairs
     stats["coverage"] = [
         {key: row[key] for key in ("service", "attested", "events", "unmapped", "complete")} for row in rows
@@ -213,9 +440,9 @@ def delete_upload(db: Session, tenant: str, upload_id: str) -> bool:
     upload = db.get(UsageUpload, upload_id)
     if upload is None or upload.tenant_id != tenant:
         return False
-    for model in (UsageStaged, UsageUploadChunk, AccessDenial):
+    for model in STAGING:
         db.execute(delete(model).where(model.upload_id == upload_id))
-    for model in (ObservedAccess, UsageCoverage):
+    for model in (ObservedAccess, UsageCoverage, AttributedAccess):
         db.execute(delete(model).where(model.tenant_id == tenant, model.upload_id == upload_id))
     db.delete(upload)
     return True
@@ -399,6 +626,101 @@ def observed(db: Session, tenant: str):
             ObservedAccess.resource_id,
             ObservedAccess.action_class,
             ObservedAccess.service,
+        )
+        .execution_options(yield_per=INSERT_BATCH)
+    )
+
+
+def _fetch(db: Session, statement) -> list[tuple]:
+    """All rows of ``statement`` through the DBAPI cursor: the publish-time usage reads are
+    hundreds of thousands of plain string tuples, where result-row processing dominates."""
+    connection = db.connection()
+    compiled = statement.compile(dialect=connection.dialect)
+    params = compiled.params
+    if compiled.positional:
+        params = tuple(params[name] for name in compiled.positiontup)
+    cursor = connection.connection.cursor()
+    try:
+        cursor.execute(str(compiled), params)
+        return cursor.fetchall()
+    finally:
+        cursor.close()
+
+
+def observed_triples(db: Session, tenant: str) -> list[tuple]:
+    """``(principal, resource, action class)`` of every committed upload, one row per distinct
+    (principal, resource, class, service) as ``observed`` aggregates them."""
+    return _fetch(
+        db,
+        select(ObservedAccess.principal_id, ObservedAccess.resource_id, ObservedAccess.action_class)
+        .where(ObservedAccess.tenant_id == tenant)
+        .group_by(
+            ObservedAccess.principal_id,
+            ObservedAccess.resource_id,
+            ObservedAccess.action_class,
+            ObservedAccess.service,
+        ),
+    )
+
+
+def attribution_counts(db: Session, tenant: str) -> list[tuple]:
+    """``(role, attributed events, session events)`` per role over committed uploads."""
+    return _fetch(
+        db,
+        select(
+            AttributedAccess.role_id,
+            func.sum(AttributedAccess.count).filter(AttributedAccess.identity_id != ""),
+            func.sum(AttributedAccess.count),
+        )
+        .where(AttributedAccess.tenant_id == tenant)
+        .group_by(AttributedAccess.role_id),
+    )
+
+
+def attributed_pairs(db: Session, tenant: str) -> list[tuple]:
+    """``(identity, role, resource, action class)`` of attributed use (unaggregated: a pair
+    may repeat across uploads and bases)."""
+    return _fetch(
+        db,
+        select(
+            AttributedAccess.identity_id,
+            AttributedAccess.role_id,
+            AttributedAccess.resource_id,
+            AttributedAccess.action_class,
+        ).where(AttributedAccess.tenant_id == tenant, AttributedAccess.identity_id != ""),
+    )
+
+
+def attribution_ready(db: Session, tenant: str) -> bool:
+    """Every committed upload of the tenant was attributed (none predates attribution)."""
+    counts = db.execute(
+        select(func.count(), func.count().filter(UsageUpload.attributed.is_(True))).where(
+            UsageUpload.tenant_id == tenant, UsageUpload.status == "committed"
+        )
+    ).one()
+    return bool(counts[0]) and counts[0] == counts[1]
+
+
+def attributed(db: Session, tenant: str):
+    """Attributed role-session use of every committed upload.
+
+    Yields ``(identity, role, resource, action class, count)`` aggregated over uploads
+    and attribution bases; ``identity`` ``""`` is unattributed use.
+    """
+    yield from db.execute(
+        select(
+            AttributedAccess.identity_id,
+            AttributedAccess.role_id,
+            AttributedAccess.resource_id,
+            AttributedAccess.action_class,
+            func.sum(AttributedAccess.count),
+        )
+        .where(AttributedAccess.tenant_id == tenant)
+        .group_by(
+            AttributedAccess.identity_id,
+            AttributedAccess.role_id,
+            AttributedAccess.resource_id,
+            AttributedAccess.action_class,
         )
         .execution_options(yield_per=INSERT_BATCH)
     )

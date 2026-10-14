@@ -23,8 +23,15 @@ Every number is labelled with its **basis**:
   complete coverage of at least 90 contiguous days ending within 7 days
   ([usage-evidence.md](usage-evidence.md)). Used data = data observed used (read, write
   or admin) by the entity or by a role it was observed assuming (observed assumptions
-  that are graph hops, same bound), within its grants. Role usage is attributed to the
-  identities observed assuming the role.
+  that are graph hops, same bound), within its grants. For an **identity**, a role's
+  use counts only as far as it is the identity's own: when the role's **attribution
+  coverage** is sufficient (every committed upload attributed, and at least 95% of the
+  role's session events attributed to an assuming principal, see
+  [usage-evidence.md](usage-evidence.md#role-session-attribution)), the identity needs
+  only the data its own sessions of that role used (role chains included). Other roles
+  fall back to role-level credit (the role's use is credited to every identity observed
+  assuming it) and the identity is flagged `role_level`; fully attributed identities are
+  flagged `attributed`. Roles always keep role-level use.
 - **inferred**: otherwise a peer baseline. A holder's grant on an asset is peer-needed
   when at least *k* of the same-topic, non-hub holders granted that asset were observed
   using it (`ZG_PEER_BASELINE_SHARE`, default 0.5). A role needs the peer-needed grants of
@@ -45,8 +52,9 @@ used side exclude hub roles other than the entity itself.
 - **Per topic** (roles and identities by primary topic) and **graph-wide**: weighted EPI
   `1 − Σ needed / Σ granted` for roles and for identities, with and without hubs, basis
   counts, unused grants, unused grants on restricted data, dormant identities and roles.
-- **Dormant**: an identity with sufficient evidence for its access and no observed event
-  as a principal in the window; a role that is neither a principal nor observed assumed.
+- **Dormant**: an identity with sufficient evidence for its access, no observed event
+  as a principal and no attributed role-session use in the window (an identity that
+  never assumed a role is dormant however busy the role is); a role that is neither a principal nor observed assumed.
   `RoleLastUsed` stays a hint: a dormant role whose hint falls inside the window is
   counted as a conflict (`dormant_role_hint_conflicts`), never used to decide either way.
 - **Evidence**: status (`none`, `partial`, `attested`), window, per-service coverage and

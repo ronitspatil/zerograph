@@ -272,8 +272,10 @@ export function computePositions(data: LayoutInput): Position[] {
     "ServiceAccount",
     "CloudRole",
     "Database",
+    "DataTable",
     "S3Bucket",
     "VectorStore",
+    "QueryWorkgroup",
     "DataCategory",
   ];
   const rank = (id: string) => {

@@ -834,13 +834,50 @@ def test_readonly_permission_templates_match_sdk_operation_contract():
         "organizations:ListParents",
         "organizations:ListPoliciesForTarget",
         "organizations:DescribePolicy",
+        "glue:GetDatabases",
+        "glue:GetTables",
+        "glue:GetTags",
+        "glue:GetResourcePolicy",
+        "lakeformation:GetDataLakeSettings",
+        "lakeformation:ListPermissions",
+        "lakeformation:ListLFTags",
+        "lakeformation:ListLFTagExpressions",
+        "lakeformation:SearchDatabasesByLFTags",
+        "lakeformation:SearchTablesByLFTags",
+        "athena:ListWorkGroups",
+        "athena:GetWorkGroup",
     }
     assert {statement["Sid"] for statement in policy["Statement"] if statement["Resource"] == "*"} == {
         "IamInventoryOnly",
         "OwnedBucketInventory",
         "OptionalAccessAdvisorResults",
         "OptionalOrganizationDescription",
+        "OptionalLakeFormationRead",
+        "OptionalAthenaWorkgroupList",
     }
+    # No Glue wildcard: glue:Get* would include GetConnection(s), which can return connection passwords.
+    assert not any(action.endswith("*") for action in actions)
+    # Every data lake SDK call the collector makes is covered by an action in the template.
+    from app.collectors import aws_datalake
+
+    source = Path(aws_datalake.__file__).read_text()
+    operations = {
+        "get_databases": "glue:GetDatabases",
+        "get_tables": "glue:GetTables",
+        "get_tags": "glue:GetTags",
+        "get_resource_policy": "glue:GetResourcePolicy",
+        "get_data_lake_settings": "lakeformation:GetDataLakeSettings",
+        "list_permissions": "lakeformation:ListPermissions",
+        "list_lf_tags": "lakeformation:ListLFTags",
+        "list_lf_tag_expressions": "lakeformation:ListLFTagExpressions",
+        "search_databases_by_lf_tags": "lakeformation:SearchDatabasesByLFTags",
+        "search_tables_by_lf_tags": "lakeformation:SearchTablesByLFTags",
+        "list_work_groups": "athena:ListWorkGroups",
+        "get_work_group": "athena:GetWorkGroup",
+    }
+    called = set(__import__("re").findall(r'"((?:get|list|search)_[a-z_]+)"', source))
+    assert called == set(operations)
+    assert set(operations.values()) <= actions
     metadata = next(
         statement for statement in policy["Statement"] if statement["Sid"] == "SandboxBucketMetadataOnly"
     )
@@ -1009,7 +1046,7 @@ def in_app_collect(monkeypatch, *, role_arn=ARN, account="", identity_account="1
 def test_in_app_collection_confirms_sts_target_before_inventory(monkeypatch):
     run, made, iam, _ = in_app_collect(monkeypatch)
     snapshot = run()
-    assert made == [{"expected_account": "123456789012", "expected_role_arn": ARN, "access_advisor": False}]
+    assert made == [{"expected_account": "123456789012", "expected_role_arn": ARN, "access_advisor": False, "data_lake": True}]
     assert snapshot.nodes
     # An explicit ZG_AWS_ACCOUNT_ID equal to the role ARN's account is accepted.
     run, made, iam, _ = in_app_collect(monkeypatch, account="123456789012")

@@ -17,8 +17,13 @@ excess-privilege index (EPI), and records:
   sets per role and identity, no caching) for every role and identity, per topic and
   graph-wide, in the attested (used) mode and, evaluated after the evidence goes stale,
   the inferred (peer baseline) mode;
-* dormant identities against the planted ones (recall) and against observed use (no
-  identity with observed use may be dormant);
+* dormant identities against the planted ones (recall) and against observed and
+  attributed use (no identity with either may be dormant);
+* role-session attribution (``qualify_scale.ATTRIBUTION_FIXTURE``): attributed and
+  unattributed session events, identity EPI with attribution against the same
+  evidence with role-level credit only, and ``remove_assumption`` proposals against the
+  planted never-assumed (identity, role) edges (``plant_never_assumed``: recall, and
+  none on a pair with an observed assumption or attributed use);
 * determinism and endpoint latency.
 
 App state lives in a disposable schema of ``--database-url``; ``--graph-uri`` must be an
@@ -67,6 +72,9 @@ else:
     timed(tasks, "load_usage", "usage_load")
 timed(tasks, "compute_topics", "topics_compute")
 timed(tasks, "store_topics", "topics_store")
+from app.graph import proposals
+timed(proposals, "compute_proposals", "proposals_compute")
+timed(proposals, "store_proposals", "proposals_store")
 started = time.perf_counter()
 tasks.process_job(sys.argv[1])
 print(json.dumps({"seconds": time.perf_counter() - started,
@@ -85,22 +93,33 @@ print(json.dumps({"seconds": time.perf_counter() - started, "results": results,
                   "maxrss": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}))
 """
 
-DATA = {"Database", "VectorStore", "S3Bucket"}
+DATA = {"Database", "VectorStore", "S3Bucket", "DataTable"}
 PRINCIPALS = {"HumanUser", "ServiceAccount", "AIAgent", "MCPServer"}
 GRANTS = {"CAN_READ", "CAN_WRITE"}
 HOPS = {"ASSUMES_ROLE", "INHERITS_PERMISSIONS", "INVOKES_TOOL"}
 WEIGHTS = {"public": 1, "internal": 2, "confidential": 5, "restricted": 10}
-SERVICE = {"S3Bucket": "s3", "Database": "rds-data", "VectorStore": "aoss"}
+SERVICE = {"S3Bucket": "s3", "Database": "rds-data", "VectorStore": "aoss", "DataTable": "glue"}
 MAX_HOPS = 5
 
 
-def reference_privilege(snapshot, observed, sufficient, topic_of: dict, hubs: set, share: float) -> dict:
+def reference_privilege(
+    snapshot,
+    observed,
+    sufficient,
+    topic_of: dict,
+    hubs: set,
+    share: float,
+    sessions=None,
+    attribution_share: float = 0.95,
+) -> dict:
     """Independent brute force of the EPI definitions (docs/privilege.md) on explicit sets.
 
     ``observed`` holds (principal ID, resource ID, action class) triples; ``topic_of`` maps
     every role and principal ID to its primary topic (None: no topic); ``hubs`` are hub
-    role IDs. Returns ``{id: {"basis", "granted", "needed", "granted_core", "needed_core",
-    "dormant"}}`` for every role and principal.
+    role IDs. ``sessions`` (attribution ready) holds attributed role-session use as
+    (identity ID or "", role ID, resource ID, action class, count). Returns ``{id:
+    {"basis", "granted", "needed", "granted_core", "needed_core", "dormant"}}`` for every
+    role and principal.
     """
     types = {node.id: node.type.value for node in snapshot.nodes}
     sensitivity = {node.id: node.sensitivity.value for node in snapshot.nodes}
@@ -134,6 +153,36 @@ def reference_privilege(snapshot, observed, sufficient, topic_of: dict, hubs: se
             used[principal].add(resource)
     observed_hop = {p: assumed[p] & hop[p] for p in list(assumed)}
     assumed_by_any = {role for roles in assumed.values() for role in roles}
+    # Attribution: per role, attributed and total session events; per identity, its own use per role.
+    session_total: Counter = Counter()
+    session_attributed: Counter = Counter()
+    attributed_use: dict[str, dict[str, set]] = defaultdict(lambda: defaultdict(set))
+    for identity, role, resource, action_class, count in sessions or ():
+        if role not in types:
+            continue
+        session_total[role] += count
+        if identity:
+            session_attributed[role] += count
+            found = attributed_use[identity][role]  # An attributed session of the role, data or not.
+            if resource in types and types[resource] in DATA and action_class != "assume":
+                found.add(resource)
+
+    def attributed_role(node) -> bool:
+        if sessions is None or types[node] != "CloudRole":
+            return False
+        total = session_total[node]
+        return not total or session_attributed[node] >= attribution_share * total
+
+    def identity_use(node, visited, skip) -> set:
+        """Own use, own attributed sessions of attributed roles, role-level use of the others."""
+        found = set(used[node])
+        for v in visited - skip - {node}:
+            if not attributed_role(v):
+                found |= used[v]
+        for role, items in attributed_use.get(node, {}).items():
+            if role not in skip and attributed_role(role):
+                found |= items
+        return found
 
     def reach(start, adjacency):
         seen, frontier = {start}, [start]
@@ -203,7 +252,11 @@ def reference_privilege(snapshot, observed, sufficient, topic_of: dict, hubs: se
         granted, granted_core = union(holders), union(core)
         node_services = {services[item] for item in granted} | ({"sts"} if hop.get(node) else set())
         basis = "used" if node_services <= set(sufficient) else "inferred"
-        if basis == "used":
+        if basis == "used" and sessions is not None and types[node] in PRINCIPALS:
+            visited = reach(node, observed_hop)
+            needed = identity_use(node, visited, set()) & granted
+            needed_core = identity_use(node, visited, excluded) & granted_core
+        elif basis == "used":
             visited = reach(node, observed_hop)
             needed = set().union(*(used[v] for v in visited)) & granted
             needed_core = set().union(*(used[v] for v in visited - excluded)) & granted_core
@@ -225,6 +278,8 @@ def reference_privilege(snapshot, observed, sufficient, topic_of: dict, hubs: se
                 set(own).union(*(role_inferred(r, True) for r in chosen if r not in hubs)) & granted_core
             )
         dormant = basis == "used" and bool(node_services) and node not in active
+        if types[node] in PRINCIPALS and node in attributed_use:
+            dormant = False
         if types[node] == "CloudRole":
             dormant = dormant and node not in assumed_by_any
         result[node] = {
@@ -360,6 +415,9 @@ def main() -> None:  # noqa: C901 - one linear qualification run
     parser.add_argument("--graph-uri", required=True, help="Empty disposable Memgraph bolt URI")
     parser.add_argument("--size", type=int, default=100_000)
     parser.add_argument("--seed", type=int, default=11)
+    parser.add_argument(
+        "--glue", action="store_true", help="Add Glue databases/tables to the data-lake topic (GLUE_FIXTURE)"
+    )
     parser.add_argument("--publish-runs", type=int, default=2, help="Publications per arm (alternating)")
     parser.add_argument("--requests", type=int, default=100)
     parser.add_argument("--chunk-bytes", type=int, default=3_900_000)
@@ -381,13 +439,29 @@ def main() -> None:  # noqa: C901 - one linear qualification run
         rss_bytes,
         run_measured,
     )
-    from qualify_scale import TOPIC_FIXTURE, cloudtrail_files, cloudtrail_records, generate_topics
+    from qualify_scale import (
+        ATTRIBUTION_FIXTURE,
+        GLUE_FIXTURE,
+        TOPIC_FIXTURE,
+        attribution_plan,
+        cloudtrail_files,
+        cloudtrail_records,
+        generate_topics,
+        glue_base_size,
+        plant_never_assumed,
+    )
     from qualify_topics import accuracy, digest, stored_rows
     from sqlalchemy import create_engine, text
 
     if not graph_is_empty(args.graph_uri):
         parser.error(f"Graph at {args.graph_uri} is not empty; use a disposable instance")
-    snapshot, truth, planted_usage = generate_topics(args.size, args.seed)
+    snapshot, truth, planted_usage = (
+        generate_topics(glue_base_size(args.size), args.seed, glue=True, glue_size=args.size)
+        if args.glue
+        else generate_topics(args.size, args.seed)
+    )
+    never_assumed = plant_never_assumed(snapshot, truth, planted_usage)
+    plan = attribution_plan(planted_usage)
     schema = "zg_usage_" + uuid4().hex
     admin = create_engine(args.database_url)
     with admin.begin() as connection:
@@ -414,7 +488,7 @@ def main() -> None:  # noqa: C901 - one linear qualification run
         "platform": platform.platform(),
         "graph": "memgraph/memgraph:3.2.0 (Docker via colima)",
         "app_database": "postgresql",
-        "fixture": TOPIC_FIXTURE,
+        "fixture": TOPIC_FIXTURE + (" " + GLUE_FIXTURE if args.glue else "") + " " + ATTRIBUTION_FIXTURE,
         "size": args.size,
         "seed": args.seed,
         "nodes": len(snapshot.nodes),
@@ -423,6 +497,9 @@ def main() -> None:  # noqa: C901 - one linear qualification run
             "dormant_identities": len(truth["dormant_identities"]),
             "role_data_used_pairs": sum(len(v) for v in planted_usage["role_data_used"].values()),
             "identity_role_used_pairs": sum(len(v) for v in planted_usage["identity_role_used"].values()),
+            "never_assumed_pairs": len(never_assumed),
+            "service_session_roles": len(plan["service_roles"]),
+            "unattributed_roles": len(plan["unattributed_roles"]),
         },
         "publishes": [],
     }
@@ -504,7 +581,7 @@ def main() -> None:  # noqa: C901 - one linear qualification run
             json={
                 "window_start": start.isoformat(),
                 "window_end": end.isoformat(),
-                "attested_services": ["aoss", "rds-data", "s3", "sts"],
+                "attested_services": ["aoss", "rds-data", "s3", "sts", *(["glue"] if args.glue else [])],
             },
         )
         assert created.status_code == 201, created.text
@@ -577,6 +654,8 @@ def main() -> None:  # noqa: C901 - one linear qualification run
             rows, kinds, topic_of, hubs, topic_privilege, summary, _, _ = stored_state(db, "demo", revision)
             privilege = summary.totals["privilege"]
             observed_rows = [(p, r, c) for p, r, c, _, _, _ in usage.observed(db, "demo")]
+            session_rows = [tuple(row) for row in usage.attributed(db, "demo")]
+            attribution_ready = usage.attribution_ready(db, "demo")
             evidence = usage.evidence(db, "demo")
             stored = stored_rows(db, "demo", revision)
         report["privilege"] = {k: v for k, v in privilege.items() if k not in ("evidence",)}
@@ -592,13 +671,15 @@ def main() -> None:  # noqa: C901 - one linear qualification run
             topic_of,
             hubs,
             get_settings().peer_baseline_share,
+            sessions=session_rows if attribution_ready else None,
         )
         report["reference_seconds"] = round(time.perf_counter() - started, 2)
         report["epi_used"] = compare(reference, rows, privilege, topic_privilege, kinds)
         print(json.dumps({k: v for k, v in report["epi_used"].items() if k != "graph"}), flush=True)
 
-        # Dormant identities: recall vs planted; none with observed use.
+        # Dormant identities: recall vs planted; none with observed or attributed use.
         active = {p for p, _, _ in observed_rows}
+        attributed_identities = {identity for identity, *_ in session_rows if identity}
         dormant = {e for e, row in rows.items() if kinds[e] == "identities" and row["flags"] & topics.DORMANT}
         planted = set(truth["dormant_identities"])
         report["dormant"] = {
@@ -607,9 +688,30 @@ def main() -> None:  # noqa: C901 - one linear qualification run
             "planted_detected": len(dormant & planted),
             "recall": round(len(dormant & planted) / len(planted), 4) if planted else None,
             "with_observed_use": len(dormant & active),
+            "with_attributed_use": len(dormant & attributed_identities),
             "note": "Detected dormant includes identities the fixture left without use by chance (no planted label).",
         }
+        events = Counter()
+        for identity, _, _, _, count in session_rows:
+            events["attributed" if identity else "unattributed"] += count
+        identity_flags = Counter(
+            name
+            for e, row in rows.items()
+            if kinds[e] == "identities"
+            for flag, name in ((topics.ATTRIBUTED, "attributed"), (topics.ROLE_LEVEL, "role_level"))
+            if row["flags"] & flag
+        )
+        report["attribution"] = {
+            "ready": attribution_ready,
+            "rows": len(session_rows),
+            "session_events": dict(events),
+            "attributed_share": round(events["attributed"] / max(1, sum(events.values())), 4),
+            "identities_by_label": dict(identity_flags),
+            "summary": privilege.get("attribution"),
+            "ingest": report["usage_ingest"]["stats"].get("attribution"),
+        }
         print(json.dumps(report["dormant"]), flush=True)
+        print(json.dumps(report["attribution"]), flush=True)
 
         # 5. In-process recompute: determinism, role-level timing, and the inferred mode.
         graph = CompactGraph.from_snapshot(published)
@@ -632,6 +734,7 @@ def main() -> None:  # noqa: C901 - one linear qualification run
                     )
                 )
             stale = load_usage(db, "demo", graph, at=datetime.now(UTC) + timedelta(days=30))
+            role_level = load_usage(db, "demo", graph, attribution=False)
         report["determinism"] = {
             "recomputed_digests": [d for d, *_ in runs],
             "stored_digest": digest(stored),
@@ -644,6 +747,49 @@ def main() -> None:  # noqa: C901 - one linear qualification run
         report["role_epi_seconds"] = min(t["role_ms"] for *_, t in runs) / 1000
         report["epi_seconds"] = min(t["total_ms"] for *_, t in runs) / 1000
         print(json.dumps(report["determinism"]), flush=True)
+        # Identity EPI with role-level credit only (before attribution) vs attributed (stored).
+        before = topics.compute_topics(graph, role_level).summary["privilege"]
+        after = computed.summary["privilege"]
+        report["identity_epi_attribution"] = {
+            "role_level_only": {k: before["identities"][k] for k in ("epi", "epi_excl_hubs", "needed_weight")},
+            "attributed": {k: after["identities"][k] for k in ("epi", "epi_excl_hubs", "needed_weight")},
+            "granted_weight": after["identities"]["granted_weight"],
+            "dormant_identities": {
+                "role_level_only": before["dormant_identities"],
+                "attributed": after["dormant_identities"],
+            },
+        }
+        print(json.dumps(report["identity_epi_attribution"]), flush=True)
+        del before
+        # Never-assumed edges: remove_assumption proposals against the planted pairs.
+        from app.graph.proposals import TYPES, check_invariant, compute_proposals
+
+        started = time.perf_counter()
+        proposed = compute_proposals(computed)
+        proposal_seconds = time.perf_counter() - started
+        unassume = {
+            (graph.ids[p.subject], graph.ids[p.target])
+            for p in proposed.proposals
+            if TYPES[p.kind] == "remove_assumption"
+        }
+        tiers = Counter(p.tier for p in proposed.proposals if TYPES[p.kind] == "remove_assumption")
+        used_pairs = {(p, r) for p, r, c in observed_rows if c == "assume"} | {
+            (identity, role) for identity, role, *_ in session_rows if identity
+        }
+        planted_pairs = {tuple(pair) for pair in never_assumed}
+        report["never_assumed"] = {
+            "planted": len(planted_pairs),
+            "proposed": len(unassume),
+            "planted_proposed": len(unassume & planted_pairs),
+            "recall": round(len(unassume & planted_pairs) / len(planted_pairs), 4) if planted_pairs else None,
+            "proposed_on_used_pairs": len(unassume & used_pairs),
+            "planted_identities_flagged_dormant": len({i for i, _ in planted_pairs} & dormant),
+            "all_manual": set(tiers) <= {4},
+            "invariant_violations": len(check_invariant(computed, proposed.proposals)),
+            "compute_proposals_seconds": round(proposal_seconds, 2),
+        }
+        print(json.dumps(report["never_assumed"]), flush=True)
+        del proposed
         inferred = topics.compute_topics(graph, stale)
         assert not stale.evidence.sufficient_services
         inferred_rows = {}
@@ -735,6 +881,12 @@ def main() -> None:  # noqa: C901 - one linear qualification run
         "publish_overhead_at_most_5s": overhead["publish_delta_min_seconds"] <= 5,
         "dormant_recall_at_least_0.9": (report["dormant"]["recall"] or 0) >= 0.9,
         "no_dormant_with_observed_use": report["dormant"]["with_observed_use"] == 0,
+        "no_dormant_with_attributed_use": report["dormant"]["with_attributed_use"] == 0,
+        "attribution_ready": report["attribution"]["ready"],
+        "never_assumed_recall_at_least_0.9": (report["never_assumed"]["recall"] or 0) >= 0.9,
+        "no_never_assumed_proposal_on_used_pair": report["never_assumed"]["proposed_on_used_pairs"] == 0,
+        "never_assumed_proposals_manual": report["never_assumed"]["all_manual"],
+        "no_invariant_violations": report["never_assumed"]["invariant_violations"] == 0,
         "recompute_on_upload_stored": report["recompute_on_upload"]["stored_fingerprint_matches"],
         "deterministic_reruns": report["determinism"]["identical_reruns"],
         "stored_rows_equal_recomputed": report["determinism"]["stored_equals_recomputed"],

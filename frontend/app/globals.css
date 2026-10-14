@@ -1023,6 +1023,9 @@
   .legend-data-asset {
     background: #e391bb;
   }
+  .legend-query-workgroup {
+    background: #9fb6cc;
+  }
   .graph-legend .risk-dot {
     background: transparent;
     box-shadow: inset 0 0 0 1.5px #f28b91;

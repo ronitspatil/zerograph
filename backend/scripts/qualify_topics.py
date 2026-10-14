@@ -201,6 +201,25 @@ def accuracy(db, tenant: str, revision: str, truth: dict) -> dict:
     }
 
 
+def lf_tag_topics(computed, snapshot, truth: dict) -> dict:
+    """Topic placement of the LF-Tag-governed Glue tables and the tag-grant holders (--glue)."""
+    graph = computed.graph
+    tagged = [n.id for n in snapshot.nodes if n.type.value == "DataTable" and n.metadata.get("lf_tags")]
+
+    def label(node_id: str) -> str | None:
+        found = computed.resource_topic[graph.index[node_id]]
+        return computed.topics[found].name if found >= 0 else None
+
+    in_lake = sum(label(item) == "data-lake" for item in tagged)
+    lf = truth["lf_tag"]
+    return {
+        **{key: value for key, value in lf.items() if key != "over_broad_pairs"},
+        "over_broad_pairs": len(lf["over_broad_pairs"]),
+        "tagged_tables_in_data_lake": in_lake,
+        "tagged_tables_in_data_lake_share": round(in_lake / len(tagged), 4) if tagged else None,
+    }
+
+
 def over_grant_overlap(computed, truth: dict) -> dict:
     """Stored cross-topic grants (non-hub roles) against planted over-grants: structural only."""
     from app.graph.topics import GRANT_CODES, HUB
@@ -239,6 +258,9 @@ def main() -> None:
     parser.add_argument("--graph-uri", required=True, help="Empty disposable Memgraph bolt URI")
     parser.add_argument("--size", type=int, default=100_000)
     parser.add_argument("--seed", type=int, default=11)
+    parser.add_argument(
+        "--glue", action="store_true", help="Add Glue databases/tables to the data-lake topic (GLUE_FIXTURE)"
+    )
     parser.add_argument("--publish-runs", type=int, default=2, help="Publications per arm (alternating)")
     parser.add_argument("--requests", type=int, default=200)
     parser.add_argument("--chunk-bytes", type=int, default=3_900_000)
@@ -260,12 +282,16 @@ def main() -> None:
         rss_bytes,
         run_measured,
     )
-    from qualify_scale import TOPIC_FIXTURE, generate_topics
+    from qualify_scale import GLUE_FIXTURE, TOPIC_FIXTURE, generate_topics, glue_base_size
     from sqlalchemy import create_engine, text
 
     if not graph_is_empty(args.graph_uri):
         parser.error(f"Graph at {args.graph_uri} is not empty; use a disposable instance")
-    snapshot, truth, usage = generate_topics(args.size, args.seed)
+    snapshot, truth, usage = (
+        generate_topics(glue_base_size(args.size), args.seed, glue=True, glue_size=args.size)
+        if args.glue
+        else generate_topics(args.size, args.seed)
+    )
     if args.sidecars:
         args.sidecars.mkdir(parents=True, exist_ok=True)
         (args.sidecars / f"planted-{args.size}-truth.json").write_text(json.dumps(truth) + "\n")
@@ -296,7 +322,7 @@ def main() -> None:
         "platform": platform.platform(),
         "graph": "memgraph/memgraph:3.2.0 (Docker via colima)",
         "app_database": "postgresql",
-        "fixture": TOPIC_FIXTURE,
+        "fixture": TOPIC_FIXTURE + (" " + GLUE_FIXTURE if args.glue else ""),
         "size": args.size,
         "seed": args.seed,
         "nodes": len(snapshot.nodes),
@@ -399,6 +425,9 @@ def main() -> None:
             elapsed = time.perf_counter() - started
             runs.append((digest(computed_rows(computed, "demo", revision)), elapsed))
         report["over_grants"] = over_grant_overlap(computed, truth)
+        if "lf_tag" in truth:
+            report["lf_tag"] = lf_tag_topics(computed, snapshot, truth)
+            print(json.dumps(report["lf_tag"]), flush=True)
         del computed, published
         report["determinism"] = {
             "recomputed_digests": [d for d, _ in runs],

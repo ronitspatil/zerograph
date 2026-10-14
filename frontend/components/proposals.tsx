@@ -9,6 +9,7 @@ import {
 import { api, ApiError } from "@/lib/api";
 import { formatCount } from "@/lib/format";
 import {
+  ATTRIBUTION_LABELS,
   COVERAGE_LABELS,
   epiPrecise,
   TIER_HINTS,
@@ -782,6 +783,16 @@ function ProposalEvidence({
             </dd>
           </>
         )}
+        {"attribution" in evidence && (
+          <>
+            <dt>Role use</dt>
+            <dd title={ATTRIBUTION_LABELS[String(evidence.attribution)]}>
+              {evidence.attribution === "attributed"
+                ? `Attributed to ${p.type === "remove_assumption" || p.type === "disable_identity" ? p.subject_name : "each assumer"}`
+                : "Role-level (unattributed)"}
+            </dd>
+          </>
+        )}
         <dt>Window</dt>
         <dd>
           {detail.evidence.window_start && detail.evidence.window_end
@@ -792,6 +803,8 @@ function ProposalEvidence({
         <dd>
           {p.type === "remove_grant"
             ? "Never in the window"
+            : p.type === "remove_assumption"
+              ? "Never assumed in the window"
             : value(evidence, "last_used_hint")}
         </dd>
         {peers && (

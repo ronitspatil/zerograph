@@ -7,6 +7,8 @@ export type NodeType =
   | "Database"
   | "VectorStore"
   | "S3Bucket"
+  | "DataTable"
+  | "QueryWorkgroup"
   | "DataCategory";
 export type Sensitivity = "public" | "internal" | "confidential" | "restricted";
 export interface GraphNode {
@@ -461,7 +463,8 @@ export type ProposalType =
   | "merge_roles"
   | "split_role"
   | "scope_wildcard"
-  | "break_toxic_path";
+  | "break_toxic_path"
+  | "remove_assumption";
 
 export interface ProposalDecision {
   state: "accepted" | "rejected";

@@ -30,6 +30,7 @@ from app.db.models import (
     StagedEntity,
     TenantState,
     UploadSession,
+    UsageSessionStaged,
     UsageStaged,
     UsageUpload,
     UsageUploadChunk,
@@ -2408,7 +2409,12 @@ def upload_usage_file(
     staged = db.scalar(
         select(func.count()).select_from(UsageStaged).where(UsageStaged.upload_id == upload.id)
     )
-    if staged > usage.MAX_UPLOAD_PAIRS:
+    sessions = db.scalar(
+        select(func.count())
+        .select_from(UsageSessionStaged)
+        .where(UsageSessionStaged.upload_id == upload.id)
+    )
+    if staged > usage.MAX_UPLOAD_PAIRS or sessions > usage.MAX_UPLOAD_PAIRS:
         db.rollback()
         raise HTTPException(413, "Usage upload exceeds the observed-access limit")
     upload.updated_at = now()

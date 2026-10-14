@@ -99,6 +99,8 @@ export const FLAG_LABELS: Record<string, string> = {
   cross_topic: "Cross-topic access",
   restricted_outside: "Restricted data outside topic",
   dormant: "Dormant (no observed use)",
+  attributed: "Needed access attributed to this identity",
+  role_level: "Needed access includes role-level (unattributed) use",
 };
 
 const KIND_LABELS: Record<TopicMemberKind, string> = {
@@ -862,6 +864,13 @@ function TopicFacts({
   );
 }
 
+/** How an identity's role use was credited: its own attributed sessions or role-level. */
+export function attributionText(member: Pick<TopicMember, "name" | "flags">): string {
+  if (member.flags.includes("role_level")) return "Role-level (unattributed)";
+  if (member.flags.includes("attributed")) return `Attributed to ${member.name}`;
+  return "Own use only (no roles used)";
+}
+
 function MemberPanel({
   member,
   topics,
@@ -933,6 +942,12 @@ function MemberPanel({
                 </dd>
                 <dt>Needed from</dt>
                 <dd>{BASIS_LABELS[member.basis]}</dd>
+                {member.kind === "identity" && member.basis === "used" && (
+                  <>
+                    <dt>Role use</dt>
+                    <dd>{attributionText(member)}</dd>
+                  </>
+                )}
                 <dt>Data assets used</dt>
                 <dd>{count(member.used_resources)}</dd>
                 <dt>Unused own grants</dt>

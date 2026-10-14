@@ -160,6 +160,30 @@ def computed_views(result, computed, tenant: str, revision: str) -> list[dict]:
     return views
 
 
+def lf_tag_proposals(views: list[dict], snapshot, truth: dict) -> dict:
+    """Proposals on Lake Formation (tag-expression) grants of the --glue fixture: always manual."""
+    lf = truth["lf_tag"]
+    broad = {tuple(pair) for pair in lf["over_broad_pairs"]}
+    lakeformation = {
+        (e.source, e.target) for e in snapshot.edges if any(a.startswith("lakeformation:") for a in e.actions)
+    }
+    removals = [v for v in views if v["type"] == "remove_grant"]
+    on_lf = [v for v in removals if (v["subject_id"], v["target_id"]) in lakeformation]
+    on_broad = [v for v in on_lf if (v["subject_id"], v["target_id"]) in broad]
+    return {
+        **{key: value for key, value in lf.items() if key != "over_broad_pairs"},
+        "over_broad_pairs": len(broad),
+        "lakeformation_grant_pairs": len(lakeformation),
+        "removals_on_lakeformation_grants": len(on_lf),
+        "removals_on_lakeformation_grants_not_manual": sum(v["tier"] != "manual" for v in on_lf),
+        "removals_on_lakeformation_grants_without_reason": sum(
+            "lakeformation" not in v["reasons"] for v in on_lf
+        ),
+        "over_broad_pairs_proposed": len({(v["subject_id"], v["target_id"]) for v in on_broad}),
+        "over_broad_proposals_manual": sum(v["tier"] == "manual" for v in on_broad),
+    }
+
+
 def main() -> None:  # noqa: C901 - one linear qualification run
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -168,6 +192,9 @@ def main() -> None:  # noqa: C901 - one linear qualification run
     parser.add_argument("--graph-uri", required=True)
     parser.add_argument("--size", type=int, default=100_000)
     parser.add_argument("--seed", type=int, default=11)
+    parser.add_argument(
+        "--glue", action="store_true", help="Add Glue databases/tables to the data-lake topic (GLUE_FIXTURE)"
+    )
     parser.add_argument("--publish-runs", type=int, default=2)
     parser.add_argument("--requests", type=int, default=100)
     parser.add_argument("--chunk-bytes", type=int, default=3_900_000)
@@ -190,18 +217,24 @@ def main() -> None:  # noqa: C901 - one linear qualification run
         run_measured,
     )
     from qualify_scale import (
+        GLUE_FIXTURE,
         SAFETY_CASES,
         TOPIC_FIXTURE,
         cloudtrail_files,
         cloudtrail_records,
         generate_topics,
+        glue_base_size,
         plant_safety_cases,
     )
     from sqlalchemy import create_engine, text
 
     if not graph_is_empty(args.graph_uri):
         parser.error(f"Graph at {args.graph_uri} is not empty; use a disposable instance")
-    snapshot, truth, planted_usage = generate_topics(args.size, args.seed)
+    snapshot, truth, planted_usage = (
+        generate_topics(glue_base_size(args.size), args.seed, glue=True, glue_size=args.size)
+        if args.glue
+        else generate_topics(args.size, args.seed)
+    )
     cases = plant_safety_cases(snapshot, truth, planted_usage)
     schema = "zg_proposals_" + uuid4().hex
     admin = create_engine(args.database_url)
@@ -232,7 +265,7 @@ def main() -> None:  # noqa: C901 - one linear qualification run
         "platform": platform.platform(),
         "graph": "memgraph/memgraph:3.2.0 (Docker via colima)",
         "app_database": "postgresql 16",
-        "fixture": TOPIC_FIXTURE,
+        "fixture": TOPIC_FIXTURE + (" " + GLUE_FIXTURE if args.glue else ""),
         "safety_cases": SAFETY_CASES,
         "size": args.size,
         "seed": args.seed,
@@ -327,7 +360,7 @@ def main() -> None:  # noqa: C901 - one linear qualification run
             json={
                 "window_start": start.isoformat(),
                 "window_end": end.isoformat(),
-                "attested_services": ["aoss", "rds-data", "s3", "sts"],
+                "attested_services": ["aoss", "rds-data", "s3", "sts", *(["glue"] if args.glue else [])],
             },
         )
         assert created.status_code == 201, created.text
@@ -412,6 +445,9 @@ def main() -> None:  # noqa: C901 - one linear qualification run
             "note": "Hub over-grants are wildcard grants: scope_wildcard proposals, always manual.",
         }
         print(json.dumps(report["accuracy"]), flush=True)
+        if "lf_tag" in truth:
+            report["lf_tag"] = lf_tag_proposals(views, snapshot, truth)
+            print(json.dumps(report["lf_tag"]), flush=True)
         violations = never_auto_violations(views, cases)
         reasons = Counter(r for v in views for r in v["reasons"])
         planted_pairs = {tuple(p) for values in cases["pairs"].values() for p in values}
@@ -429,7 +465,9 @@ def main() -> None:  # noqa: C901 - one linear qualification run
         }
         print(json.dumps(report["never_auto"]), flush=True)
         everything = proposals.overlay_from(model, range(len(views)))
-        data = {n.id for n in snapshot.nodes if n.type.value in ("Database", "VectorStore", "S3Bucket")}
+        data = {
+            n.id for n in snapshot.nodes if n.type.value in ("Database", "VectorStore", "S3Bucket", "DataTable")
+        }
         cut = {pair for pair in everything.removed if pair[1] not in data}
         started = time.perf_counter()
         lost = observed_access_kept(

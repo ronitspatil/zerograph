@@ -168,9 +168,226 @@ _WRITE = {
     NodeType.VECTOR: ["aoss:WriteDocument"],
 }
 _PREFIX = {NodeType.BUCKET: "bucket", NodeType.DATABASE: "db", NodeType.VECTOR: "index"}
+# Optional Glue Data Catalog part of the data-lake topic (``generate_topics(glue=True)``).
+LF_TAG_FIXTURE = (
+    "LF-Tags (with --glue): a third of the Glue databases are tagged domain=data-lake and zone=<zone> in Lake "
+    "Formation and their tables tier=gold/silver/bronze (10% with a tagged column); tables no IAM grant reaches "
+    "are Lake Formation-governed, the rest hybrid. 15% of data-lake roles (not hubs or planted duplicates) hold "
+    "a tag-expression grant domain=data-lake AND tier=gold AND zone=<zone> (DESCRIBE+SELECT on every matching "
+    "table, 65% used), and one data-lake role holds the over-broad domain=data-lake grant (SELECT on every "
+    "tagged table, none used beyond its other grants). Edges carry lakeformation: actions and "
+    "'lakeformation: lf-tag <expression>' evidence, as the collector emits them; they add no nodes and no planted "
+    "over-grants (truth['lf_tag'] lists them), from their own seeded generator."
+)
+GLUE_FIXTURE = (
+    "With --glue: the base fixture shrinks to n - n/100 - n/4000 nodes and n/100 Glue tables in n/4000 Glue "
+    "databases of the data-lake topic, IDs as the AWS collector "
+    "and CloudTrail mapping use (arn:aws:glue:us-east-1:<account>:table/<db>/<table>); 60% of databases tagged "
+    "topic=data-lake (their tables inherit it as metadata, as the collector does), else tables inherit their "
+    "S3 location bucket's topic tag when it has one; database names carry data-lake tokens. Data-lake roles get "
+    "1-12 table grants (70% read) and a database read, 65% used; 5% of other roles get 1-3 unused Glue "
+    "over-grants. Glue comes from a separate seeded generator; the base generator is unchanged. "
+    + LF_TAG_FIXTURE
+)
+GLUE_ACCOUNT = "123456789012"  # = CLOUDTRAIL_ACCOUNT, so CloudTrail Glue events resolve to these IDs.
+_GLUE_READ = {NodeType.TABLE: ["glue:GetTable", "glue:GetPartitions"], NodeType.DATABASE: ["glue:GetDatabase"]}
+_GLUE_WRITE = {NodeType.TABLE: ["glue:UpdateTable"], NodeType.DATABASE: ["glue:CreateTable"]}
+_GLUE_ZONES = ("raw", "curated", "analytics", "landing", "refined")
+_GLUE_TABLES = ("events", "orders", "sessions", "clicks", "customers", "invoices", "devices", "shipments")
 
 
-def generate_topics(n: int = 100_000, seed: int = 11) -> tuple[GraphSnapshot, dict, dict]:
+def glue_counts(n: int) -> tuple[int, int]:
+    """(databases, tables) the Glue part of an ``n``-node fixture adds."""
+    return max(2, n // 4000), max(12, n // 100)
+
+
+def glue_base_size(n: int) -> int:
+    """Base fixture size whose Glue-extended graph has at most ``n`` nodes (the publish cap)."""
+    return n - sum(glue_counts(n))
+
+
+def _plant_glue(
+    n, seed, nodes, kind_of, topic_of, data_by_topic, roles_by_topic, hubs, grants, used, over, duplicates
+):
+    """Add the Glue databases/tables of ``GLUE_FIXTURE`` in place; returns their IDs."""
+    rng = random.Random(seed + 7919)
+    prefix = f"arn:aws:glue:us-east-1:{GLUE_ACCOUNT}"
+    buckets = {node.id: node for node in nodes if node.type == NodeType.BUCKET}
+    lake_buckets = sorted(item for item in data_by_topic["data-lake"] if item in buckets)
+    tokens = dict((topic[0], topic[3]) for topic in PLANTED_TOPICS)["data-lake"]
+    added: list[str] = []
+    databases = []
+    database_count, table_count = glue_counts(n)
+    for k in range(database_count):
+        name = f"{rng.choice(tokens)}_{rng.choice(_GLUE_ZONES)}_{k:03d}"
+        node_id = f"{prefix}:database/{name}"
+        tagged = rng.random() < 0.6
+        nodes.append(
+            Node(
+                id=node_id,
+                type=NodeType.DATABASE,
+                name=name,
+                account_id=GLUE_ACCOUNT,
+                provider="aws",
+                sensitivity=Sensitivity.CONFIDENTIAL if rng.random() < 0.7 else rng.choice(SENSITIVITIES),
+                tags=["topic=data-lake", "env=prod"] if tagged else ["env=prod"],
+                metadata={"service": "glue", "resource_type": "glue_database"},
+            )
+        )
+        databases.append((node_id, name, tagged))
+        added.append(node_id)
+    tables_of: dict[str, list[str]] = {}
+    for i in range(table_count):
+        database, db_name, tagged = databases[i % len(databases)]
+        name = f"{rng.choice(_GLUE_TABLES)}_{i:05d}"
+        node_id = f"{prefix}:table/{db_name}/{name}"
+        bucket = rng.choice(lake_buckets) if lake_buckets else ""
+        metadata = {"service": "glue", "resource_type": "glue_table", "database": database}
+        if bucket:
+            metadata["location_bucket"] = bucket
+        if tagged:
+            metadata.update(topic="data-lake", topic_inherited_from="database")
+        elif bucket:
+            anchor = next((t for t in buckets[bucket].tags if t.split("=", 1)[0] in ("topic", "app", "team")), "")
+            if anchor:
+                key, _, value = anchor.partition("=")
+                metadata.update({key: value, "topic_inherited_from": "location_bucket"})
+        pii = rng.random() < 0.1
+        nodes.append(
+            Node(
+                id=node_id,
+                type=NodeType.TABLE,
+                name=f"{db_name}.{name}",
+                account_id=GLUE_ACCOUNT,
+                provider="aws",
+                sensitivity=Sensitivity.CONFIDENTIAL if pii or rng.random() < 0.7 else rng.choice(SENSITIVITIES),
+                tags=["PII"] if pii else [],
+                metadata=metadata,
+            )
+        )
+        tables_of.setdefault(database, []).append(node_id)
+        added.append(node_id)
+    for item in added:
+        topic_of[item] = "data-lake"
+        kind_of[item] = NodeType.DATABASE if ":database/" in item else NodeType.TABLE
+    data_by_topic["data-lake"].extend(added)
+    tables = [item for item in added if ":table/" in item]
+    for role in roles_by_topic["data-lake"]:
+        if role in hubs:
+            continue
+        picked = {tables[zipf_pick(rng, len(tables), 1.02)] for _ in range(1 + zipf_pick(rng, 12, 1.0))}
+        for item in sorted(picked):
+            if item in grants[role]:
+                continue
+            grants[role][item] = "read" if rng.random() < 0.7 else "write"
+            if rng.random() < 0.65:
+                used[role].add(item)
+        database = next(db for db, items in tables_of.items() if min(picked) in items)
+        grants[role].setdefault(database, "read")
+        used[role].add(database)
+    others = sorted(r for topic, rs in roles_by_topic.items() if topic != "data-lake" for r in rs if r not in hubs)
+    for role in rng.sample(others, len(others) // 20):
+        for _ in range(1 + zipf_pick(rng, 3, 1.0)):
+            item = rng.choice(tables)
+            if item not in grants[role]:
+                grants[role][item] = "read"
+                over.add((role, item))
+    # Planted near-duplicate roles stay near-duplicates: each takes its peer's Glue grants.
+    glue = set(added)
+    for role, peer in sorted(duplicates.items()):
+        for item in [item for item in grants[role] if item in glue]:
+            grants[role].pop(item)
+            used[role].discard(item)
+            over.discard((role, item))
+        for item, access in grants[peer].items():
+            if item in glue:
+                grants[role][item] = access
+                if item in used[peer]:
+                    used[role].add(item)
+                if (peer, item) in over:
+                    over.add((role, item))
+    return added
+
+
+def _plant_lf_tags(seed, nodes, added, roles_by_topic, hubs, grants, used, duplicates):
+    """LF-Tags and tag-expression grants of ``LF_TAG_FIXTURE`` on the planted Glue part.
+
+    Returns ``({(role, table): (edge type, actions, expression)}, truth)``; tags go on the
+    nodes' metadata in place. Uses its own generator, so nothing planted before changes.
+    """
+    rng = random.Random(seed + 104729)
+    glue = set(added)
+    by_id = {node.id: node for node in nodes if node.id in glue}
+    databases = sorted(item for item in added if ":database/" in item)
+    governed = sorted(rng.sample(databases, max(1, len(databases) // 3)))
+    zone_of = {
+        db: next((zone for zone in _GLUE_ZONES if f"_{zone}_" in by_id[db].name), _GLUE_ZONES[0])
+        for db in governed
+    }
+    iam_granted = {item for role_grants in grants.values() for item in role_grants if item in glue}
+    tables: list[tuple[str, str, str]] = []  # (table, zone, tier)
+    for db in governed:
+        by_id[db].metadata.update(
+            lf_tags=["domain=data-lake", f"zone={zone_of[db]}"], lakeformation_mode="lakeformation"
+        )
+    for item in added:
+        database = by_id[item].metadata.get("database")
+        if ":table/" not in item or database not in zone_of:
+            continue
+        tier = rng.choice(("gold", "silver", "bronze"))
+        metadata = by_id[item].metadata
+        metadata.update(
+            lf_tags=["domain=data-lake", f"tier={tier}", f"zone={zone_of[database]}"],
+            lakeformation_mode="iam_allowed_principals" if item in iam_granted else "lakeformation",
+        )
+        if rng.random() < 0.1:
+            metadata["lf_tagged_columns"] = 1
+        tables.append((item, zone_of[database], tier))
+    excluded = set(hubs) | set(duplicates) | set(duplicates.values())
+    roles = sorted(role for role in roles_by_topic["data-lake"] if role not in excluded)
+    zones = sorted(set(zone_of.values()))
+    lf: dict[tuple[str, str], tuple[EdgeType, list[str], str]] = {}
+    holders = []
+    for role in roles:
+        if rng.random() >= 0.15:
+            continue
+        zone = rng.choice(zones)
+        expression = f"domain=data-lake AND tier=gold AND zone={zone}"
+        holders.append(role)
+        for item, table_zone, tier in tables:
+            if table_zone == zone and tier == "gold" and item not in grants[role]:
+                lf[(role, item)] = (
+                    EdgeType.READ,
+                    ["lakeformation:DESCRIBE", "lakeformation:SELECT"],
+                    expression,
+                )
+                if rng.random() < 0.65:
+                    used[role].add(item)
+    broad = rng.choice([role for role in roles if role not in holders])
+    over_broad = []
+    for item, _, _ in tables:
+        if item not in grants[broad]:
+            lf[(broad, item)] = (EdgeType.READ, ["lakeformation:SELECT"], "domain=data-lake")
+            if item not in used[broad]:
+                over_broad.append(item)
+    truth = {
+        "governed_databases": len(governed),
+        "tagged_tables": len(tables),
+        "lakeformation_governed_tables": sum(
+            by_id[item].metadata["lakeformation_mode"] == "lakeformation" for item, _, _ in tables
+        ),
+        "tag_grant_roles": len(holders) + 1,
+        "tag_grant_pairs": len(lf),
+        "over_broad_role": broad,
+        "over_broad_expression": "domain=data-lake",
+        "over_broad_pairs": sorted([broad, item] for item in over_broad),
+    }
+    return lf, truth
+
+
+def generate_topics(
+    n: int = 100_000, seed: int = 11, glue: bool = False, glue_size: int | None = None
+) -> tuple[GraphSnapshot, dict, dict]:
     """Planted-topic identity graph with a ground-truth sidecar and synthetic usage.
 
     Returns ``(snapshot, truth, usage)``. ``truth`` holds the planted topic of every
@@ -179,6 +396,11 @@ def generate_topics(n: int = 100_000, seed: int = 11) -> tuple[GraphSnapshot, di
     synthetic observed access over a 90-day window (role -> data used, identity ->
     role assumed); Phase 1 never reads it. Deterministic for the same ``n``/``seed``
     (adapted from the optimizer design scout's ``measure.py`` planted generator).
+    With ``glue``, Glue databases and tables join the data-lake topic (``GLUE_FIXTURE``)
+    from a separate generator, so every base node, edge and label is unchanged; they are
+    sized from ``glue_size`` (default ``n``). The qualifications publish
+    ``generate_topics(glue_base_size(size), glue=True, glue_size=size)``: at most ``size``
+    nodes, within the 100,000-node publish cap.
     """
     rng = random.Random(seed)
     names = [topic[0] for topic in PLANTED_TOPICS]
@@ -324,6 +546,19 @@ def generate_topics(n: int = 100_000, seed: int = 11) -> tuple[GraphSnapshot, di
                 chosen.append(hub)
         assumes[identity], assume_used[identity] = chosen, used_roles
 
+    glue_items: set[str] = set()
+    lf_grants: dict = {}
+    lf_truth: dict = {}
+    if glue:
+        added = _plant_glue(
+            glue_size or n, seed, nodes, kind_of, topic_of, data_by_topic, roles_by_topic, set(hubs), grants, used, over,
+            duplicates,
+        )
+        glue_items = set(added)
+        data = data + added
+        lf_grants, lf_truth = _plant_lf_tags(
+            seed, nodes, added, roles_by_topic, set(hubs), grants, used, duplicates
+        )
     edges: dict[str, Edge] = {}
 
     def add(source, target, kind, actions):
@@ -336,12 +571,22 @@ def generate_topics(n: int = 100_000, seed: int = 11) -> tuple[GraphSnapshot, di
     for role in roles:
         for item, access in grants[role].items():
             kind = kind_of[item]
+            read, write = (_GLUE_READ, _GLUE_WRITE) if item in glue_items else (_READ, _WRITE)
             if access == "admin":
                 add(role, item, EdgeType.WRITE, ["*"])
             elif access == "read":
-                add(role, item, EdgeType.READ, list(_READ[kind]))
+                add(role, item, EdgeType.READ, list(read[kind]))
             else:
-                add(role, item, EdgeType.WRITE, list(_WRITE[kind]))
+                add(role, item, EdgeType.WRITE, list(write[kind]))
+    for (role, item), (kind, actions, expression) in sorted(lf_grants.items()):
+        edge = Edge(
+            source=role,
+            target=item,
+            type=kind,
+            actions=actions,
+            evidence=[f"lakeformation: lf-tag {expression}"],
+        )
+        edges.setdefault(edge.id, edge)
     snapshot = GraphSnapshot.model_construct(
         nodes=nodes, edges=list(edges.values()), warnings=[], source="snapshot"
     )
@@ -357,6 +602,8 @@ def generate_topics(n: int = 100_000, seed: int = 11) -> tuple[GraphSnapshot, di
         "duplicate_of": dict(sorted(duplicates.items())),
         "dormant_identities": sorted(dormant),
     }
+    if glue:
+        truth["lf_tag"] = lf_truth
     usage = {
         "seed": seed,
         "window_days": 90,
@@ -556,19 +803,110 @@ _EVENT = {
 }
 
 
+ATTRIBUTION_FIXTURE = (
+    "Role sessions: every used (identity, role) pair gets 1-3 AssumeRole calls (each a session with its own "
+    "access key, roleSessionName = the identity's name); each used (role, data) pair is used by a seeded random "
+    "non-empty subset of the role's observed assumers (each with probability 0.5) in their own sessions; roles "
+    "with use but no observed assumer are used in an AWS service session (AssumeRole by ecs-tasks.amazonaws.com); "
+    "3% of used roles (seeded) are used only in sessions whose AssumeRole precedes the window (unattributed). "
+    "plant_never_assumed adds, for 3% of non-dormant identities with an observed assumption, an ASSUMES_ROLE "
+    "edge to a busy same-topic role they never assume."
+)
+SERVICE_PRINCIPAL = "ecs-tasks.amazonaws.com"
+
+
+def attribution_plan(usage: dict, seed: int = 29) -> dict:
+    """Who used each used (role, data) pair in their own role sessions (``ATTRIBUTION_FIXTURE``).
+
+    Returns ``{"identity_data_used": {identity: {role: [data]}}, "service_roles": [role],
+    "unattributed_roles": [role]}``; deterministic for the same usage and seed, and the
+    union over identities and service sessions of each role's data is the role's used set.
+    """
+    rng = random.Random(seed)
+    assumers: dict[str, list[str]] = {}
+    for identity, roles in sorted(usage["identity_role_used"].items()):
+        for role in roles:
+            assumers.setdefault(role, []).append(identity)
+    used_roles = sorted(usage["role_data_used"])
+    unattributed = set(rng.sample(used_roles, len(used_roles) * 3 // 100))
+    identity_data: dict[str, dict[str, list[str]]] = {}
+    service_roles = []
+    for role in used_roles:
+        if role in unattributed:
+            continue
+        users = assumers.get(role, [])
+        if not users:
+            service_roles.append(role)
+            continue
+        for item in usage["role_data_used"][role]:
+            chosen = [user for user in users if rng.random() < 0.5] or [rng.choice(users)]
+            for user in chosen:
+                identity_data.setdefault(user, {}).setdefault(role, []).append(item)
+    return {
+        "identity_data_used": identity_data,
+        "service_roles": service_roles,
+        "unattributed_roles": sorted(unattributed),
+    }
+
+
+def plant_never_assumed(snapshot: GraphSnapshot, truth: dict, usage: dict, share: float = 0.03, seed: int = 31):
+    """Give some active identities an ASSUMES_ROLE edge to a busy same-topic role they never assume.
+
+    Adds the edges to ``snapshot`` and returns the planted ``[identity, role]`` pairs
+    (also ``truth["never_assumed"]``). Busy: some other identity was observed assuming it.
+    """
+    rng = random.Random(seed)
+    dormant = set(truth["dormant_identities"])
+    busy_by_topic: dict[str, list[str]] = {}
+    for role in sorted({role for roles in usage["identity_role_used"].values() for role in roles}):
+        topic = truth["role_topic"].get(role)
+        if topic is not None:
+            busy_by_topic.setdefault(topic, []).append(role)
+    has = {}
+    for edge in snapshot.edges:
+        if edge.type == EdgeType.ASSUMES:
+            has.setdefault(edge.source, set()).add(edge.target)
+    candidates = sorted(i for i in usage["identity_role_used"] if i not in dormant)
+    planted = []
+    for identity in rng.sample(candidates, int(len(candidates) * share)):
+        pool = [r for r in busy_by_topic.get(truth["identity_topic"][identity], []) if r not in has.get(identity, ())]
+        if not pool:
+            continue
+        role = rng.choice(pool)
+        snapshot.edges.append(
+            Edge(
+                source=identity,
+                target=role,
+                type=EdgeType.ASSUMES,
+                actions=["sts:AssumeRole"],
+                evidence=[f"policy:{identity}"],
+            )
+        )
+        has.setdefault(identity, set()).add(role)
+        planted.append([identity, role])
+    truth["never_assumed"] = planted
+    return planted
+
+
 def cloudtrail_records(snapshot: GraphSnapshot, usage: dict, start: datetime, end: datetime, seed: int = 13):
     """CloudTrail records (data events and STS AssumeRole) for the planted usage sidecar.
 
-    Every used (role, data) pair gets 1-3 events from an assumed-role session of the role
-    (S3 GetObject/PutObject, RDS Data API or OpenSearch Serverless by the asset's type and
-    the grant's kind; hub "admin" grants read), and every used (identity, role) pair 1-3
-    ``AssumeRole`` calls by the identity as an IAM user, spread over ``[start, end]``.
-    The synthetic graph's node IDs stand in for ARNs. A little realistic noise is added:
-    EC2 management events (an unattested service) and AccessDenied attempts on unused
-    grants, neither of which is use. Deterministic for the same inputs.
+    Every used (identity, role) pair gets 1-3 ``AssumeRole`` calls by the identity as an
+    IAM user, each issuing a role session (access key and session ARN in
+    ``responseElements``); every used (role, data) pair gets 1-3 events per user of it
+    (``attribution_plan``) in that user's sessions (S3 GetObject/PutObject, RDS Data API,
+    OpenSearch Serverless or Glue by the asset's type and the grant's kind; hub "admin"
+    grants read). Roles used without an observed assumer are used in an AWS service
+    session, and the plan's unattributed roles in sessions issued before the window, so
+    those events cannot be attributed. Events are spread over ``[start, end]``; the
+    synthetic graph's node IDs stand in for ARNs. A little realistic noise is added: EC2
+    management events (an unattested service) and AccessDenied attempts on unused grants,
+    neither of which is use. Deterministic for the same inputs.
     """
     rng = random.Random(seed)
+    plan = attribution_plan(usage)
     kinds = {node.id: node.type for node in snapshot.nodes}
+    glue = {node.id for node in snapshot.nodes if node.metadata.get("service") == "glue"}
     grant_kind: dict[tuple[str, str], EdgeType] = {}
     for edge in snapshot.edges:
         if edge.type in (EdgeType.READ, EdgeType.WRITE):
@@ -579,20 +917,27 @@ def cloudtrail_records(snapshot: GraphSnapshot, usage: dict, start: datetime, en
         moment = start.timestamp() + rng.random() * span
         return datetime.fromtimestamp(moment, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    def session(role: str) -> dict:
-        name = role.rsplit(":", 1)[-1]
+    def new_key() -> str:
+        return f"ASIA{rng.getrandbits(64):016X}"
+
+    def session_arn(role: str, name: str) -> str:
+        return f"arn:aws:sts::{CLOUDTRAIL_ACCOUNT}:assumed-role/{role.rsplit(':', 1)[-1]}/{name}"
+
+    def session(role: str, key: str, name: str) -> dict:
+        role_name = role.rsplit(":", 1)[-1]
         return {
             "type": "AssumedRole",
-            "principalId": f"AROA{name.upper()}:session",
-            "arn": f"arn:aws:sts::{CLOUDTRAIL_ACCOUNT}:assumed-role/{name}/session",
+            "principalId": f"AROA{role_name.upper()}:{name}",
+            "arn": session_arn(role, name),
             "accountId": CLOUDTRAIL_ACCOUNT,
+            "accessKeyId": key,
             "sessionContext": {
                 "sessionIssuer": {
                     "type": "Role",
-                    "principalId": f"AROA{name.upper()}",
+                    "principalId": f"AROA{role_name.upper()}",
                     "arn": role,
                     "accountId": CLOUDTRAIL_ACCOUNT,
-                    "userName": name,
+                    "userName": role_name,
                 },
                 "attributes": {"creationDate": when(), "mfaAuthenticated": "false"},
             },
@@ -620,7 +965,38 @@ def cloudtrail_records(snapshot: GraphSnapshot, usage: dict, start: datetime, en
             "eventCategory": "Data" if data else "Management",
         }
 
-    def data_event(role: str, item: str, kind: EdgeType) -> dict:
+    def assume(caller: dict, role: str, key: str, name: str) -> dict:
+        event = record(
+            caller,
+            "sts.amazonaws.com",
+            "AssumeRole",
+            {"roleArn": role, "roleSessionName": name},
+            [{"accountId": CLOUDTRAIL_ACCOUNT, "type": "AWS::IAM::Role", "ARN": role}],
+            False,
+        )
+        role_name = role.rsplit(":", 1)[-1]
+        event["responseElements"] = {
+            "credentials": {"accessKeyId": key, "expiration": when()},
+            "assumedRoleUser": {"assumedRoleId": f"AROA{role_name.upper()}:{name}", "arn": session_arn(role, name)},
+        }
+        return event
+
+    def glue_event(identity: dict, item: str, kind: EdgeType) -> dict:
+        # Glue events name the database/table in requestParameters (resolved like the collector's IDs).
+        path = item.split(":", 5)[5]
+        if path.startswith("database/"):
+            name, request = "GetDatabase", {"name": path.split("/", 1)[1]}
+        else:
+            _, database, table = path.split("/", 2)
+            if kind == EdgeType.WRITE:
+                name, request = "UpdateTable", {"databaseName": database, "tableInput": {"name": table}}
+            else:
+                name, request = "GetTable", {"databaseName": database, "name": table}
+        return record(identity, "glue.amazonaws.com", name, request, [], False)
+
+    def data_event(identity: dict, item: str, kind: EdgeType) -> dict:
+        if item in glue:
+            return glue_event(identity, item, kind)
         source, name, resource_type = _EVENT[(kinds[item], kind)]
         if source.startswith("s3"):
             request = {"bucketName": item, "key": f"part-{rng.getrandbits(16):04x}"}
@@ -634,38 +1010,53 @@ def cloudtrail_records(snapshot: GraphSnapshot, usage: dict, start: datetime, en
         else:
             request = {"collection": item}
             resources = [{"accountId": CLOUDTRAIL_ACCOUNT, "type": resource_type, "ARN": item}]
-        return record(session(role), source, name, request, resources, True)
+        return record(identity, source, name, request, resources, True)
 
-    for role, items in usage["role_data_used"].items():
-        for item in items:
-            kind = grant_kind.get((role, item), EdgeType.READ)
-            for _ in range(1 + (rng.random() < 0.5) + (rng.random() < 0.2)):
-                yield data_event(role, item, kind)
+    def events() -> int:
+        return 1 + (rng.random() < 0.5) + (rng.random() < 0.2)
+
+    # Identity sessions: AssumeRole calls, then each session's share of the identity's data use.
     for identity, roles in usage["identity_role_used"].items():
+        name = identity.rsplit(":", 1)[-1]
         user = {
             "type": "IAMUser",
-            "principalId": f"AIDA{identity.rsplit(':', 1)[-1]}",
+            "principalId": f"AIDA{name}",
             "arn": identity,
             "accountId": CLOUDTRAIL_ACCOUNT,
             "userName": identity,
         }
+        mine = plan["identity_data_used"].get(identity, {})
         for role in roles:
-            for _ in range(1 + (rng.random() < 0.5) + (rng.random() < 0.2)):
-                yield record(
-                    user,
-                    "sts.amazonaws.com",
-                    "AssumeRole",
-                    {"roleArn": role, "roleSessionName": "session"},
-                    [{"accountId": CLOUDTRAIL_ACCOUNT, "type": "AWS::IAM::Role", "ARN": role}],
-                    False,
-                )
+            sessions = [session(role, new_key(), name) for _ in range(events())]
+            for caller_session in sessions:
+                yield assume(user, role, caller_session["accessKeyId"], name)
+            for item in mine.get(role, ()):
+                kind = grant_kind.get((role, item), EdgeType.READ)
+                for _ in range(events()):
+                    yield data_event(rng.choice(sessions), item, kind)
+    # AWS service sessions, and sessions issued before the window (no AssumeRole: unattributed).
+    service = {"type": "AWSService", "invokedBy": SERVICE_PRINCIPAL}
+    for role in plan["service_roles"]:
+        caller_session = session(role, new_key(), "ecs-task")
+        yield assume(service, role, caller_session["accessKeyId"], "ecs-task")
+        for item in usage["role_data_used"][role]:
+            kind = grant_kind.get((role, item), EdgeType.READ)
+            for _ in range(events()):
+                yield data_event(caller_session, item, kind)
+    for role in plan["unattributed_roles"]:
+        earlier = session(role, new_key(), "before-window")
+        for item in usage["role_data_used"][role]:
+            kind = grant_kind.get((role, item), EdgeType.READ)
+            for _ in range(events()):
+                yield data_event(earlier, item, kind)
     roles = sorted(usage["role_data_used"])
     for _ in range(max(10, len(roles) // 50)):
         role = rng.choice(roles)
-        yield record(session(role), "ec2.amazonaws.com", "DescribeInstances", {}, [], False)
+        caller_session = session(role, new_key(), "noise")
+        yield record(caller_session, "ec2.amazonaws.com", "DescribeInstances", {}, [], False)
         denied = [item for (source, item) in grant_kind if source == role][:1]
         if denied:
-            event = data_event(role, denied[0], grant_kind[(role, denied[0])])
+            event = data_event(caller_session, denied[0], grant_kind[(role, denied[0])])
             event["errorCode"], event["errorMessage"] = "AccessDenied", "Access Denied"
             yield event
 

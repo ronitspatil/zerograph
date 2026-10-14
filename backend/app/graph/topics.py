@@ -82,7 +82,8 @@ from app.graph.sweep import SWEEP_TENANTS, run_sweep
 
 # Bump when topic labels, profiles, flags or stored fields change: other versions read as missing.
 # 2: usage refinement, excess-privilege index (needed weights, basis, unused, dormant).
-TOPIC_VERSION = 2
+# 3: identity needed access from attributed role-session use (attributed / role_level flags).
+TOPIC_VERSION = 3
 BASIS = "granted (structural)"
 NOTICE = (
     "Topics are derived from resource tags, names and access. They are not policy boundaries. "
@@ -121,10 +122,13 @@ TYPE_NAMES = {
     NodeType.DATABASE.value: "databases",
     NodeType.BUCKET.value: "S3 buckets",
     NodeType.VECTOR.value: "vector stores",
+    NodeType.TABLE.value: "data tables",
 }
 
 # Member flags (bitmask).
 HUB, VIA_HUB, PRIVILEGED, CROSS_TOPIC, RESTRICTED_OUTSIDE, DORMANT = 1, 2, 4, 8, 16, 32
+# Identity needed access: its own attributed role-session use, or role-level credit of some role.
+ATTRIBUTED, ROLE_LEVEL = 64, 128
 FLAG_NAMES = [
     (HUB, "hub"),
     (VIA_HUB, "via_hub"),
@@ -132,6 +136,8 @@ FLAG_NAMES = [
     (CROSS_TOPIC, "cross_topic"),
     (RESTRICTED_OUTSIDE, "restricted_outside"),
     (DORMANT, "dormant"),
+    (ATTRIBUTED, "attributed"),
+    (ROLE_LEVEL, "role_level"),
 ]
 # Seed kinds, in label priority.
 SEEDS = ("tag", "metadata", "name", "usage", "coaccess", "fallback")
@@ -599,6 +605,10 @@ def compute_topics(graph: CompactGraph, usage: UsageInput | None = None) -> Comp
         for row in rows.values():
             if row["dormant"]:
                 row["flags"] |= DORMANT
+            if row["attribution"] == "attributed":
+                row["flags"] |= ATTRIBUTED
+            elif row["attribution"] == "role_level":
+                row["flags"] |= ROLE_LEVEL
 
     # 6. Per-topic and graph-wide counts (hub-decomposed) and cross-topic links.
     topic_stats = [
@@ -703,6 +713,15 @@ def compute_topics(graph: CompactGraph, usage: UsageInput | None = None) -> Comp
         privilege["matched_observations"] = usage.matched
         privilege["unmatched_observations"] = usage.unmatched
         privilege["peer_share"] = usage.peer_share
+        labels = Counter(row["attribution"] for row in identity_rows.values() if row["basis"] == "used")
+        privilege["attribution"] = {
+            "ready": usage.attribution_ready,
+            "min_share": usage.attribution_share,
+            "roles_with_sessions": len(usage.role_sessions),
+            "roles_attributed": sum(1 for role in usage.role_sessions if usage.role_attributed(role)),
+            "identities_attributed": labels.get("attributed", 0),
+            "identities_role_level": labels.get("role_level", 0),
+        }
     else:
         privilege["evidence"] = {"status": "none"}
     privilege["timings_ms"] = timings
