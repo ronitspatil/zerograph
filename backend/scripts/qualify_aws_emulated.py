@@ -44,6 +44,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zlib
 from collections import Counter
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -464,6 +465,8 @@ def seed(boto3) -> dict:
     grant("IAM_ALLOWED_PRINCIPALS", {"Table": {"DatabaseName": "finance", "Name": "ledger"}}, ["ALL"])
     grant(roles["finance"], {"Table": {"DatabaseName": "finance", "Name": "ledger"}}, ["SELECT", "INSERT"])
     grant(roles["etl"], {"Database": {"Name": "lake_curated"}}, ["CREATE_TABLE"])
+    # An unused Lake Formation grant: its removal must be proposed as manual (revoke in LF).
+    grant(roles["reader"], {"Table": {"DatabaseName": "lake_curated", "Name": "daily_metrics"}}, ["SELECT"])
 
     return {
         "account": account,
@@ -497,9 +500,14 @@ def usage_records(world: dict, end: datetime) -> list[dict]:
     account, roles, users = world["account"], world["roles"], world["users"]
     buckets = world["buckets"]
 
-    def event(principal_role, source, name, request, day, user=None, key=None, response=None):
+    def session_key(role_arn, day):
+        return f"ASIA{zlib.crc32(role_arn.encode()) % 10**8:08d}{day:08d}"
+
+    def event(principal_role, source, name, request, day, user=None, key=None, response=None, service=None):
         occurred = (end - timedelta(days=day, hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        if user:
+        if service:
+            identity = {"type": "AWSService", "invokedBy": service}
+        elif user:
             identity = {
                 "type": "IAMUser",
                 "arn": user,
@@ -511,7 +519,7 @@ def usage_records(world: dict, end: datetime) -> list[dict]:
                 "type": "AssumedRole",
                 "arn": f"arn:aws:sts::{account}:assumed-role/{principal_role.rsplit('/', 1)[-1]}/s{day}",
                 "accountId": account,
-                "accessKeyId": key or f"ASIAEXAMPLE{day:08d}",
+                "accessKeyId": key or session_key(principal_role, day),
                 "sessionContext": {"sessionIssuer": {"type": "Role", "arn": principal_role}},
             }
         return {
@@ -528,6 +536,27 @@ def usage_records(world: dict, end: datetime) -> list[dict]:
 
     records = []
     for day in range(USAGE_DAYS):
+        # AWS services assume the ETL and finance roles (attributed as service:<host>).
+        for role_arn, host in (
+            (roles["etl"], "glue.amazonaws.com"),
+            (roles["finance"], "lambda.amazonaws.com"),
+        ):
+            records.append(
+                event(
+                    None,
+                    "sts.amazonaws.com",
+                    "AssumeRole",
+                    {"roleArn": role_arn, "roleSessionName": f"s{day}"},
+                    day,
+                    service=host,
+                    response={
+                        "credentials": {"accessKeyId": session_key(role_arn, day)},
+                        "assumedRoleUser": {
+                            "arn": f"arn:aws:sts::{account}:assumed-role/{role_arn.rsplit('/', 1)[-1]}/s{day}"
+                        },
+                    },
+                )
+            )
         # The ETL job reads and writes the lake and its catalog.
         for bucket in (buckets["lake_raw"], buckets["lake_curated"]):
             records.append(
@@ -838,10 +867,17 @@ def upload_usage(client, world: dict, checks: Checks) -> dict:
     committed = client.post(f"/api/v1/usage/uploads/{upload}/commit")
     checks("usage upload commits", committed.status_code == 200, committed.text[:300])
     stats = committed.json()["stats"]
+    services = sum(1 for r in records if r["userIdentity"].get("type") == "AWSService")
     checks(
-        "usage records all matched",
-        stats["matched"] == len(records),
-        {"stats": stats, "records": len(records)},
+        "usage records all matched (service issuances have no principal ARN)",
+        stats["matched"] == len(records) - services and stats["unresolved_principal"] == services,
+        {"stats": {k: v for k, v in stats.items() if k != "coverage"}, "records": len(records)},
+    )
+    attribution = stats.get("attribution", {})
+    checks(
+        "every role-session event attributed (user and service issuers)",
+        attribution.get("unattributed_events") == 0 and attribution.get("attributed_events", 0) > 0,
+        attribution,
     )
     return {"records": len(records), "stats": stats}
 
@@ -1096,6 +1132,18 @@ def check_published(client, world: dict, collector, snapshot, checks: Checks) ->
         all(p["tier"] == "manual" for p in lake),
         [(p["type"], p["tier"], p["subject_name"], p["target_name"]) for p in lake if p["tier"] != "manual"],
     )
+    unused_lf = [
+        p
+        for p in proposals
+        if p["type"] == "remove_grant"
+        and p["subject_id"] == roles["reader"]
+        and p["target_id"] == f"{world['glue']['table']}/lake_curated/daily_metrics"
+    ]
+    checks(
+        "the unused lake formation grant is a manual proposal (reason lakeformation)",
+        unused_lf and all(p["tier"] == "manual" and "lakeformation" in p["reasons"] for p in unused_lf),
+        [(p["tier"], p["reasons"]) for p in unused_lf],
+    )
     dormant_role = [
         p for p in proposals if p["type"] == "disable_role" and p["subject_id"] == roles["dormant"]
     ]
@@ -1125,6 +1173,205 @@ def assumed_session(boto3, world: dict):
     return session(
         boto3, credentials["AccessKeyId"], credentials["SecretAccessKey"], credentials["SessionToken"]
     )
+
+
+def outcome(call) -> str:
+    """``ok`` or the error a call raised (code and HTTP status only; never response bodies)."""
+    from botocore.exceptions import ClientError
+
+    try:
+        call()
+        return "ok"
+    except ClientError as exc:
+        error = exc.response.get("Error", {})
+        status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        return f"{error.get('Code') or 'error'} (HTTP {status})"
+    except Exception as exc:  # noqa: BLE001
+        return type(exc).__name__
+
+
+def probe_gaps(boto3, world: dict) -> dict:
+    """Ask moto directly what the collector met, and record where it differs from AWS."""
+    from botocore.config import Config
+
+    config = Config(retries={"total_max_attempts": 1})
+    collector = assumed_session(boto3, world)
+    iam = collector.client("iam", config=config)
+    probes = {}
+    probes["access_advisor"] = outcome(
+        lambda: iam.generate_service_last_accessed_details(Arn=world["collector"], Granularity="ACTION_LEVEL")
+    )
+    if probes["access_advisor"] != "ok":
+        gap(
+            "iam:GenerateServiceLastAccessedDetails",
+            f"not implemented: {probes['access_advisor']} with an HTML body",
+            "warning access_advisor_unknown, no access_advisor metadata (before the fix in this branch the "
+            "unparsable body aborted the whole collection)",
+        )
+    org = collector.client("organizations", config=config)
+    probes["organizations_member"] = outcome(
+        lambda: org.list_policies_for_target(TargetId=world["account"], Filter="SERVICE_CONTROL_POLICY")
+    )
+    if probes["organizations_member"] != "ok":
+        gap(
+            "organizations:ListPoliciesForTarget from a member account",
+            f"{probes['organizations_member']} (moto keeps the organization in the management account's backend)",
+            "warning organizations_unknown, scp_inventory unknown (as for a real member without delegated "
+            "access); the SCP variant reads through the management account",
+        )
+    # The management account has no catalog policy.
+    other = session(boto3).client("glue", config=config)
+    probes["glue_resource_policy_absent"] = outcome(lambda: other.get_resource_policy())
+    if probes["glue_resource_policy_absent"] == "ok":
+        body = other.get_resource_policy()
+        probes["glue_resource_policy_absent"] = "ok, keys " + ",".join(
+            sorted(k for k in body if k != "ResponseMetadata")
+        )
+    if "EntityNotFoundException" not in probes["glue_resource_policy_absent"]:
+        gap(
+            "glue:GetResourcePolicy without a policy",
+            f"{probes['glue_resource_policy_absent']} instead of EntityNotFoundException",
+            "would be warning glue_resource_policy_unknown instead of coverage absent; the seed sets a catalog "
+            "policy, so the observed path is exercised",
+        )
+    s3 = collector.client("s3", config=config)
+    probes["s3_default_encryption"] = outcome(
+        lambda: s3.get_bucket_encryption(
+            Bucket=world["buckets"]["results"], ExpectedBucketOwner=world["account"]
+        )
+    )
+    if probes["s3_default_encryption"] != "ok":
+        gap(
+            "s3:GetBucketEncryption on a bucket without explicit configuration",
+            f"{probes['s3_default_encryption']}; AWS applies SSE-S3 to every bucket since January 2023",
+            "warning encryption_unknown for that bucket (encryption_verified false)",
+        )
+    key = world["operator_key"]
+    bootstrap = session(boto3, key["AccessKeyId"], key["SecretAccessKey"]).client("sts", config=config)
+    probes["assume_role_wrong_external_id"] = outcome(
+        lambda: bootstrap.assume_role(
+            RoleArn=world["collector"], RoleSessionName="wrong-id", ExternalId="wrong"
+        )
+    )
+    if probes["assume_role_wrong_external_id"] == "ok":
+        gap(
+            "sts:AssumeRole trust policy and sts:ExternalId condition",
+            "not enforced (any external ID, and any caller, may assume the role)",
+            "the external-ID path is exercised but a wrong ID cannot be shown to fail; live gate",
+        )
+    last_used = iam.get_role(RoleName=COLLECTOR)["Role"].get("RoleLastUsed") or {}
+    probes["role_last_used_keys"] = sorted(last_used)
+    if "Region" not in last_used:
+        gap(
+            "iam RoleLastUsed.Region",
+            "LastUsedDate only (set when a session of the role makes a request); no Region",
+            "role_last_used_region is empty",
+        )
+    probes["iam_simulated_authorization"] = "not enforced"
+    gap(
+        "IAM authorization of every call",
+        "moto accepts every request from any credentials (no IAM evaluation by default)",
+        "the collector role policy template is installed but not proven sufficient or minimal; live gate",
+    )
+    lf = collector.client("lakeformation", config=config)
+    probes["list_lf_tag_expressions"] = outcome(lambda: lf.list_lf_tag_expressions())
+    if probes["list_lf_tag_expressions"] != "ok":
+        gap(
+            "lakeformation:ListLFTagExpressions",
+            f"not implemented: {probes['list_lf_tag_expressions']}",
+            "a grant naming a saved expression would be unresolved (modes unknown); not exercised",
+        )
+    page = lf.list_permissions(CatalogId=world["account"], MaxResults=1)
+    probes["list_permissions_page"] = {
+        "entries": len(page.get("PrincipalResourcePermissions", [])),
+        "next_token": bool(page.get("NextToken")),
+    }
+    if probes["list_permissions_page"]["entries"] > 1:
+        gap(
+            "lakeformation:ListPermissions pagination",
+            "MaxResults ignored, never a NextToken",
+            "the collector's Lake Formation pagination is not exercised by the emulator (Stubber tests cover it)",
+        )
+    member = world["member_credentials"]
+    west = session(boto3, member["AccessKeyId"], member["SecretAccessKey"], member["SessionToken"])
+    west_glue = west.client("glue", region_name="us-west-2")
+    west_glue.create_database(DatabaseInput={"Name": "defaults"})
+    west_glue.create_table(DatabaseName="defaults", TableInput={"Name": "t"})
+    implicit = west.client("lakeformation", region_name="us-west-2").list_permissions(
+        CatalogId=world["account"]
+    )
+    probes["default_iam_allowed_principals_listed"] = any(
+        (entry.get("Principal") or {}).get("DataLakePrincipalIdentifier") == "IAM_ALLOWED_PRINCIPALS"
+        for entry in implicit.get("PrincipalResourcePermissions", [])
+    )
+    if not probes["default_iam_allowed_principals_listed"]:
+        gap(
+            "lakeformation:ListPermissions for tables created with default settings",
+            "no IAM_ALLOWED_PRINCIPALS entries (AWS lists the implicit grant)",
+            "against moto such tables would read as Lake Formation-governed and lose their IAM edges; the seed "
+            "grants IAM_ALLOWED_PRINCIPALS explicitly where hybrid mode is intended",
+        )
+    auth = iam.get_account_authorization_details(Filter=["Role"], MaxItems=1)
+    probes["authorization_details_pagination"] = {
+        "roles": len(auth.get("RoleDetailList", [])),
+        "truncated": auth.get("IsTruncated"),
+    }
+    if probes["authorization_details_pagination"]["roles"] > 1:
+        gap(
+            "iam:GetAccountAuthorizationDetails pagination",
+            "MaxItems ignored: one page, IsTruncated false",
+            "the collector's Marker pagination is not exercised by the emulator (Stubber tests cover it)",
+        )
+    return probes
+
+
+def s3_edge_budget_probe(boto3) -> dict:
+    """Scale observation: an absent S3 grant stays a conditional edge (ACLs are not collected), so
+    every principal gets read and write edges to every bucket; 2 x principals x buckets edges must
+    fit ``max_edges`` (hard maximum 15,000)."""
+    from app.collectors.aws_collector import AWSCollector, CollectionIncomplete
+
+    management = session(boto3)
+    iam, s3 = management.client("iam"), management.client("s3")
+    trust = document(
+        {"Effect": "Allow", "Principal": {"Service": "lambda.amazonaws.com"}, "Action": "sts:AssumeRole"}
+    )
+    iam.create_role(
+        RoleName="zg-scale-collector",
+        AssumeRolePolicyDocument=document(
+            {
+                "Effect": "Allow",
+                "Principal": {"AWS": "arn:aws:iam::123456789012:root"},
+                "Action": "sts:AssumeRole",
+            }
+        ),
+    )
+    for index in range(80):
+        iam.create_role(RoleName=f"zg-scale-app-{index:03d}", AssumeRolePolicyDocument=trust)
+    for index in range(100):
+        s3.create_bucket(Bucket=f"zg-scale-bucket-{index:03d}")
+    credentials = management.client("sts").assume_role(
+        RoleArn="arn:aws:iam::123456789012:role/zg-scale-collector", RoleSessionName="zg-scale"
+    )["Credentials"]
+    collector = AWSCollector(
+        session(
+            boto3, credentials["AccessKeyId"], credentials["SecretAccessKey"], credentials["SessionToken"]
+        ),
+        expected_account="123456789012",
+    )
+    result = {"principals": None, "buckets": 100, "max_edges": collector.limits.max_edges}
+    started = time.perf_counter()
+    try:
+        snapshot = collector.collect()
+        result.update(status="completed", edges=len(snapshot.edges))
+    except CollectionIncomplete as exc:
+        result.update(status="failed", error=str(exc))
+    result.update(
+        principals=collector.counts["roles"] + collector.counts["users"],
+        evaluations=collector.counts["evaluations"],
+        seconds=round(time.perf_counter() - started, 2),
+    )
+    return result
 
 
 def run_variants(boto3, world: dict, checks: Checks) -> dict:
@@ -1236,6 +1483,8 @@ def main() -> None:
             report["cli"] = run_cli(world, work, args.output, checks)
             report.update(run_in_app(world, work, checks))
             report["variants"] = run_variants(boto3, world, checks)
+            report["gap_probes"] = probe_gaps(boto3, world)
+            report["observations"] = {"s3_edge_budget": s3_edge_budget_probe(boto3)}
     finally:
         shutil.rmtree(work, ignore_errors=True)
     report["seconds"] = round(time.perf_counter() - started, 1)
