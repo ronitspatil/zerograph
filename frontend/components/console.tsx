@@ -712,8 +712,9 @@ export function Console({ demo }: { demo: boolean }) {
               <h1>{titles[view].title}</h1>
               <p>{titles[view].description}</p>
             </div>
-            {/* Export belongs to the graph it exports; Add source is the page's one
-                primary action everywhere except on Data sources itself. */}
+            {/* Export belongs to the graph it exports. Add source is hidden where it
+                would point at itself (Data sources) or off-topic (a topic page), and is
+                primary only on views without their own primary action. */}
             {view !== "sources" && view !== "topic" && (
               <div className="heading-actions">
                 {view === "graph" && (
