@@ -42,7 +42,10 @@ CERTAINTIES = ("confirmed", "conditional", "declared")
 CERTAINTY_CODE = {value: code for code, value in enumerate(CERTAINTIES)}
 # Optimizer safety flags per node (``CompactGraph.safety``, sparse bitmask): identities and
 # resources whose access changes are never recommended automatically (``app.graph.proposals``).
-SERVICE_LINKED, BREAK_GLASS, EXEMPT, KMS, UNEVALUATED = 1, 2, 4, 8, 16
+# COLLECTOR: the ZeroGraph collector's own identity (``zerograph_collector`` metadata, set by the
+# AWS collector from its verified caller identity): its grants are left out of topics, excess
+# privilege and proposals entirely.
+SERVICE_LINKED, BREAK_GLASS, EXEMPT, KMS, UNEVALUATED, COLLECTOR = 1, 2, 4, 8, 16, 32
 _BREAK_GLASS = re.compile(
     r"break[-_ ]?glass|emergency|disaster[-_ ]?recovery|(?:^|[^a-z0-9])dr(?:[^a-z0-9]|$)", re.IGNORECASE
 )
@@ -74,6 +77,8 @@ def safety_flags(node: dict) -> int:
     # A collector kept an attached policy unevaluated (too large): its access is unknown.
     if metadata.get("policies_unevaluated"):
         flags |= UNEVALUATED
+    if metadata.get("zerograph_collector") is True:
+        flags |= COLLECTOR
     service = metadata.get("service")
     if ":kms:" in node_id or (isinstance(service, str) and service.strip().lower() == "kms"):
         flags |= KMS

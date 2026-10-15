@@ -21,11 +21,15 @@ setting, so nothing here is reachable from production configuration). Then:
    AWS-managed ``AWSSupportServiceRolePolicy``), Glue/Athena/Lake Formation nodes, edges
    and modes, topics (``data-lake`` and ``finance`` forms), proposals (the deliberate
    cross-topic over-grant is a high-tier ``remove_grant``; Lake Formation grants are
-   ``manual``; the dormant role is proposed for disabling).
+   ``manual``; the dormant role is proposed for disabling; the collector role is never
+   proposed), every edge backed by a collected Allow, and ``uncollected_grant_sources``
+   flags where Object Ownership allows ACLs.
 4. **Variants**: SCPs read through the management account (as a delegated administrator
    would; moto keeps Organizations per account), and an LF-Tag grant, whose resolution
    needs APIs moto does not implement: the collector must degrade to ``unknown`` modes,
    never under-state access.
+5. **S3 scale**: 81 principals x 100 buckets and 300 x 300 collect within budget, with
+   exactly the planted edges.
 
 Every API moto lacks or answers differently from AWS is recorded under ``moto_gaps``
 (with the collector warning it produced), separately from ``failures`` (real collector
@@ -347,14 +351,19 @@ def seed(boto3) -> dict:
         PolicyDocument=document(allow("sts:AssumeRole", roles["readonly"])),
     )
 
-    # S3: tags, bucket policies and default encryption.
-    for name, tags, encryption in (
-        (lake_raw, {"topic": "data-lake", "data-class": "PII"}, "AES256"),
-        (lake_curated, {"topic": "data-lake"}, "aws:kms"),
-        (finance, {"topic": "finance", "classification": "confidential"}, "aws:kms"),
-        (results, {"topic": "data-lake", "purpose": "athena-results"}, None),
+    # S3: tags, bucket policies, default encryption and Object Ownership (lake_raw keeps ACLs
+    # enabled with ObjectWriter; results sets no ownership controls).
+    for name, tags, encryption, ownership in (
+        (lake_raw, {"topic": "data-lake", "data-class": "PII"}, "AES256", "ObjectWriter"),
+        (lake_curated, {"topic": "data-lake"}, "aws:kms", "BucketOwnerEnforced"),
+        (finance, {"topic": "finance", "classification": "confidential"}, "aws:kms", "BucketOwnerEnforced"),
+        (results, {"topic": "data-lake", "purpose": "athena-results"}, None, None),
     ):
         s3.create_bucket(Bucket=name)
+        if ownership:
+            s3.put_bucket_ownership_controls(
+                Bucket=name, OwnershipControls={"Rules": [{"ObjectOwnership": ownership}]}
+            )
         s3.put_bucket_tagging(
             Bucket=name, Tagging={"TagSet": [{"Key": k, "Value": v} for k, v in tags.items()]}
         )
@@ -936,6 +945,95 @@ def run_in_app(world: dict, work: Path, checks: Checks) -> dict:
     return result
 
 
+IDENTITY_KINDS = frozenset({"inline", "managed", "group-inline", "group-managed"})
+
+
+def _matches(value: str, patterns, insensitive: bool = False) -> bool:
+    import fnmatch
+
+    items = patterns if isinstance(patterns, list) else [patterns]
+    if insensitive:
+        return any(fnmatch.fnmatchcase(value.lower(), str(p).lower()) for p in items)
+    return any(fnmatch.fnmatchcase(value, str(p)) for p in items)
+
+
+def _allow_matches(document: dict, action: str, resource: str, principal: str | None = None) -> bool:
+    """Some Allow statement of ``document`` names ``action`` on ``resource`` (and, for a resource
+    policy, ``principal``). Independent of the collector's evaluator: plain glob matching only."""
+    found = document.get("Statement", [])
+    for statement in found if isinstance(found, list) else [found]:
+        if statement.get("Effect") != "Allow":
+            continue
+        if "Action" in statement:
+            if not _matches(action, statement["Action"], insensitive=True):
+                continue
+        elif "NotAction" not in statement or _matches(action, statement["NotAction"], insensitive=True):
+            continue
+        if "Resource" in statement and not _matches(resource, statement["Resource"]):
+            continue
+        if principal is not None:
+            named = statement.get("Principal", {})
+            named = named.get("AWS", []) if isinstance(named, dict) else named
+            named = named if isinstance(named, list) else [named]
+            account = principal.split(":")[4]
+            if not any(n in ("*", principal, account, f"arn:aws:iam::{account}:root") for n in named):
+                continue
+        return True
+    return False
+
+
+def resource_grant_policies(world: dict) -> dict[str, list[dict]]:
+    """Bucket policies and the Glue catalog policy, read from the emulator directly."""
+    import boto3
+    from botocore.exceptions import ClientError
+
+    credentials = world["member_credentials"]
+    member = session(
+        boto3, credentials["AccessKeyId"], credentials["SecretAccessKey"], credentials["SessionToken"]
+    )
+    s3, glue = member.client("s3"), member.client("glue")
+    found: dict[str, list[dict]] = {}
+    for name in world["buckets"].values():
+        try:
+            found[f"arn:aws:s3:::{name}"] = [json.loads(s3.get_bucket_policy(Bucket=name)["Policy"])]
+        except ClientError:
+            pass
+    body = glue.get_resource_policy().get("PolicyInJson")
+    found["glue"] = [json.loads(body)] if body else []
+    return found
+
+
+def ungranted_edges(world: dict, collector, edges) -> list[dict]:
+    """Every edge with an action no collected Allow names (identity, bucket/catalog, trust)."""
+    identity: dict[str, list[dict]] = {}
+    trust: dict[str, list[dict]] = {}
+    for attachment in collector.attachments:
+        if attachment.kind in IDENTITY_KINDS:
+            identity.setdefault(attachment.principal, []).append(attachment.document)
+        elif attachment.kind == "trust":
+            trust.setdefault(attachment.principal, []).append(attachment.document)
+    resources = resource_grant_policies(world)
+    found = []
+    for edge in edges:
+        if edge.type.value not in {"CAN_READ", "CAN_WRITE", "ASSUMES_ROLE"}:
+            continue
+        for action in edge.actions:
+            if action.startswith("lakeformation:"):
+                continue  # A Lake Formation grant is itself the grant (ListPermissions).
+            resource = edge.target
+            if action.startswith("s3:") and action != "s3:ListBucket":
+                resource += "/*"
+            policies = resources.get(edge.target, []) + (resources["glue"] if ":glue:" in edge.target else [])
+            if action == "sts:AssumeRole":
+                policies = trust.get(edge.target, [])
+            granted = any(_allow_matches(d, action, resource) for d in identity.get(edge.source, [])) or any(
+                _allow_matches(d, action, resource, edge.source) for d in policies
+            )
+            if not granted:
+                found.append({"source": edge.source, "target": edge.target, "action": action})
+    return found
+
+
 def check_published(client, world: dict, collector, snapshot, checks: Checks) -> dict:
     nodes = {node.id: node for node in snapshot.nodes}
     edges = [edge for edge in snapshot.edges]
@@ -1095,11 +1193,77 @@ def check_published(client, world: dict, collector, snapshot, checks: Checks) ->
         "analyst may assume the reader role (group policy + trust)",
         any(e.type.value == "ASSUMES_ROLE" for e in assumes),
     )
+    ungranted = ungranted_edges(world, collector, edges)
+    checks(
+        "no edge without a collected Allow (identity, bucket, catalog or trust policy)",
+        not ungranted,
+        {"ungranted": ungranted[:10], "count": len(ungranted)},
+    )
+    collector_s3 = [
+        e for e in edges if e.source == world["collector"] and e.target.startswith("arn:aws:s3:::")
+    ]
+    checks("the collector role has no S3 data edges (it reads metadata only)", not collector_s3)
+    checks(
+        "collector role marked zerograph_collector (verified caller identity)",
+        collector_node is not None
+        and collector_node.metadata.get("zerograph_collector") is True
+        and collector_node.metadata.get("lakeformation_admin_basis") == "zerograph_collector",
+        collector_node and collector_node.metadata,
+    )
+    checks(
+        "collector edges labelled zerograph_collector",
+        all(
+            any(item.startswith("zerograph_collector:") for item in e.evidence)
+            for e in edges
+            if e.source == world["collector"]
+        ),
+    )
+    ownership = {
+        key: nodes[f"arn:aws:s3:::{name}"].metadata if f"arn:aws:s3:::{name}" in nodes else {}
+        for key, name in buckets.items()
+    }
+    checks(
+        "uncollected ACL grants flagged where Object Ownership allows ACLs",
+        ownership["lake_raw"].get("object_ownership") == "ObjectWriter"
+        and ownership["lake_raw"].get("uncollected_grant_sources") == ["acl", "access_point"],
+        ownership["lake_raw"],
+    )
+    checks(
+        "no ACL flag where Object Ownership is BucketOwnerEnforced",
+        ownership["finance"].get("object_ownership") == "BucketOwnerEnforced"
+        and ownership["finance"].get("uncollected_grant_sources") == ["access_point"],
+        ownership["finance"],
+    )
+    results_ownership = ownership["results"].get("object_ownership")
+    if results_ownership == "absent":
+        gap(
+            "s3:GetBucketOwnershipControls on a bucket created without ownership controls",
+            "OwnershipControlsNotFoundError; AWS defaults new buckets to BucketOwnerEnforced since April 2023",
+            "object_ownership absent, uncollected_grant_sources includes acl for that bucket (flag only)",
+        )
+    checks(
+        "bucket without ownership controls keeps ACLs as an uncollected source",
+        results_ownership == "BucketOwnerEnforced"
+        or "acl" in ownership["results"].get("uncollected_grant_sources", []),
+        ownership["results"],
+    )
+    sources = collector.coverage["uncollected_grant_sources"]
+    checks(
+        "uncollected grant source coverage counts",
+        sources["access_point"] == 4
+        and sources["acl"] == (2 if results_ownership != "BucketOwnerEnforced" else 1),
+        {"uncollected_grant_sources": sources, "object_ownership": collector.coverage["object_ownership"]},
+    )
 
     # Topics.
     topics = client.get("/api/v1/graph/topics").json()
     names = {topic["name"]: topic for topic in topics.get("topics", [])}
     checks("topics data-lake and finance form", {"data-lake", "finance"} <= set(names), sorted(names))
+    checks(
+        "finance topic holds its roles (finance app and the quarterly report)",
+        names.get("finance", {}).get("roles", 0) >= 2,
+        names.get("finance"),
+    )
     result["topics"] = {
         name: {
             k: topic[k]
@@ -1158,6 +1322,12 @@ def check_published(client, world: dict, collector, snapshot, checks: Checks) ->
         and p["target_id"] == f"arn:aws:s3:::{buckets['lake_raw']}"
     ]
     checks("no proposal removes observed use", not used, used)
+    collector_proposals = [
+        (p["type"], p["tier"], p["subject_name"], p["target_name"])
+        for p in proposals
+        if world["collector"] in (p["subject_id"], p["target_id"])
+    ]
+    checks("no proposal targets the collector role", not collector_proposals, collector_proposals)
     return result
 
 
@@ -1326,11 +1496,31 @@ def probe_gaps(boto3, world: dict) -> dict:
     return probes
 
 
-def s3_edge_budget_probe(boto3) -> dict:
-    """Scale observation: an absent S3 grant stays a conditional edge (ACLs are not collected), so
-    every principal gets read and write edges to every bucket; 2 x principals x buckets edges must
-    fit ``max_edges`` (hard maximum 15,000)."""
-    from app.collectors.aws_collector import AWSCollector, CollectionIncomplete
+class AllBuckets:
+    """An S3 client whose ``ListBuckets`` drops ``MaxBuckets``: moto honours the page size but never
+    returns a ``ContinuationToken``, so a paged listing would silently stop at the first page."""
+
+    def __init__(self, client):
+        self._client = client
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+    def list_buckets(self, **kwargs):
+        kwargs.pop("MaxBuckets", None)
+        return self._client.list_buckets(**kwargs)
+
+
+def s3_scale(boto3, checks: Checks) -> dict:
+    """Scale: S3 edges need a grant, so ``principals x buckets`` no longer bounds the edge count.
+
+    In the management account: a collector role plus app roles, each granted ``s3:GetObject``
+    on exactly one bucket, and buckets nobody else is granted. 81 principals x 100 buckets
+    with the default limits (before this check, every absent grant was a conditional edge:
+    2 x 81 x 100 edges exhausted ``max_edges``), then 300 x 300 with ``max_evaluations``
+    raised to cover its 630,000 evaluations. The edges must be exactly the planted grants.
+    """
+    from app.collectors.aws_collector import AWSCollector, CollectionIncomplete, CollectionLimits
 
     management = session(boto3)
     iam, s3 = management.client("iam"), management.client("s3")
@@ -1347,32 +1537,74 @@ def s3_edge_budget_probe(boto3) -> dict:
             }
         ),
     )
-    for index in range(80):
-        iam.create_role(RoleName=f"zg-scale-app-{index:03d}", AssumeRolePolicyDocument=trust)
-    for index in range(100):
-        s3.create_bucket(Bucket=f"zg-scale-bucket-{index:03d}")
-    credentials = management.client("sts").assume_role(
-        RoleArn="arn:aws:iam::123456789012:role/zg-scale-collector", RoleSessionName="zg-scale"
-    )["Credentials"]
-    collector = AWSCollector(
-        session(
-            boto3, credentials["AccessKeyId"], credentials["SecretAccessKey"], credentials["SessionToken"]
-        ),
-        expected_account="123456789012",
-    )
-    result = {"principals": None, "buckets": 100, "max_edges": collector.limits.max_edges}
-    started = time.perf_counter()
-    try:
-        snapshot = collector.collect()
-        result.update(status="completed", edges=len(snapshot.edges))
-    except CollectionIncomplete as exc:
-        result.update(status="failed", error=str(exc))
-    result.update(
-        principals=collector.counts["roles"] + collector.counts["users"],
-        evaluations=collector.counts["evaluations"],
-        seconds=round(time.perf_counter() - started, 2),
-    )
-    return result
+    planted: set[tuple[str, str]] = set()
+    made = {"roles": 0, "buckets": 0}
+
+    def grow(roles: int, buckets: int) -> None:
+        for index in range(made["buckets"], buckets):
+            s3.create_bucket(Bucket=f"zg-scale-bucket-{index:03d}")
+        for index in range(made["roles"], roles):
+            name, bucket = f"zg-scale-app-{index:03d}", f"zg-scale-bucket-{index % buckets:03d}"
+            iam.create_role(RoleName=name, AssumeRolePolicyDocument=trust)
+            iam.put_role_policy(
+                RoleName=name,
+                PolicyName="read-one-bucket",
+                PolicyDocument=document(allow("s3:GetObject", f"arn:aws:s3:::{bucket}/*")),
+            )
+            planted.add((f"arn:aws:iam::123456789012:role/{name}", f"arn:aws:s3:::{bucket}"))
+        made.update(roles=roles, buckets=buckets)
+
+    def run(label: str, limits: CollectionLimits | None) -> dict:
+        credentials = management.client("sts").assume_role(
+            RoleArn="arn:aws:iam::123456789012:role/zg-scale-collector", RoleSessionName="zg-scale"
+        )["Credentials"]
+        collector = AWSCollector(
+            session(
+                boto3, credentials["AccessKeyId"], credentials["SecretAccessKey"], credentials["SessionToken"]
+            ),
+            limits,
+            expected_account="123456789012",
+        )
+        collector.s3 = AllBuckets(collector.s3)
+        result = {
+            "max_edges": collector.limits.max_edges,
+            "max_evaluations": collector.limits.max_evaluations,
+        }
+        started = time.perf_counter()
+        edges = set()
+        try:
+            snapshot = collector.collect()
+            edges = {(e.source, e.target) for e in snapshot.edges}
+            result.update(status="completed", edges=len(snapshot.edges))
+        except CollectionIncomplete as exc:
+            result.update(status="failed", error=str(exc))
+        result.update(
+            principals=collector.counts["roles"] + collector.counts["users"],
+            buckets=collector.counts["buckets"],
+            evaluations=collector.counts["evaluations"],
+            seconds=round(time.perf_counter() - started, 2),
+        )
+        checks(f"{label} collects within budget", result["status"] == "completed", result)
+        checks(
+            f"{label}: the edges are exactly the planted grants (none without an Allow)",
+            edges == planted,
+            {"edges": len(edges), "planted": len(planted), "unplanted": sorted(edges - planted)[:5]},
+        )
+        return result
+
+    grow(80, 100)  # + the collector role: 81 principals
+    small = run("s3 scale 81 principals x 100 buckets", None)
+    page = s3.list_buckets(MaxBuckets=100)
+    if len(page["Buckets"]) == 100 and not page.get("ContinuationToken"):
+        gap(
+            "s3:ListBuckets pagination (MaxBuckets)",
+            "MaxBuckets honoured but no ContinuationToken: a listing beyond one page silently stops",
+            "the scale checks list every bucket in one call (MaxBuckets dropped); the collector's "
+            "ContinuationToken loop is covered by Stubber tests; live gate for accounts over 100 buckets",
+        )
+    grow(299, 300)  # + the collector role: 300 principals
+    large = run("s3 scale 300 principals x 300 buckets", CollectionLimits(max_evaluations=1_000_000))
+    return {"81x100": small, "300x300": large}
 
 
 def run_variants(boto3, world: dict, checks: Checks) -> dict:
@@ -1485,7 +1717,7 @@ def main() -> None:
             report.update(run_in_app(world, work, checks))
             report["variants"] = run_variants(boto3, world, checks)
             report["gap_probes"] = probe_gaps(boto3, world)
-            report["observations"] = {"s3_edge_budget": s3_edge_budget_probe(boto3)}
+            report["scale"] = s3_scale(boto3, checks)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     report["seconds"] = round(time.perf_counter() - started, 1)

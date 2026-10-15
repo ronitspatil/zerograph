@@ -202,7 +202,7 @@ def run(corpus: Path) -> dict:
                         ROLE, action, resource, {"aws:PrincipalArn": ROLE, "aws:PrincipalAccount": ACCOUNT}
                     ),
                     [document],
-                    scope_complete=True,
+                    restrictions_complete=True,
                 )
                 decisions[(action, result.decision.value)] += 1
                 results[action] = result.decision.value
@@ -217,7 +217,7 @@ def run(corpus: Path) -> dict:
         effective = entry.get("effective_actions") if isinstance(entry.get("effective_actions"), list) else []
         for action, pattern, resource in oracle_requests(document, effective):
             try:
-                result = evaluate(Request(ROLE, action, resource, {}), [document], scope_complete=True)
+                result = evaluate(Request(ROLE, action, resource, {}), [document], restrictions_complete=True)
                 evaluations += 1
                 stats["oracle_checked"] += 1
                 if result.decision == Decision.DENY:
@@ -228,7 +228,7 @@ def run(corpus: Path) -> dict:
                         **document,
                         "Statement": [s for s in statements(document) if s.get("Effect") != "Deny"],
                     }
-                    again = evaluate(Request(ROLE, action, resource, {}), [allows_only], scope_complete=True)
+                    again = evaluate(Request(ROLE, action, resource, {}), [allows_only], restrictions_complete=True)
                     if again.decision != Decision.DENY:
                         stats["oracle_denied_by_explicit_deny"] += 1
                         continue

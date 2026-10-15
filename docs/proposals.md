@@ -59,7 +59,11 @@ evidence alone would give and `reasons` lists why:
 | `structure` | Cutting a tool-invocation or inheritance hop |
 | `lakeformation` | The grant edge carries a Lake Formation permission (`lakeformation:SELECT`...): revoke it in Lake Formation, not IAM |
 
-Deleting an identity is never proposed. Removing an identity-policy grant on an asset in
+Deleting an identity is never proposed. Nothing is proposed for the collector's own
+identity (`zerograph_collector` metadata, set by the AWS collector from its verified caller
+identity): no proposal names it as subject or target, its grants are left out of topics and
+excess privilege, and any proposal dropped for it is counted in `guards.collector_excluded`.
+Removing an identity-policy grant on an asset in
 another account is not a trust change and keeps its evidence tier (the resource-side
 policy still has to allow access, so removing the identity side can only reduce access).
 

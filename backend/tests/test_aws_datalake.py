@@ -197,6 +197,9 @@ def collector(limits: CollectionLimits | None = None):
     s3.get_bucket_policy.side_effect = error("NoSuchBucketPolicy")
     s3.get_bucket_tagging.return_value = {"TagSet": [{"Key": "topic", "Value": "data-lake"}]}
     s3.get_bucket_encryption.return_value = {"ServerSideEncryptionConfiguration": {}}
+    s3.get_bucket_ownership_controls.return_value = {
+        "OwnershipControls": {"Rules": [{"ObjectOwnership": "BucketOwnerEnforced"}]}
+    }
     glue.get_resource_policy.side_effect = error("EntityNotFoundException")
     glue.get_databases.side_effect = [
         databases_page("lake_raw", token="next"),
