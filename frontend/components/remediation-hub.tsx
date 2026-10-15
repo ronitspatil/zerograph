@@ -101,8 +101,8 @@ export function RemediationHub({
     <section className="remediation-page">
       {demo && (
         <div className="notice">
-          The sample policy and action history below are synthetic. Connect real
-          audit evidence before proposing production changes.
+          Sample policy and action history are synthetic; use real audit
+          evidence before proposing production changes.
         </div>
       )}
       <div className="remediation-grid">

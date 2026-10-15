@@ -1492,56 +1492,55 @@
     background: var(--hover);
   }
   .proposal-tiers button[aria-pressed="true"] {
-    border-color: var(--accent);
+    border-color: var(--border-strong);
     color: var(--text);
-    background: var(--accent-soft);
+    background: var(--surface-raised);
   }
-  .tier-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--subtle);
-  }
-  .tier-badge {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 64px;
-    height: 20px;
-    padding: 0 8px;
-    border-radius: 4px;
-    font-size: 11px;
-    font-weight: 600;
-    white-space: nowrap;
-    background: #8491a41f;
-    color: var(--text-secondary);
-  }
+  /*
+   * Tier, rollout state, severity and job status share one treatment: a 6px
+   * coloured dot and plain text, no pill. One palette, set per class as --dot.
+   */
   .tier-high {
-    background: #6cc7b333;
-    color: #9fe3d3;
+    --dot: var(--accent);
   }
   .tier-medium {
-    background: #7aa2e033;
-    color: #b4ccf2;
+    --dot: #7aa2e0;
   }
   .tier-low {
-    background: #e1b26829;
-    color: #e8cc96;
+    --dot: var(--warning);
   }
   .tier-inferred {
-    background: #b38ad933;
-    color: #d6bdf0;
+    --dot: #b38ad9;
   }
   .tier-manual {
-    background: #ef7f8a29;
-    color: #f2b0b7;
+    --dot: var(--danger);
   }
-  .tier-dot.tier-high,
-  .tier-dot.tier-medium,
-  .tier-dot.tier-low,
-  .tier-dot.tier-inferred,
-  .tier-dot.tier-manual {
-    background: currentColor;
+  .tier-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--dot, var(--subtle));
+  }
+  .tier-badge,
+  .rollout-state {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    height: 20px;
+    font-size: 12px;
+    font-weight: 500;
+    white-space: nowrap;
+    color: var(--text-secondary);
+  }
+  .tier-badge::before,
+  .rollout-state::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--dot, var(--subtle));
   }
   .proposals-grid {
     display: grid;
@@ -1556,7 +1555,7 @@
   }
   .proposal-row {
     display: grid;
-    grid-template-columns: 72px minmax(0, 1fr) minmax(0, 160px);
+    grid-template-columns: 76px minmax(0, 1fr) minmax(0, 160px);
     align-items: center;
     gap: 12px;
     min-height: 56px;
@@ -1602,10 +1601,13 @@
   .proposal-detail {
     padding: 16px;
     font-size: 13px;
-    /* Fixed frame beside the list: opening a proposal or a simulation never resizes it. */
-    height: 760px;
+    /* Fixed frame beside the list: opening a proposal or a simulation never
+       resizes it, and it stays in view while the list scrolls. */
+    height: min(760px, calc(100vh - 32px));
     overflow-y: auto;
     scrollbar-gutter: stable;
+    position: sticky;
+    top: 16px;
   }
   .proposal-detail h3 {
     margin: 4px 0 8px;
@@ -1774,33 +1776,18 @@
   }
   .rollout-state {
     align-self: flex-start;
-    display: inline-flex;
-    align-items: center;
-    height: 20px;
-    padding: 0 8px;
-    border-radius: 4px;
-    font-size: 11px;
-    font-weight: 600;
-    white-space: nowrap;
-    background: #8491a41f;
-    color: var(--text-secondary);
   }
   .rollout-pr_open,
-  .rollout-merged {
-    background: #6cc7b31f;
-    color: var(--accent);
-  }
+  .rollout-merged,
   .rollout-verified {
-    background: #6cc7b333;
-    color: var(--accent);
+    --dot: var(--accent);
   }
   .rollout-held,
   .rollout-revert_open {
-    background: #e1b2681f;
-    color: var(--warning);
+    --dot: var(--warning);
   }
   .rollout-rolled_back {
-    background: var(--danger-soft);
+    --dot: var(--danger);
     color: var(--danger);
   }
   .rollout-actions {
@@ -2316,6 +2303,7 @@
     .proposal-detail {
       height: auto;
       overflow-y: visible;
+      position: static;
     }
     .proposal-metrics {
       grid-template-columns: minmax(0, 1fr);

@@ -121,9 +121,8 @@ export function Proposals({
       ) : tab === "advanced" ? (
         <section className="advanced-remediation" aria-label="Advanced">
           <div className="notice">
-            <b>Advanced: single policy.</b> Trim one pasted IAM policy against
-            usage you supply. The proposal queue is the primary way to
-            remediate; use this for a policy outside the collected graph.
+            <b>Single policy.</b> Trim one pasted IAM policy against usage you
+            supply, for a policy outside the collected graph.
           </div>
           {advanced}
         </section>
@@ -417,10 +416,9 @@ function ProposalQueue({
   return (
     <section className="proposals-page">
       <div className="notice proposal-notice">
-        <b>Proposed, not applied.</b> Accepted, eligible proposals become draft
-        pull requests in your policy repository (Create PR); nothing is applied
-        by ZeroGraph and merging happens there. No proposal removes access that
-        was observed used.
+        <b>Proposed, not applied.</b> Accepted proposals become draft pull
+        requests in your policy repository; nothing is applied by ZeroGraph. No
+        proposal removes access observed in use.
       </div>
       <div className="proposal-metrics">
         <div className="metric-card">
@@ -429,7 +427,9 @@ function ProposalQueue({
           <small>
             {summary
               ? `${count(summary.decisions.accepted)} accepted · ${count(summary.decisions.rejected)} rejected`
-              : "Loading"}
+              : error
+                ? "Unavailable"
+                : "Loading"}
           </small>
         </div>
         <div className="metric-card">
@@ -623,7 +623,9 @@ function ProposalQueue({
             <span className="muted">
               {list
                 ? `${count(rows.length)} of ${count(list.view.total)} shown`
-                : "Loading"}
+                : error
+                  ? "Unavailable"
+                  : "Loading"}
             </span>
           </div>
           <div className="proposal-rows" aria-busy={busy}>
@@ -647,18 +649,24 @@ function ProposalQueue({
                 </span>
                 <span className="proposal-row-meta">
                   <small>{topics.get(p.topic_id) ?? "No topic"}</small>
+                  {/* Only a recorded decision is shown; undecided is the default. */}
                   <small>
                     {p.decision
                       ? p.decision.state === "accepted"
                         ? "Accepted"
                         : "Rejected"
-                      : "Proposed"}
+                      : "\u00a0"}
                   </small>
                 </span>
               </button>
             ))}
             {list && !rows.length && (
               <p className="empty-line">No proposals match these filters.</p>
+            )}
+            {!list && error && (
+              <p className="empty-line">
+                Proposals could not be loaded. Refresh the workspace to retry.
+              </p>
             )}
           </div>
           <div className="proposal-more">
@@ -670,7 +678,9 @@ function ProposalQueue({
                 void loadPage(filters, list.view.next_cursor, list.revision)
               }
             >
-              {list?.view.next_cursor == null ? "All shown" : "Load more"}
+              {list && list.view.next_cursor == null
+                ? "All shown"
+                : "Load more"}
             </Button>
           </div>
         </div>

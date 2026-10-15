@@ -933,7 +933,7 @@ export function Console({ demo }: { demo: boolean }) {
                         data-active={simulation ? "true" : undefined}
                         aria-hidden={simulation ? undefined : true}
                       >
-                        Simulation reaches outside this view:{" "}
+                        Simulated reach outside this view:{" "}
                         <span className="simulation-count">
                           {formatCount(simulation ? outsideView : 0)}
                         </span>

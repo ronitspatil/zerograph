@@ -218,7 +218,7 @@ describe("bounded graph exploration", () => {
     // The count sits last, in a fixed-width box, so the bar never re-wraps.
     await waitFor(() =>
       expect(document.querySelector(".simulation-note")).toHaveTextContent(
-        "Server-side simulation, affected nodes outside the visible view: 1",
+        "Simulated reach outside this view: 1",
       ),
     );
     expect(document.querySelector(".simulation-count")).toHaveTextContent(

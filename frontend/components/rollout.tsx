@@ -110,9 +110,9 @@ export function Rollout({
     <section className="rollout-panel" aria-label="Rollout">
       <div className="notice rollout-notice">
         <b>Nothing is applied by ZeroGraph.</b> Each change is a draft pull
-        request in your policy repository; merging happens there. Per topic, the
-        first role is the canary: the others wait until it is merged and{" "}
-        {list ? list.watch_days : 7} days pass without AccessDenied events.
+        request in your policy repository. Per topic, the other roles wait for
+        the canary to merge and run {list ? list.watch_days : 7} days without
+        AccessDenied events.
       </div>
       {list && !list.gitops_configured && (
         <div className="notice rollout-warning">
@@ -252,7 +252,7 @@ export function Rollout({
       </div>
       <small className="proposal-footnote">
         {canAdmin
-          ? "Mark merged and Mark reverted record what happened in your repository. A revert restores the original policies byte for byte."
+          ? "Mark merged and Mark reverted record what happened in your repository; a revert restores the original policies exactly."
           : "Administrators open pull requests and record merges."}
       </small>
     </section>

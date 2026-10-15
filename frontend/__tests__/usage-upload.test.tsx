@@ -170,9 +170,9 @@ it("overview tile decomposes excess privilege and labels its evidence", () => {
     dormant_roles: 12,
   };
   render(<ExcessPrivilegePanel tile={tile} />);
-  expect(screen.getByText("98%")).toBeInTheDocument();
-  expect(screen.getByText("63%")).toBeInTheDocument();
-  expect(screen.getByText("48% / 48%")).toBeInTheDocument();
+  expect(screen.getByText("98.3%")).toBeInTheDocument();
+  expect(screen.getByText("63.3%")).toBeInTheDocument();
+  expect(screen.getByText("47.9% / 47.9%")).toBeInTheDocument();
   expect(screen.getByText("97,713 (21,000)")).toBeInTheDocument();
   expect(screen.getByText("6,097")).toBeInTheDocument();
   expect(
