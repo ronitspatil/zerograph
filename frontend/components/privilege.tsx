@@ -1,5 +1,5 @@
 "use client";
-import { formatCount, formatPercent, formatPp } from "@/lib/format";
+import { formatCount, formatPercent } from "@/lib/format";
 import type {
   ExcessPrivilegeTile,
   PrivilegeAggregate,
@@ -131,8 +131,8 @@ export function ExcessPrivilegePanel({
 }
 
 /**
- * "98.2% → 97.9%" with its change in percentage points beside it, the one way a
- * before/after share is shown. The arrow text stays in its own element.
+ * "98.2% → 97.9%", the one way a before/after share is shown; its change in
+ * percentage points (formatPp) leads the caption underneath.
  */
 export function ShareChange({
   before,
@@ -141,13 +141,9 @@ export function ShareChange({
   before: number | null | undefined;
   after: number | null | undefined;
 }) {
-  const pp = formatPp(before, after);
   return (
-    <>
-      <span>
-        {formatPercent(before)} → {formatPercent(after)}
-      </span>
-      {pp && <span className="delta">{pp}</span>}
-    </>
+    <span>
+      {formatPercent(before)} → {formatPercent(after)}
+    </span>
   );
 }

@@ -787,19 +787,6 @@
     line-height: 1.4;
     color: var(--text);
   }
-  /* Before → after shares: the change in percentage points sits beside it. */
-  .share-change {
-    display: flex;
-    align-items: baseline;
-    flex-wrap: wrap;
-    gap: 0 8px;
-  }
-  .share-change .delta {
-    font-size: 12px;
-    font-weight: 500;
-    letter-spacing: 0;
-    color: var(--text-secondary);
-  }
   /* Numeric table columns: right-aligned, tabular figures. */
   th.num,
   td.num {
@@ -1906,7 +1893,7 @@
   }
   .usage-intro {
     font-size: 12px;
-    margin: 12px 0 0;
+    margin: 16px 0 12px;
   }
   .usage-services {
     display: flex;
@@ -2372,6 +2359,10 @@
     }
   }
   @media (max-width: 600px) {
+    /* One filter per row: no truncated option labels on phones. */
+    .filters select {
+      flex-basis: 100%;
+    }
     .rollout-row {
       grid-template-columns: minmax(0, 1fr);
     }
@@ -2379,7 +2370,7 @@
       justify-content: flex-start;
     }
     .proposal-row {
-      grid-template-columns: 72px minmax(0, 1fr);
+      grid-template-columns: 76px minmax(0, 1fr);
     }
     .proposal-row-meta {
       display: none;

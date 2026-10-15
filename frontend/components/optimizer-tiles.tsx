@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { api, ApiError } from "@/lib/api";
-import { formatCount } from "@/lib/format";
+import { formatCount, formatPp } from "@/lib/format";
 import { epiPrecise } from "@/lib/proposals";
 import { ShareChange } from "@/components/privilege";
 import type { OptimizerOverview, WhatIfSide } from "@/lib/types";
@@ -66,7 +66,7 @@ export function OptimizerTiles({
         </strong>
         <small>
           {ready
-            ? `Without hubs ${arrowCore(data.now.identities, data.after_accepted.identities)} · ${count(data.accepted.selected)} accepted`
+            ? `${formatPp(data.now.identities?.epi, data.after_accepted.identities?.epi)} · without hubs ${arrowCore(data.now.identities, data.after_accepted.identities)} · ${count(data.accepted.selected)} accepted`
             : note || "Excess privilege index, what-if"}
         </small>
       </div>
@@ -84,7 +84,7 @@ export function OptimizerTiles({
         </strong>
         <small>
           {ready
-            ? `Without hubs ${arrowCore(data.now.identities, data.after_high.identities)} · ${count(data.high.selected)} proposals`
+            ? `${formatPp(data.now.identities?.epi, data.after_high.identities?.epi)} · without hubs ${arrowCore(data.now.identities, data.after_high.identities)} · ${count(data.high.selected)} proposals`
             : "If every high-tier proposal applied"}
         </small>
       </div>

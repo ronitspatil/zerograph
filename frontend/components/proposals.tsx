@@ -7,7 +7,7 @@ import {
   useState,
 } from "react";
 import { api, ApiError } from "@/lib/api";
-import { formatCount } from "@/lib/format";
+import { formatCount, formatPp } from "@/lib/format";
 import {
   ATTRIBUTION_LABELS,
   COVERAGE_LABELS,
@@ -446,7 +446,7 @@ function ProposalQueue({
           </strong>
           <small>
             {high
-              ? `Without hubs ${epiPrecise(high.identities.before.epi_excl_hubs)} → ${epiPrecise(high.identities.after.epi_excl_hubs)}`
+              ? `${formatPp(high.identities.before.epi, high.identities.after.epi)} · without hubs ${epiPrecise(high.identities.before.epi_excl_hubs)} → ${epiPrecise(high.identities.after.epi_excl_hubs)}`
               : "Excess privilege index"}
           </small>
         </div>
@@ -464,7 +464,7 @@ function ProposalQueue({
           </strong>
           <small>
             {summary
-              ? `${count(summary.high_tier.counts.grants_removed ?? 0)} grants · ${count(summary.high_tier.counts.disabled_nodes ?? 0)} disabled, if all applied`
+              ? `${high ? `${formatPp(high.roles.before.epi, high.roles.after.epi)} · ` : ""}${count(summary.high_tier.counts.grants_removed ?? 0)} grants · ${count(summary.high_tier.counts.disabled_nodes ?? 0)} disabled, if all applied`
               : "What-if, not applied"}
           </small>
         </div>

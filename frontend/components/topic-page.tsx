@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { ArrowLeft, LoaderCircle } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
-import { formatCount } from "@/lib/format";
+import { formatCount, formatPp } from "@/lib/format";
 import { epiPrecise, TIER_HINTS, TIER_LABELS, TIERS } from "@/lib/proposals";
 import { selectionBody, setDescription, useProposalSet } from "@/lib/optimized";
 import type {
@@ -308,7 +308,7 @@ export function TopicPage({
           </strong>
           <small>
             {after
-              ? `Without hubs ${epiPrecise(after.identities?.before.epi_excl_hubs)} → ${epiPrecise(after.identities?.after.epi_excl_hubs)} · ${setDescription(set)}`
+              ? `${formatPp(topicEpi(after, "before"), topicEpi(after, "after"))} · without hubs ${epiPrecise(after.identities?.before.epi_excl_hubs)} → ${epiPrecise(after.identities?.after.epi_excl_hubs)} · ${setDescription(set)}`
               : setDescription(set)}
           </small>
         </div>
@@ -326,7 +326,7 @@ export function TopicPage({
           </strong>
           <small>
             {after
-              ? `Without hubs ${epiPrecise(after.roles?.before.epi_excl_hubs)} → ${epiPrecise(after.roles?.after.epi_excl_hubs)}`
+              ? `${formatPp(after.roles?.before.epi, after.roles?.after.epi)} · without hubs ${epiPrecise(after.roles?.before.epi_excl_hubs)} → ${epiPrecise(after.roles?.after.epi_excl_hubs)}`
               : "What-if, not applied"}
           </small>
         </div>
