@@ -779,6 +779,61 @@
   .live-label.warning {
     color: var(--warning);
   }
+  /* One panel title style, whatever the heading level underneath. */
+  .panel-heading h2,
+  .panel-heading h3 {
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.4;
+    color: var(--text);
+  }
+  /* Before → after shares: the change in percentage points sits beside it. */
+  .share-change {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0 8px;
+  }
+  .share-change .delta {
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0;
+    color: var(--text-secondary);
+  }
+  /* Numeric table columns: right-aligned, tabular figures. */
+  th.num,
+  td.num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  td.time {
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  /* File inputs: the picker button fitted inside the control like a small button. */
+  input[type="file"] {
+    padding: 0 12px 0 4px;
+    line-height: calc(var(--control-h) - 2px);
+    color: var(--muted);
+    cursor: pointer;
+  }
+  input[type="file"]::file-selector-button {
+    height: 24px;
+    margin: 0 12px 0 0;
+    padding: 0 12px;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    background: var(--surface-raised);
+    color: var(--text);
+    font: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background-color 0.12s;
+  }
+  input[type="file"]:hover::file-selector-button {
+    background: var(--hover);
+  }
 
   /* Graph */
   .graph-view-switch {
@@ -1349,25 +1404,31 @@
   .privilege-panel .text-link {
     padding: 0;
   }
-  .chart-panel > p {
-    padding: 12px 16px 0;
-    font-size: 12px;
-  }
   .chart-panel > div:last-child {
-    padding: 12px 16px 16px;
-  }
-  .summary-panel {
     padding: 16px;
+  }
+  /* Summary panels: the shared panel heading, then one 16px inset body. */
+  .summary-panel {
+    padding: 0 16px 16px;
+    display: flex;
+    flex-direction: column;
+  }
+  .summary-panel > .panel-heading {
+    margin: 0 -16px;
+  }
+  .summary-panel > .button {
+    align-self: flex-start;
   }
   .summary-number {
     display: flex;
     gap: 8px;
     align-items: baseline;
-    margin: 12px 0 8px;
+    margin: 16px 0 8px;
   }
   .summary-number b {
     font-size: 24px;
     font-weight: 600;
+    letter-spacing: -0.4px;
     font-variant-numeric: tabular-nums;
   }
   .summary-number span {

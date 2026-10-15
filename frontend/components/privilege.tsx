@@ -1,5 +1,5 @@
 "use client";
-import { formatCount } from "@/lib/format";
+import { formatCount, formatPercent, formatPp } from "@/lib/format";
 import type {
   ExcessPrivilegeTile,
   PrivilegeAggregate,
@@ -22,9 +22,7 @@ export const EVIDENCE_LABELS: Record<UsageEvidence["status"], string> = {
 
 /** The excess-privilege index as a percentage of granted weight that is not needed. */
 export function epiText(value: number | null | undefined): string {
-  return typeof value === "number" && Number.isFinite(value)
-    ? `${Math.round(value * 100)}%`
-    : "—";
+  return formatPercent(value);
 }
 
 /** "used", "inferred", "none" or a mix, from basis counts. */
@@ -85,12 +83,12 @@ export function ExcessPrivilegePanel({
   const ready = tile && tile.status !== "none";
   return (
     <div className="panel summary-panel privilege-panel">
-      <h3>Excess privilege</h3>
+      <div className="panel-heading">
+        <h2>Excess privilege</h2>
+      </div>
       <div className="summary-number">
         <b>{ready ? epiText(tile.identities.epi) : "—"}</b>
-        <span>
-          of identities&apos; granted sensitivity weight is not needed
-        </span>
+        <span>of granted sensitivity weight not needed</span>
       </div>
       <div className="sidebar-stat">
         <span>Without hub roles</span>
@@ -116,11 +114,11 @@ export function ExcessPrivilegePanel({
         <span>Dormant identities</span>
         <b>{ready ? formatCount(tile.dormant_identities) : "—"}</b>
       </div>
-      <p>
+      <p title="Granted access counts as needed only where use was observed, or where same-topic peers use it.">
         {!tile
           ? "Computed with the relationship topics of the current revision."
           : ready
-            ? `${EVIDENCE_LABELS[tile.status]} · ${windowText(tile)} · needed from ${basisText(tile.identities).toLowerCase()}. Granted access only counts as needed where use was observed (or peers use it).`
+            ? `${EVIDENCE_LABELS[tile.status]} · ${windowText(tile)} · needed from ${basisText(tile.identities).toLowerCase()}.`
             : "Upload a CloudTrail export in Data sources to compare granted access with observed use."}
       </p>
       {onOpenSources && tile?.status === "none" && (
@@ -129,5 +127,27 @@ export function ExcessPrivilegePanel({
         </button>
       )}
     </div>
+  );
+}
+
+/**
+ * "98.2% → 97.9%" with its change in percentage points beside it, the one way a
+ * before/after share is shown. The arrow text stays in its own element.
+ */
+export function ShareChange({
+  before,
+  after,
+}: {
+  before: number | null | undefined;
+  after: number | null | undefined;
+}) {
+  const pp = formatPp(before, after);
+  return (
+    <>
+      <span>
+        {formatPercent(before)} → {formatPercent(after)}
+      </span>
+      {pp && <span className="delta">{pp}</span>}
+    </>
   );
 }

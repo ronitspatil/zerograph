@@ -287,13 +287,8 @@ export function GlobalMap({
         `${count(detail.view.shown_member_edges)} / ${count(detail.view.total_member_edges)} relationships inside · ` +
         `${count(detail.cluster.boundary_edges)} leave this cluster` +
         (detail.view.truncated ? " · Partial cluster" : " · Complete cluster");
-  const statusSpans = (text: string) =>
-    map ? (
-      <>
-        <span>{text}</span>
-        <span className="global-map-notice">{map.view.notice}</span>
-      </>
-    ) : null;
+  // The structural notice lives once in the sidebar (and in the bar's tooltip).
+  const statusSpans = (text: string) => (map ? <span>{text}</span> : null);
   const statusSizer = statusSpans(topStatus);
   const lensSwitch = (
     <span className="global-map-lens" role="group" aria-label="Map lens">

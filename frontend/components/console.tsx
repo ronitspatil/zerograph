@@ -19,7 +19,7 @@ import {
   X,
 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
-import { formatCount } from "@/lib/format";
+import { formatCount, formatDateTime } from "@/lib/format";
 import type {
   ProposalTier,
   Actor,
@@ -69,32 +69,29 @@ type View =
 const titles: Record<View, { title: string; description: string }> = {
   overview: {
     title: "Security overview",
-    description:
-      "A clear view of your identities, data, and the access between them.",
+    description: "Your identities, data and the access between them.",
   },
   graph: {
     title: "Identity & data graph",
     description:
-      "Explore effective access. Find the paths that put your data at risk.",
+      "Explore effective access and the paths that put data at risk.",
   },
   topic: {
     title: "Topic",
-    description:
-      "One relationship topic as it is and as the selected proposals would leave it.",
+    description: "One topic as granted today and after the selected proposals.",
   },
   remediation: {
     title: "Remediation",
     description:
-      "Least-privilege proposals with their evidence: review, accept, and roll out as draft pull requests. Nothing is applied by ZeroGraph.",
+      "Review least-privilege proposals and roll them out as draft pull requests.",
   },
   sources: {
     title: "Data sources",
-    description:
-      "Bring your cloud identities, agents, and data into one graph.",
+    description: "Bring cloud identities, agents and data into one graph.",
   },
   activity: {
     title: "Audit activity",
-    description: "Trace collection, simulations, and remediation decisions.",
+    description: "Collection, simulations and remediation decisions.",
   },
 };
 const nav = [
@@ -265,6 +262,20 @@ export function Console({ demo }: { demo: boolean }) {
       if (!controller.signal.aborted) setLoading(false);
     }
   }, []);
+  // Escape closes the open overlay (simulator drawer or platform guide).
+  useEffect(() => {
+    if (!simulating && !showHelp) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (showHelp) setShowHelp(false);
+      else {
+        setSimulating(false);
+        setSimulation(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [simulating, showHelp]);
   useEffect(() => {
     void refresh();
     return () => {
@@ -701,20 +712,29 @@ export function Console({ demo }: { demo: boolean }) {
               <h1>{titles[view].title}</h1>
               <p>{titles[view].description}</p>
             </div>
-            <div className="heading-actions">
-              <Button
-                variant="outline"
-                onClick={exportGraph}
-                disabled={!filtered.nodes.length || revisionStale}
-              >
-                <ArrowDownToLine size={14} aria-hidden="true" />
-                {roles ? "Export visible role page" : "Export visible view"}
-              </Button>
-              <Button onClick={() => setView("sources")}>
-                <Plus size={14} aria-hidden="true" />
-                Add source
-              </Button>
-            </div>
+            {/* Export belongs to the graph it exports; Add source is the page's one
+                primary action everywhere except on Data sources itself. */}
+            {view !== "sources" && view !== "topic" && (
+              <div className="heading-actions">
+                {view === "graph" && (
+                  <Button
+                    variant="outline"
+                    onClick={exportGraph}
+                    disabled={!filtered.nodes.length || revisionStale}
+                  >
+                    <ArrowDownToLine size={14} aria-hidden="true" />
+                    {roles ? "Export visible role page" : "Export visible view"}
+                  </Button>
+                )}
+                <Button
+                  variant={view === "remediation" ? "outline" : "default"}
+                  onClick={() => setView("sources")}
+                >
+                  <Plus size={14} aria-hidden="true" />
+                  Add source
+                </Button>
+              </div>
+            )}
           </div>
           {error && (
             <div className="error-banner" role="alert">
@@ -782,9 +802,7 @@ export function Console({ demo }: { demo: boolean }) {
                         <div>
                           <h2>Global map</h2>
                           <span className="muted">
-                            The whole revision, grouped by graph structure or by
-                            topic. Open a cluster or topic to drill down; open a
-                            member to explore its neighborhood.
+                            The whole revision, grouped by structure or topic
                           </span>
                         </div>
                         {revisionStale && (
@@ -828,20 +846,22 @@ export function Console({ demo }: { demo: boolean }) {
                               {formatCount(filtered.nodes.length)} /{" "}
                               {formatCount(roles.view.total_roles)} roles ·{" "}
                               {formatCount(filtered.edges.length)} /{" "}
-                              {formatCount(roles.view.total_role_edges)} direct
-                              role links visible
+                              {formatCount(roles.view.total_role_edges)} role
+                              links
                               {roles.view.role_map_truncated ||
                               filtered.nodes.length < roles.nodes.length ||
                               filtered.edges.length < roles.edges.length
                                 ? " · Partial role map"
                                 : " · Complete role map"}
-                              . Other identities and data assets excluded.
-                              Workspace: {formatCount(roles.view.total_nodes)}{" "}
-                              nodes · {formatCount(roles.view.total_edges)}{" "}
-                              relationships
-                              {roles.view.truncated
-                                ? " · Partial workspace"
-                                : " · Complete workspace"}
+                              {" · "}
+                              <span title="Identities and data assets are not on the role map">
+                                Workspace {formatCount(roles.view.total_nodes)}{" "}
+                                nodes · {formatCount(roles.view.total_edges)}{" "}
+                                relationships
+                                {roles.view.truncated
+                                  ? " · Partial workspace"
+                                  : " · Complete workspace"}
+                              </span>
                             </>
                           ) : (
                             <>
@@ -871,12 +891,12 @@ export function Console({ demo }: { demo: boolean }) {
                     </div>
                     <div className="exploration-status" role="status">
                       {roles
-                        ? "Structural direct role links across the organization (all certainties, not effective permissions). Current-page filters only."
+                        ? "Structural direct role links, not effective permissions"
                         : graph.view.mode === "neighborhood"
                           ? "One-hop neighborhood"
                           : "Bounded initial view"}
-                      . Filters apply only to visible nodes. Search covers the
-                      whole tenant revision.
+                      . Filters apply only to visible nodes; search covers the
+                      whole revision.
                       <Button
                         variant="outline"
                         size="small"
@@ -903,12 +923,8 @@ export function Console({ demo }: { demo: boolean }) {
                           Next role page
                         </Button>
                       )}
-                      {roles && (
-                        <span>
-                          {roles.view.has_more
-                            ? "More role pages available."
-                            : "Last role page."}
-                        </span>
+                      {roles && !roles.view.has_more && (
+                        <span>Last role page</span>
                       )}
                       {/* Always rendered, and the count sits last in a fixed-width box, so a
                           simulation result (of any size) never re-wraps this bar. */}
@@ -917,8 +933,7 @@ export function Console({ demo }: { demo: boolean }) {
                         data-active={simulation ? "true" : undefined}
                         aria-hidden={simulation ? undefined : true}
                       >
-                        Server-side simulation, affected nodes outside the
-                        visible view:{" "}
+                        Simulation reaches outside this view:{" "}
                         <span className="simulation-count">
                           {formatCount(simulation ? outsideView : 0)}
                         </span>
@@ -1240,15 +1255,17 @@ export function Console({ demo }: { demo: boolean }) {
                   <div className="overview-grid">
                     <div className="panel chart-panel">
                       <div className="panel-heading">
-                        <h3>Data sensitivity</h3>
+                        <div>
+                          <h2>Data sensitivity</h2>
+                          <span className="muted">Classified data assets</span>
+                        </div>
                       </div>
-                      <p className="muted">
-                        Classified data assets across the current snapshot
-                      </p>
                       <SensitivityChart sensitivity={overview?.sensitivity} />
                     </div>
                     <div className="panel summary-panel">
-                      <h3>Access evidence</h3>
+                      <div className="panel-heading">
+                        <h2>Access evidence</h2>
+                      </div>
                       <div className="summary-number">
                         <b>{formatCount(overview?.data_assets)}</b>
                         <span>connected data assets</span>
@@ -1262,9 +1279,8 @@ export function Console({ demo }: { demo: boolean }) {
                         <b>{formatCount(overview?.uncertain_edges)}</b>
                       </div>
                       <p>
-                        Scores prioritize review using sensitivity-weighted
-                        reachability. They represent potential exposure rather
-                        than breach probability.
+                        Scores rank potential exposure by sensitivity-weighted
+                        reachability, not breach probability.
                       </p>
                       <Button
                         variant="outline"
@@ -1363,7 +1379,9 @@ export function Console({ demo }: { demo: boolean }) {
                           <tr key={e.id}>
                             <td>{e.action}</td>
                             <td>{e.actor}</td>
-                            <td>{new Date(e.created_at).toLocaleString()}</td>
+                            <td className="time">
+                              {formatDateTime(e.created_at)}
+                            </td>
                             <td>
                               <details>
                                 <summary>View details</summary>
@@ -1431,14 +1449,12 @@ export function Console({ demo }: { demo: boolean }) {
               reachable data assets.
             </p>
             <p>
-              4. Review least-privilege proposals in Remediation, compare the
-              current and optimized graph per topic, and accept them. An
-              administrator turns accepted proposals into draft pull requests;
-              nothing is applied by ZeroGraph.
+              4. Review least-privilege proposals in Remediation and accept
+              them. Administrators turn accepted proposals into draft pull
+              requests; nothing is applied by ZeroGraph.
             </p>
             <p>
-              Metadata classifications are hypotheses. Validate them before
-              treating assets as confirmed sensitive data.
+              Metadata classifications are hypotheses until you validate them.
             </p>
             <Button onClick={() => setShowHelp(false)}>Got it</Button>
           </section>

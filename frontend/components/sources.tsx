@@ -3,7 +3,7 @@ import { useState } from "react";
 import { RefreshCw } from "lucide-react";
 import type { Job } from "@/lib/types";
 import { api } from "@/lib/api";
-import { formatCount } from "@/lib/format";
+import { formatCount, formatDateTime } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { byteLength, INLINE_LIMIT_BYTES, uploadSnapshot } from "@/lib/upload";
 import { UsageUpload } from "@/components/usage-upload";
@@ -71,24 +71,15 @@ export function Sources({
       <div className="source-cards">
         <div className="panel">
           <h3>AWS account</h3>
-          <p>
-            Read-only IAM role, user, group and S3 metadata collection through
-            an administrator-configured role.
-          </p>
+          <p>Read-only IAM and data-store metadata via a configured role.</p>
         </div>
         <div className="panel">
           <h3>AI agents & MCP</h3>
-          <p>
-            Import server inventories, agent configurations, and explicit
-            tool-to-data bindings.
-          </p>
+          <p>Server inventories, agent configs and tool-to-data bindings.</p>
         </div>
         <div className="panel">
           <h3>Graph snapshot</h3>
-          <p>
-            Import normalized identity and data relationships from your internal
-            collectors.
-          </p>
+          <p>Normalized identities and relationships from your collectors.</p>
         </div>
       </div>
       <div className="panel form-panel">
@@ -129,8 +120,7 @@ export function Sources({
               onChange={(e) => void loadFile(e.target.files?.[0])}
             />
             <small className="muted">
-              Files over 3 MB upload in chunks (up to the configured node and
-              edge limits).
+              Files over 3 MB upload in chunks, up to the configured limits.
             </small>
           </label>
         )}
@@ -168,7 +158,7 @@ export function Sources({
               <tr>
                 <th>Source</th>
                 <th>Status</th>
-                <th>Nodes</th>
+                <th className="num">Nodes</th>
                 <th>Started</th>
               </tr>
             </thead>
@@ -187,8 +177,8 @@ export function Sources({
                       {j.status}
                     </span>
                   </td>
-                  <td>{formatCount(j.node_count)}</td>
-                  <td>{new Date(j.created_at).toLocaleString()}</td>
+                  <td className="num">{formatCount(j.node_count)}</td>
+                  <td className="time">{formatDateTime(j.created_at)}</td>
                 </tr>
               ))}
             </tbody>

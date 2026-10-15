@@ -31,6 +31,7 @@ import type {
 } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Rollout } from "@/components/rollout";
+import { ShareChange } from "@/components/privilege";
 import { setCustomSet, useProposalSet } from "@/lib/optimized";
 
 const PAGE = 50;
@@ -432,11 +433,16 @@ function ProposalQueue({
           </small>
         </div>
         <div className="metric-card">
-          <span>Identity EPI now → after high tier</span>
-          <strong>
-            {high
-              ? `${epiPrecise(high.identities.before.epi)} → ${epiPrecise(high.identities.after.epi)}`
-              : "—"}
+          <span>Identity EPI, now → high tier</span>
+          <strong className="share-change">
+            {high ? (
+              <ShareChange
+                before={high.identities.before.epi}
+                after={high.identities.after.epi}
+              />
+            ) : (
+              "—"
+            )}
           </strong>
           <small>
             {high
@@ -445,11 +451,16 @@ function ProposalQueue({
           </small>
         </div>
         <div className="metric-card">
-          <span>Role EPI now → after high tier</span>
-          <strong>
-            {high
-              ? `${epiPrecise(high.roles.before.epi)} → ${epiPrecise(high.roles.after.epi)}`
-              : "—"}
+          <span>Role EPI, now → high tier</span>
+          <strong className="share-change">
+            {high ? (
+              <ShareChange
+                before={high.roles.before.epi}
+                after={high.roles.after.epi}
+              />
+            ) : (
+              "—"
+            )}
           </strong>
           <small>
             {summary
@@ -805,7 +816,7 @@ function ProposalEvidence({
             ? "Never in the window"
             : p.type === "remove_assumption"
               ? "Never assumed in the window"
-            : value(evidence, "last_used_hint")}
+              : value(evidence, "last_used_hint")}
         </dd>
         {peers && (
           <>

@@ -10,7 +10,7 @@ import {
 import dynamic from "next/dynamic";
 import { LoaderCircle, Tags } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
-import { formatCount } from "@/lib/format";
+import { formatCount, formatPercent } from "@/lib/format";
 import type {
   ClusterLink,
   ClusterSummary,
@@ -118,7 +118,7 @@ const SEED_LABELS: Record<string, string> = {
   fallback: "Service type",
 };
 
-const percent = (share: number) => `${Math.round(share * 100)}%`;
+const percent = formatPercent;
 
 /** A topic drawn with the cluster canvas: circle area is the topic's sensitivity weight. */
 export function topicCircle(topic: TopicSummary): ClusterSummary {
@@ -455,25 +455,24 @@ export function TopicLens({
               legend={
                 restyle
                   ? [
-                      { text: "Circle area: sensitivity weight" },
+                      { text: "Area: sensitivity weight" },
+                      { text: "EPI after, without hubs:" },
                       ...EPI_COLORS.map((s) => ({
-                        text: `EPI after, without hubs: ${s.text}`,
+                        text: s.text,
                         color: s.color,
                       })),
-                      {
-                        text: "Unassigned or no evidence",
-                        color: FALLBACK_COLOR,
-                      },
-                      { text: "Line width: cross-topic grants left" },
+                      { text: "no evidence", color: FALLBACK_COLOR },
+                      { text: "Line: cross-topic grants left" },
                     ]
                   : [
-                      { text: "Circle area: sensitivity weight" },
+                      { text: "Area: sensitivity weight" },
+                      { text: "Weight outside the topic:" },
                       ...SHARE_COLORS.map((s) => ({
-                        text: `Outside the topic: ${s.text}`,
+                        text: s.text,
                         color: s.color,
                       })),
-                      { text: "Unassigned", color: FALLBACK_COLOR },
-                      { text: "Line width: cross-topic grants" },
+                      { text: "unassigned", color: FALLBACK_COLOR },
+                      { text: "Line: cross-topic grants" },
                     ]
               }
             />
@@ -865,9 +864,12 @@ function TopicFacts({
 }
 
 /** How an identity's role use was credited: its own attributed sessions or role-level. */
-export function attributionText(member: Pick<TopicMember, "name" | "flags">): string {
+export function attributionText(
+  member: Pick<TopicMember, "name" | "flags">,
+): string {
   if (member.flags.includes("role_level")) return "Role-level (unattributed)";
-  if (member.flags.includes("attributed")) return `Attributed to ${member.name}`;
+  if (member.flags.includes("attributed"))
+    return `Attributed to ${member.name}`;
   return "Own use only (no roles used)";
 }
 

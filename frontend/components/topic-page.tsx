@@ -23,6 +23,7 @@ import {
   epiText,
   EVIDENCE_LABELS,
   PrivilegeRows,
+  ShareChange,
   windowText,
 } from "@/components/privilege";
 import { FLAG_LABELS, topicEpi } from "@/components/topic-lens";
@@ -294,11 +295,16 @@ export function TopicPage({
           </small>
         </div>
         <div className="metric-card">
-          <span>Identity EPI now → after</span>
-          <strong>
-            {after
-              ? `${epiPrecise(topicEpi(after, "before"))} → ${epiPrecise(topicEpi(after, "after"))}`
-              : "—"}
+          <span>Identity EPI, now → after</span>
+          <strong className="share-change">
+            {after ? (
+              <ShareChange
+                before={topicEpi(after, "before")}
+                after={topicEpi(after, "after")}
+              />
+            ) : (
+              "—"
+            )}
           </strong>
           <small>
             {after
@@ -307,11 +313,16 @@ export function TopicPage({
           </small>
         </div>
         <div className="metric-card">
-          <span>Role EPI now → after</span>
-          <strong>
-            {after
-              ? `${epiPrecise(after.roles?.before.epi)} → ${epiPrecise(after.roles?.after.epi)}`
-              : "—"}
+          <span>Role EPI, now → after</span>
+          <strong className="share-change">
+            {after ? (
+              <ShareChange
+                before={after.roles?.before.epi}
+                after={after.roles?.after.epi}
+              />
+            ) : (
+              "—"
+            )}
           </strong>
           <small>
             {after
