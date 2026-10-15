@@ -586,6 +586,7 @@ function ProposalQueue({
         ) : (
           <>
             <Button
+              variant="outline"
               size="small"
               disabled={!bulkScope || !canAdmin || !bulkRows.length}
               onClick={() => {
@@ -906,6 +907,7 @@ function ProposalEvidence({
       <span className="section-label">Review</span>
       <div className="proposal-actions">
         <Button
+          variant={p.decision?.state === "accepted" ? "outline" : "default"}
           disabled={!canAdmin || p.decision?.state === "accepted"}
           onClick={() => onDecide("accepted")}
         >
@@ -942,6 +944,9 @@ function ProposalEvidence({
           <>
             <div className="proposal-actions">
               <Button
+                variant={
+                  p.decision?.state === "accepted" ? "default" : "outline"
+                }
                 disabled={
                   !canAdmin ||
                   creating ||

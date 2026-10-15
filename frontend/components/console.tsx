@@ -727,7 +727,11 @@ export function Console({ demo }: { demo: boolean }) {
                   </Button>
                 )}
                 <Button
-                  variant={view === "remediation" ? "outline" : "default"}
+                  variant={
+                    view === "overview" || view === "activity"
+                      ? "default"
+                      : "outline"
+                  }
                   onClick={() => setView("sources")}
                 >
                   <Plus size={14} aria-hidden="true" />
