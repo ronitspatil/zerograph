@@ -78,6 +78,7 @@ from app.db.models import (
 from app.db.session import session_factory
 from app.graph.compact import (
     BREAK_GLASS,
+    COLLECTOR,
     EDGE_CODE,
     EDGE_KINDS,
     EXEMPT,
@@ -94,7 +95,8 @@ from app.graph.whatif import BASIS_CODES, IDENTITY_RECORD, ROLE_RECORD, WhatIfMo
 
 # Bump when proposal types, tiers, evidence or stored fields change: other versions read as missing.
 # 2: remove_assumption; identity use includes attributed role-session use.
-PROPOSAL_VERSION = 2
+# 3: nothing is proposed for (or merged into) the collector's own identity.
+PROPOSAL_VERSION = 3
 TIERS = ("high", "medium", "low", "inferred", "manual")
 TYPES = (
     "remove_grant",
@@ -778,6 +780,14 @@ def compute_proposals(
                     detail=evidence,
                 )
             )
+
+    # The collector's own identity is never a subject or target: its access exists for collection.
+    collector = {node for node, flags in safety.items() if flags & COLLECTOR}
+    if collector:
+        kept = [p for p in proposals if p.subject not in collector and p.target not in collector]
+        if len(kept) < len(proposals):
+            guards["collector_excluded"] += len(proposals) - len(kept)
+        proposals = kept
 
     # IDs, deterministic order.
     for proposal in proposals:
