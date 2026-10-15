@@ -21,11 +21,15 @@ setting, so nothing here is reachable from production configuration). Then:
    AWS-managed ``AWSSupportServiceRolePolicy``), Glue/Athena/Lake Formation nodes, edges
    and modes, topics (``data-lake`` and ``finance`` forms), proposals (the deliberate
    cross-topic over-grant is a high-tier ``remove_grant``; Lake Formation grants are
-   ``manual``; the dormant role is proposed for disabling).
+   ``manual``; the dormant role is proposed for disabling; the collector role is never
+   proposed), every edge backed by a collected Allow, and ``uncollected_grant_sources``
+   flags where Object Ownership allows ACLs.
 4. **Variants**: SCPs read through the management account (as a delegated administrator
    would; moto keeps Organizations per account), and an LF-Tag grant, whose resolution
    needs APIs moto does not implement: the collector must degrade to ``unknown`` modes,
    never under-state access.
+5. **S3 scale**: 81 principals x 100 buckets and 300 x 300 collect within budget, with
+   exactly the planted edges.
 
 Every API moto lacks or answers differently from AWS is recorded under ``moto_gaps``
 (with the collector warning it produced), separately from ``failures`` (real collector

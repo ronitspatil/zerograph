@@ -67,6 +67,30 @@ objects, reads object contents, creates AWS resources or changes policies.
   the same S3 actions and `sts:AssumeRole` into every role. A user in a group missing
   from the inventory, or a user/group ARN outside the verified account and
   partition, fails the collection.
+- **Edges require a grant.** An S3, Glue, Athena or role-assumption edge is created
+  only when a collected policy grants the action: an identity-policy Allow (certain or
+  possible), a bucket policy, the Glue catalog policy or a role trust policy naming the
+  principal, or a Lake Formation grant. Permissions boundaries, SCPs, RCPs and session
+  policies only restrict: a collected one can remove an edge, an unknown or uncollected
+  one only keeps it conditional, and none creates one. Absent any Allow there is no
+  edge, even when other policy domains are unknown (evaluator `restrictions_complete`).
+- **Uncollected grant sources.** `GetBucketOwnershipControls` reads each bucket's
+  Object Ownership (`object_ownership` metadata: the setting, `absent` without ownership
+  controls, or `unknown` when denied). Unless it is `BucketOwnerEnforced`, bucket and
+  object ACLs can grant access the collector does not read; access point and
+  Multi-Region Access Point policies are never read. These are recorded once per bucket
+  as `uncollected_grant_sources` (`["acl", "access_point"]` or `["access_point"]`),
+  counted in artifact coverage (`uncollected_grant_sources`, `object_ownership`
+  observed/absent/unknown) and warned about once (`s3_acl_uncollected`,
+  `s3_access_points_uncollected`), never turned into edges.
+- **The collector's own identity.** The role (or user) the verified STS caller identity
+  belongs to is marked `zerograph_collector` (coverage `collector_principal`:
+  `identified` or `not_inventoried`); its Lake Formation read-only administrator status
+  gets `lakeformation_admin_basis: zerograph_collector` and its edges carry
+  `zerograph_collector:` evidence. Its grants (for example `glue:GetTables` on every
+  table) are left out of topics, the excess-privilege index (counted under the topics
+  summary's `collector_excluded`) and proposals: it is never proposed for removal,
+  disabling or merging.
 Every generated AWS permission edge remains **conditional**. A successful
 inventory is not complete effective-permission or production qualification.
 
@@ -101,9 +125,8 @@ only after the IAM and S3 inventory:
   `glue:UpdateTable`, `glue:DeleteTable`, `glue:BatchCreatePartition` (write),
   each required on the catalog, database and table ARNs; databases
   `glue:GetDatabase` (read) and `glue:CreateTable` (write) on the catalog and
-  database ARNs; Athena workgroups `athena:StartQueryExecution` (read). Unlike S3
-  (where ACLs keep absence unresolved), an absent Glue/Athena grant is a denial:
-  no edge. Evaluations are cached per principal and short-circuit on the catalog.
+  database ARNs; Athena workgroups `athena:StartQueryExecution` (read). As for S3,
+  an absent Glue/Athena grant is no edge. Evaluations are cached per principal and short-circuit on the catalog.
 - **Lake Formation.** `GetDataLakeSettings` (administrators become
   `lakeformation_admin` metadata on their role/user; whether new tables default to
   `IAM_ALLOWED_PRINCIPALS`) and every `ListPermissions` entry (1,000 per page).
@@ -234,7 +257,7 @@ none replaces the live gate below.
   the SDK at it with the standard `AWS_ENDPOINT_URL` (no ZeroGraph endpoint setting
   exists or was added), and runs the CLI (profile, AssumeRole with external ID, data
   lake, Access Advisor) and the in-app job (`process_job` into SQLite and the memory
-  graph, after 95 days of synthetic CloudTrail usage through the usage API). 58 checks
+  graph, after 95 days of synthetic CloudTrail usage through the usage API). 72 checks
   pass: inventory counts, tags, `RoleLastUsed` (observed for the roles used, absent for
   the dormant one), policy documents stored per digest and served by
   `/graph/policies`, Glue/Athena/Lake Formation nodes, edges and modes (3 Lake
@@ -242,8 +265,12 @@ none replaces the live gate below.
   `data-lake` and `finance` topics, the deliberate cross-topic over-grant as a
   high-tier `remove_grant`, an unused Lake Formation grant as `manual`
   (`lakeformation`), the dormant role proposed for disabling, no proposal removing
-  observed use, SCP denies applied (read through the management account) and an
-  unresolvable LF-Tag grant degrading every table to `unknown`. It found that an
+  observed use, SCP denies applied (read through the management account), an
+  unresolvable LF-Tag grant degrading every table to `unknown`, every edge backed by a
+  collected Allow (checked by plain glob matching, independent of the evaluator), ACL
+  flags only where Object Ownership allows ACLs (`ObjectWriter`, none) and not for
+  `BucketOwnerEnforced`, the `finance` topic holding its two roles, the collector role
+  marked and never proposed, and the S3 scale checks below. It found that an
   unparsable AWS response (botocore `ResponseParserError`, an HTML error page) from an
   optional call aborted the whole collection, and that snake_case column names were
   not classified; both are fixed. Recorded emulator gaps (warnings the collector
@@ -254,7 +281,9 @@ none replaces the live gate below.
   no default encryption; `RoleLastUsed` has no `Region`; trust policies, external IDs
   and IAM authorization are not enforced; IAM and Lake Formation pagination is not
   implemented; tables created with default settings list no implicit
-  `IAM_ALLOWED_PRINCIPALS` grant.
+  `IAM_ALLOWED_PRINCIPALS` grant; a bucket created without ownership controls has none
+  (AWS defaults new buckets to `BucketOwnerEnforced` since April 2023); `ListBuckets`
+  honours `MaxBuckets` but never returns a `ContinuationToken`.
 - **Real CloudTrail** (`backend/scripts/qualify_cloudtrail_corpus.py`): the public
   flaws.cloud trail (Summit Route, 251,688,960-byte tar, SHA-256
   `f26c2b8da56bb00d695a57f00f86208117582b9216bb52424d68e718ca2a96aa`; 1,939,207
@@ -286,12 +315,17 @@ none replaces the live gate below.
   actions the corpus lists for Allow statements none is denied except 41 that an
   explicit Deny in the same policy overrides.
 
-**Scale observation (open).** An absent S3 grant stays a conditional edge (ACLs and
-session context are not collected), so every principal gets read and write edges to
-every bucket: about `2 x principals x buckets` edges against `max_edges` (hard maximum
-15,000). The emulator shows 81 principals and 100 buckets (45,003 evaluations, within
-budget) failing with `Graph edge budget exhausted`, and these edges also pull every
-role into the topic holding most buckets (the `finance` roles land in `data-lake`).
+**S3 scale (resolved).** Before edges required a grant, an absent S3 grant was a
+conditional edge (ACLs and session context are not collected), so every principal got
+read and write edges to every bucket: 81 principals and 100 buckets exhausted
+`max_edges` (`Graph edge budget exhausted`), and those edges pulled every role into the
+topic holding most buckets (the `finance` topic had 0 roles; the collector role got a
+high-tier `remove_grant`). Now the edges are the grants: the emulated account publishes
+37 edges instead of 115 (`CAN_READ` 26 instead of 59, `CAN_WRITE` 8 instead of 53,
+`ASSUMES_ROLE` 3), `finance` holds 2 roles, and the scale checks (app roles each granted
+one bucket) collect 81 principals x 100 buckets with the default limits (55,080
+evaluations, 80 edges, 0.6 s) and 300 x 300 with `max_evaluations` raised to 1,000,000
+(629,700 evaluations, 299 edges, 2.7 s), the edges exactly the planted grants.
 
 ## Provision a sandbox read role
 
@@ -314,6 +348,7 @@ SDK calls match the supplied permissions:
 | ListBuckets (MaxBuckets=100) | s3:ListAllMyBuckets | `*` |
 | GetBucketPolicy / GetBucketTagging | s3:GetBucketPolicy / s3:GetBucketTagging | approved bucket ARNs, owning-account condition |
 | GetBucketEncryption | s3:GetEncryptionConfiguration | approved bucket ARNs, owning-account condition |
+| GetBucketOwnershipControls | s3:GetBucketOwnershipControls | approved bucket ARNs, owning-account condition |
 | DescribeOrganization | organizations:DescribeOrganization | `*` |
 | ListParents | organizations:ListParents | explicit account and ancestor OU resources |
 | ListPoliciesForTarget | organizations:ListPoliciesForTarget | account/OU/root resources, SERVICE_CONTROL_POLICY condition |
@@ -337,7 +372,9 @@ Organizations hierarchy APIs generally require management/delegated authority;
 a member-account read role alone may not have it. Optional Organizations denials
 are explicit unknown coverage. SCPs do not restrict management-account principals
 or service-linked roles; the collector honors those exemptions. No RCP, ACL,
-endpoint or session-policy inventory is claimed.
+access point, endpoint or session-policy inventory is claimed: ACLs and access points
+are flagged per bucket (`uncollected_grant_sources`), the others only keep edges
+conditional.
 
 The separate trust example restricts AssumeRole to one operator principal with
 an external-ID condition. The bootstrap policy grants only AssumeRole on the
@@ -385,7 +422,9 @@ Artifact schema v1 includes hashed target account/role identifiers, region,
 aggregate role/user/group/bucket/edge/evaluation/policy-attachment counts, RoleLastUsed
 observed/absent counts, Access Advisor requested/completed counts (when Access Advisor
 is enabled), unevaluated AWS-managed document counts, inventory-completeness flags,
-SCP coverage status, bucket metadata observed/absent/unknown counts, warning-code
+SCP coverage status, bucket metadata observed/absent/unknown counts (policy, tags,
+encryption, Object Ownership), uncollected grant source counts (`acl`, `access_point`),
+whether the collector's own principal was identified, warning-code
 counts, budgets, SDK invocation/page counts and duration. It includes no resource
 names, raw policy JSON, credentials, external IDs or exception strings. Correlate
 its hashes with the approved target in your private change record. Failure returns
@@ -446,8 +485,9 @@ selects the regional client when provided.
 
 Missing grants in known role trust policies no longer manufacture AssumeRole
 paths. Supported trust/identity policies determine possible assumptions; missing
-policy domains can still restrict them, so emitted edges stay conditional. S3
-absence-of-grant remains uncertain because ACL/session/resource context is missing.
+policy domains can still restrict them, so emitted edges stay conditional. Likewise an
+absent S3 grant is no edge: unknown session and resource-control context can only
+restrict, and the grant sources not read (ACLs, access points) are flagged on the bucket.
 
 ## Sources and remaining gates
 

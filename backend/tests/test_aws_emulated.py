@@ -39,6 +39,12 @@ def test_collector_publishes_an_emulated_account_end_to_end(tmp_path):
         "the cross-topic over-grant is a high-tier remove_grant",
         "lake formation modes resolved",
         "scp deny removes s3:DeleteObject from write edges",
+        "no edge without a collected Allow (identity, bucket, catalog or trust policy)",
+        "uncollected ACL grants flagged where Object Ownership allows ACLs",
+        "finance topic holds its roles (finance app and the quarterly report)",
+        "no proposal targets the collector role",
+        "s3 scale 81 principals x 100 buckets collects within budget",
+        "s3 scale 300 principals x 300 buckets collects within budget",
     } <= names
     # Emulator differences are recorded apart from failures.
     assert any(item["api"] == "iam:GenerateServiceLastAccessedDetails" for item in report["moto_gaps"])
