@@ -82,6 +82,14 @@ MAX_ADVISOR_SERVICES = 400
 MAX_POLICY_STATEMENTS = 256
 MAX_AWS_MANAGED_POLICY_STATEMENTS = 2048
 MAX_UNEVALUATED_PER_PRINCIPAL = 20
+# S3 grant sources the collector does not read. An edge needs a collected grant (identity
+# or bucket policy); these are flagged once per bucket (``uncollected_grant_sources``),
+# never turned into edges. ACLs grant nothing when Object Ownership is BucketOwnerEnforced.
+ACL_DISABLED_OWNERSHIP = "BucketOwnerEnforced"
+UNCOLLECTED_ACL, UNCOLLECTED_ACCESS_POINT = "acl", "access_point"
+# Metadata key on the node of the collector's own identity (verified via STS): its access
+# exists for collection and is excluded from topics, excess privilege and proposals.
+COLLECTOR_MARK = "zerograph_collector"
 UNEVALUATED = "too_large/unevaluated"
 
 ROLE_ARN = re.compile(r"arn:(aws|aws-us-gov|aws-cn):iam::(\d{12}):role/(.+)")
@@ -279,6 +287,8 @@ class AWSCollector:
             "bucket_policy": {"observed": 0, "absent": 0, "unknown": 0},
             "classification_tags": {"observed": 0, "absent": 0, "unknown": 0},
             "encryption_configuration": {"observed": 0, "unknown": 0},
+            "object_ownership": {"observed": 0, "absent": 0, "unknown": 0},
+            "uncollected_grant_sources": {UNCOLLECTED_ACL: 0, UNCOLLECTED_ACCESS_POINT: 0},
             "object_encryption_verified": False,
             "iam_user_inventory_complete": False,
             "iam_group_inventory_complete": False,
@@ -457,6 +467,7 @@ class AWSCollector:
             ):
                 raise CollectionIncomplete("Caller identity does not match the explicitly expected role")
         self.account = account
+        self.caller_arn = arn
         self.coverage["caller_identity_verified"] = True
         return account, parts[1]
 
@@ -520,6 +531,7 @@ class AWSCollector:
                 "get_bucket_policy": "Policy",
                 "get_bucket_tagging": "TagSet",
                 "get_bucket_encryption": "ServerSideEncryptionConfiguration",
+                "get_bucket_ownership_controls": "OwnershipControls",
             }[operation]
             if isinstance(response, dict) and field in response:
                 return response, "observed"
@@ -534,6 +546,8 @@ class AWSCollector:
                 "get_bucket_policy": "Bucket policy unavailable for one or more buckets",
                 "get_bucket_tagging": "Classification tags unavailable for one or more buckets",
                 "get_bucket_encryption": "Encryption configuration could not be verified for one or more buckets",
+                "get_bucket_ownership_controls": "Object Ownership unavailable for one or more buckets; their "
+                "ACLs are treated as possibly granting access (flagged, not collected)",
             }[operation],
         )
         return {}, "unknown"
@@ -759,6 +773,10 @@ class AWSCollector:
             )
             tagging, tag_status = self._optional(client, "get_bucket_tagging", name, absent="NoSuchTagSet")
             encryption, encryption_status = self._optional(client, "get_bucket_encryption", name)
+            ownership, ownership_status = self._optional(
+                client, "get_bucket_ownership_controls", name, absent="OwnershipControlsNotFoundError"
+            )
+            object_ownership, uncollected = self._uncollected_sources(ownership, ownership_status)
             resource_policies = [self._policy(policy["Policy"])] if policy_status == "observed" else []
             tags = [str(tag["Key"]) + " " + str(tag["Value"]) for tag in tagging.get("TagSet", [])]
             rules = encryption.get("ServerSideEncryptionConfiguration", {}).get("Rules", [])
@@ -780,6 +798,7 @@ class AWSCollector:
             self.coverage["bucket_policy"][policy_status] += 1
             self.coverage["classification_tags"][tag_status] += 1
             self.coverage["encryption_configuration"][encryption_status] += 1
+            self.coverage["object_ownership"][ownership_status] += 1
             enriched = enrich_node(
                 Node(
                     id=arn,
@@ -794,6 +813,8 @@ class AWSCollector:
                         "encryption_verified": verified,
                         "encryption_configuration": encryption_status,
                         "object_encryption_verified": False,
+                        "object_ownership": object_ownership,
+                        "uncollected_grant_sources": uncollected,
                     },
                 ),
                 [name, *tags],
@@ -838,7 +859,8 @@ class AWSCollector:
                             actions=possible,
                             certainty="conditional",
                             evidence=[
-                                "IAM identity + available bucket policy/boundary/SCP metadata; object scope, ACLs, RCPs and session context unresolved",
+                                "An identity or bucket policy Allow grants it; boundary and SCP metadata applied; "
+                                "object scope, RCPs and session context unresolved",
                                 *_unevaluated_evidence(principal),
                             ],
                         )
@@ -876,9 +898,16 @@ class AWSCollector:
                             ],
                         ),
                     )
+        collector = self._collector_principal(partition, account, roles, users)
+        if collector in nodes:
+            nodes[collector] = nodes[collector].model_copy(
+                update={"metadata": {**nodes[collector].metadata, COLLECTOR_MARK: True}}
+            )
         if self.data_lake:
             # Last, so it can only truncate itself: earlier phases keep their whole budgets.
             DataLakeInventory(self, account, partition).collect(nodes, edges, principals)
+        if collector in nodes:
+            self._mark_collector(collector, nodes, edges)
         self.counts["edges"] = len(edges)
         self.counts["policy_attachments"] = len(self.attachments)
         self._warning(
@@ -890,8 +919,10 @@ class AWSCollector:
                 else ""
             )
             + "; no object contents, query results, cross-account inventory or relational database grants; "
-            "RCPs, VPC endpoint policies, ACLs, LF-Tag grants and session policies are not collected; all AWS "
-            "edges conditional; RoleLastUsed and Access Advisor are hints, never proof of non-use",
+            "RCPs, VPC endpoint policies and session policies are not collected (they only restrict: all AWS "
+            "edges conditional); S3 ACL and access point grants are not collected (flagged per bucket as "
+            "uncollected_grant_sources, never claimed as edges); RoleLastUsed and Access Advisor are hints, "
+            "never proof of non-use",
         )
         return GraphSnapshot(
             nodes=list(nodes.values()),
@@ -900,6 +931,63 @@ class AWSCollector:
             source=f"aws:{account}",
             policies=self.attachments,
         )
+
+    def _collector_principal(self, partition: str, account: str, roles: list, users: list) -> str:
+        """ARN of the inventoried role or user the verified STS caller identity belongs to."""
+        resource = self.caller_arn.split(":", 5)[5]
+        if resource.startswith("assumed-role/"):
+            name = resource.split("/")[1]
+            # Role names are unique per account (the STS ARN omits the role's path).
+            found = [role["Arn"] for role in roles if role.get("RoleName") == name]
+        else:
+            found = [user["Arn"] for user in users if user["Arn"] == self.caller_arn]
+        self.coverage["collector_principal"] = "identified" if len(found) == 1 else "not_inventoried"
+        return found[0] if len(found) == 1 else ""
+
+    def _mark_collector(self, collector: str, nodes: dict, edges: dict) -> None:
+        """Label the collector's own access: it exists for collection, never a proposal."""
+        metadata = nodes[collector].metadata
+        if metadata.get("lakeformation_admin"):
+            # Lake Formation (read-only) administrator so the collector can list permissions.
+            nodes[collector] = nodes[collector].model_copy(
+                update={"metadata": {**metadata, "lakeformation_admin_basis": COLLECTOR_MARK}}
+            )
+        note = (
+            f"{COLLECTOR_MARK}: the ZeroGraph collector's own access (verified caller identity); "
+            "excluded from topics, excess privilege and proposals"
+        )
+        for key, edge in edges.items():
+            if edge.source == collector and note not in edge.evidence:
+                edges[key] = edge.model_copy(update={"evidence": [*edge.evidence[:31], note]})
+
+    def _uncollected_sources(self, ownership: dict, status: str) -> tuple[str, list[str]]:
+        """A bucket's Object Ownership setting and the grant sources not collected for it.
+
+        ACLs grant access unless Object Ownership is ``BucketOwnerEnforced`` (absent controls
+        mean the legacy ``ObjectWriter`` behaviour: ACLs enabled). Access point and
+        Multi-Region Access Point policies are never collected.
+        """
+        rules = ownership.get("OwnershipControls", {}).get("Rules") or []
+        if status == "observed":
+            value = str((rules[0] if rules else {}).get("ObjectOwnership") or "unknown")[:64]
+        else:
+            value = status  # "absent" or "unknown"
+        uncollected = [UNCOLLECTED_ACCESS_POINT]
+        if value != ACL_DISABLED_OWNERSHIP:
+            uncollected.insert(0, UNCOLLECTED_ACL)
+            self._warning(
+                "s3_acl_uncollected",
+                "Bucket ACLs are enabled or unverified on one or more buckets (Object Ownership not "
+                "BucketOwnerEnforced); ACL grants are not collected and no edges are claimed from them",
+            )
+        self._warning(
+            "s3_access_points_uncollected",
+            "S3 access point and Multi-Region Access Point policies are not collected; access granted "
+            "through them is not claimed as edges",
+        )
+        for source in uncollected:
+            self.coverage["uncollected_grant_sources"][source] += 1
+        return value, uncollected
 
     def _edge(self, edges, edge):
         if edge.id not in edges and len(edges) >= self.limits.max_edges:
@@ -1054,7 +1142,12 @@ def main() -> None:
             "read_only_inventory_complete_with_metadata_gaps"
             if any(
                 collector.coverage[key]["unknown"]
-                for key in ("bucket_policy", "classification_tags", "encryption_configuration")
+                for key in (
+                    "bucket_policy",
+                    "classification_tags",
+                    "encryption_configuration",
+                    "object_ownership",
+                )
             )
             or collector.coverage["scp_inventory"] in {"unknown", "partial"}
             else "read_only_inventory_complete_with_unverified_permissions",

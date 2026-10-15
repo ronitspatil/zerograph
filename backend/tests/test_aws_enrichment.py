@@ -108,6 +108,9 @@ def collector(**kwargs):
         ]
     }
     s3.get_bucket_encryption.return_value = {"ServerSideEncryptionConfiguration": {}}
+    s3.get_bucket_ownership_controls.return_value = {
+        "OwnershipControls": {"Rules": [{"ObjectOwnership": "BucketOwnerEnforced"}]}
+    }
     return AWSCollector(session, **kwargs), iam
 
 
