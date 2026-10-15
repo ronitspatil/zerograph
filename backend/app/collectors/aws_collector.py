@@ -898,7 +898,7 @@ class AWSCollector:
                             ],
                         ),
                     )
-        collector = self._collector_principal(partition, account, roles, users)
+        collector = self._collector_principal(roles, users)
         if collector in nodes:
             nodes[collector] = nodes[collector].model_copy(
                 update={"metadata": {**nodes[collector].metadata, COLLECTOR_MARK: True}}
@@ -932,7 +932,7 @@ class AWSCollector:
             policies=self.attachments,
         )
 
-    def _collector_principal(self, partition: str, account: str, roles: list, users: list) -> str:
+    def _collector_principal(self, roles: list, users: list) -> str:
         """ARN of the inventoried role or user the verified STS caller identity belongs to."""
         resource = self.caller_arn.split(":", 5)[5]
         if resource.startswith("assumed-role/"):
