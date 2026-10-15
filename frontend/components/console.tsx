@@ -1365,33 +1365,35 @@ export function Console({ demo }: { demo: boolean }) {
                       Administrator access is required to view audit events.
                     </p>
                   ) : events.length ? (
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Action</th>
-                          <th>Actor</th>
-                          <th>Time</th>
-                          <th>Evidence</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {events.map((e) => (
-                          <tr key={e.id}>
-                            <td>{e.action}</td>
-                            <td>{e.actor}</td>
-                            <td className="time">
-                              {formatDateTime(e.created_at)}
-                            </td>
-                            <td>
-                              <details>
-                                <summary>View details</summary>
-                                <pre>{JSON.stringify(e.detail, null, 2)}</pre>
-                              </details>
-                            </td>
+                    <div className="table-scroll">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>Action</th>
+                            <th>Actor</th>
+                            <th>Time</th>
+                            <th>Evidence</th>
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                        </thead>
+                        <tbody>
+                          {events.map((e) => (
+                            <tr key={e.id}>
+                              <td>{e.action}</td>
+                              <td>{e.actor}</td>
+                              <td className="time">
+                                {formatDateTime(e.created_at)}
+                              </td>
+                              <td>
+                                <details>
+                                  <summary>View details</summary>
+                                  <pre>{JSON.stringify(e.detail, null, 2)}</pre>
+                                </details>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
                   ) : (
                     <p className="empty-line">No audit events recorded yet.</p>
                   )}
@@ -1499,57 +1501,61 @@ function Findings({
         </span>
       </div>
       {findings.length ? (
-        <table>
-          <thead>
-            <tr>
-              <th>Severity</th>
-              <th>Access path</th>
-              <th>Evidence</th>
-              <th>Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {findings.map((f) => (
-              <tr key={f.id}>
-                <td>
-                  <span className={`severity ${f.severity}`}>
-                    <i aria-hidden="true" />
-                    {f.severity}
-                  </span>
-                </td>
-                <td>
-                  <strong>{f.title}</strong>
-                  <div className="path-preview">
-                    {f.path.map((id, i) => (
-                      <span key={id}>
-                        {i > 0 && <ChevronRight size={11} aria-hidden="true" />}
-                        <span>{name(id)}</span>
-                      </span>
-                    ))}
-                  </div>
-                </td>
-                <td>
-                  <span className="muted">
-                    {f.conditional ? "Conditional path" : "Confirmed path"}
-                  </span>
-                  <details>
-                    <summary>View evidence</summary>
-                    {f.evidence.map((e, i) => (
-                      <p key={i}>{e}</p>
-                    ))}
-                    <p>{f.recommendation}</p>
-                  </details>
-                </td>
-                <td>
-                  <button className="text-link" onClick={() => onSelect(f)}>
-                    Investigate
-                    <ArrowRight size={12} aria-hidden="true" />
-                  </button>
-                </td>
+        <div className="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Severity</th>
+                <th>Access path</th>
+                <th>Evidence</th>
+                <th>Action</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {findings.map((f) => (
+                <tr key={f.id}>
+                  <td>
+                    <span className={`severity ${f.severity}`}>
+                      <i aria-hidden="true" />
+                      {f.severity}
+                    </span>
+                  </td>
+                  <td>
+                    <strong>{f.title}</strong>
+                    <div className="path-preview">
+                      {f.path.map((id, i) => (
+                        <span key={id}>
+                          {i > 0 && (
+                            <ChevronRight size={11} aria-hidden="true" />
+                          )}
+                          <span>{name(id)}</span>
+                        </span>
+                      ))}
+                    </div>
+                  </td>
+                  <td>
+                    <span className="muted">
+                      {f.conditional ? "Conditional path" : "Confirmed path"}
+                    </span>
+                    <details>
+                      <summary>View evidence</summary>
+                      {f.evidence.map((e, i) => (
+                        <p key={i}>{e}</p>
+                      ))}
+                      <p>{f.recommendation}</p>
+                    </details>
+                  </td>
+                  <td>
+                    <button className="text-link" onClick={() => onSelect(f)}>
+                      Investigate
+                      <ArrowRight size={12} aria-hidden="true" />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       ) : (
         <div className="empty-line" role={busy ? "status" : undefined}>
           {busy

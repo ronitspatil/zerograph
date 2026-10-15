@@ -153,36 +153,40 @@ export function Sources({
           </Button>
         </div>
         {jobs.length ? (
-          <table>
-            <thead>
-              <tr>
-                <th>Source</th>
-                <th>Status</th>
-                <th className="num">Nodes</th>
-                <th>Started</th>
-              </tr>
-            </thead>
-            <tbody>
-              {jobs.map((j) => (
-                <tr key={j.id}>
-                  <td>
-                    {j.source}
-                    {j.error && <small className="job-error">{j.error}</small>}
-                  </td>
-                  <td>
-                    <span
-                      className={`status ${j.status === "completed" ? "ok" : j.status === "failed" ? "failed" : "pending"}`}
-                    >
-                      <i aria-hidden="true" />
-                      {j.status}
-                    </span>
-                  </td>
-                  <td className="num">{formatCount(j.node_count)}</td>
-                  <td className="time">{formatDateTime(j.created_at)}</td>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Source</th>
+                  <th>Status</th>
+                  <th className="num">Nodes</th>
+                  <th>Started</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {jobs.map((j) => (
+                  <tr key={j.id}>
+                    <td>
+                      {j.source}
+                      {j.error && (
+                        <small className="job-error">{j.error}</small>
+                      )}
+                    </td>
+                    <td>
+                      <span
+                        className={`status ${j.status === "completed" ? "ok" : j.status === "failed" ? "failed" : "pending"}`}
+                      >
+                        <i aria-hidden="true" />
+                        {j.status}
+                      </span>
+                    </td>
+                    <td className="num">{formatCount(j.node_count)}</td>
+                    <td className="time">{formatDateTime(j.created_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         ) : (
           <p className="empty-line">No ingestion jobs yet.</p>
         )}

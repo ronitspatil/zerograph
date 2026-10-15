@@ -38,7 +38,7 @@
     --text: #e3e9f1;
     --text-secondary: #b3bfcd;
     --muted: #8491a4;
-    --subtle: #627084;
+    --subtle: #7c899d; /* AA (4.5:1) on every surface, still below --muted */
     --accent: #6cc7b3;
     --accent-soft: #6cc7b31f;
     --primary: #e3e9f1;
@@ -786,6 +786,10 @@
     font-weight: 600;
     line-height: 1.4;
     color: var(--text);
+  }
+  /* Tables scroll inside their panel on narrow widths instead of clipping. */
+  .table-scroll {
+    overflow-x: auto;
   }
   /* Numeric table columns: right-aligned, tabular figures. */
   th.num,
