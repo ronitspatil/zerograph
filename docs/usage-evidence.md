@@ -63,7 +63,13 @@ use is never understated) and OpenSearch Serverless `ReadDocument`/`WriteDocumen
   table or database, the Athena workgroup, the Lake Formation table, the RDS Data API
   resource, else the first `resources[].ARN`.
 - Records outside the declared window are ignored; records with an `errorCode`
-  (`AccessDenied`...) are counted as denied attempts, never as use.
+  (`AccessDenied`...) are counted as denied attempts, never as use. CloudTrail often
+  logs a denied call with `requestParameters: null` (every denied `AssumeRole` of the
+  public flaws.cloud trail); its resource is then read from the standard message
+  `... is not authorized to perform: <action> on resource: <ARN>`, only when that
+  action is the event's own. A record with a field of the wrong JSON type (for example
+  a non-object `sessionContext` or a non-string `eventName`) is counted as malformed or
+  unresolved, never a server error.
 - **Unmapped** events are counted per service and make that service's coverage
   incomplete, as do malformed records (existing behaviour of the single-identity
   normalizer). An unattested service is never complete.

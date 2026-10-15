@@ -67,7 +67,7 @@ from app.db.models import (
     TenantState,
 )
 from app.db.session import session_factory
-from app.graph.compact import DATA, EDGE_CODE, MAX_HOPS, WEIGHT, CompactGraph
+from app.graph.compact import COLLECTOR, DATA, EDGE_CODE, MAX_HOPS, WEIGHT, CompactGraph
 from app.graph.privilege import (
     PrivilegeContext,
     UsageInput,
@@ -83,7 +83,8 @@ from app.graph.sweep import SWEEP_TENANTS, run_sweep
 # Bump when topic labels, profiles, flags or stored fields change: other versions read as missing.
 # 2: usage refinement, excess-privilege index (needed weights, basis, unused, dormant).
 # 3: identity needed access from attributed role-session use (attributed / role_level flags).
-TOPIC_VERSION = 3
+# 4: the collector's own grants are excluded (``collector_excluded``).
+TOPIC_VERSION = 4
 BASIS = "granted (structural)"
 NOTICE = (
     "Topics are derived from resource tags, names and access. They are not policy boundaries. "
@@ -238,7 +239,10 @@ def compute_topics(graph: CompactGraph, usage: UsageInput | None = None) -> Comp
     weight = {i: WEIGHT.get(sensitivity[i], 0) for i in data_nodes}
 
     # Direct grants per holder (a non-data node with READ/WRITE edges to data), role/tool hops,
-    # wildcard actions and classification categories, from one pass over the edges.
+    # wildcard actions and classification categories, from one pass over the edges. The
+    # collector's own identity holds no grants here: its read access exists for collection.
+    collector = frozenset(node for node, flags in graph.safety.items() if flags & COLLECTOR)
+    collector_grants = 0
     direct: dict[int, set[int]] = {}
     hops: dict[int, list[int]] = {}
     wildcard: set[int] = set()
@@ -252,7 +256,9 @@ def compute_topics(graph: CompactGraph, usage: UsageInput | None = None) -> Comp
     for edge in range(graph.edge_count):
         code, source, target = kinds[edge], sources[edge], targets[edge]
         if code in GRANT_CODES:
-            if is_data[target] and not is_data[source]:
+            if source in collector:
+                collector_grants += 1
+            elif is_data[target] and not is_data[source]:
                 direct.setdefault(source, set()).add(target)
                 if source not in wildcard and any(is_wildcard(a) for a in actions[edge]):
                     wildcard.add(source)
@@ -740,6 +746,8 @@ def compute_topics(graph: CompactGraph, usage: UsageInput | None = None) -> Comp
         "seeded_resources": {kind: seeds.get(kind, 0) for kind in SEEDS},
         "vocabulary_tokens": len(vocabulary),
         "hub_cut": hub_cut,
+        # The collector's own identity and grants, left out of every topic, EPI and proposal.
+        "collector_excluded": {"identities": len(collector), "grants": collector_grants},
         "roles": len(role_rows),
         "roles_with_topic": sum(1 for row in role_rows.values() if row["topic"] >= 0),
         "hub_roles": flagged(role_rows, HUB),

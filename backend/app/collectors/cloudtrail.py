@@ -18,7 +18,11 @@ incomplete, and events outside the declared window are ignored.
   counted, never treated as use. Denied attempts whose principal and resource resolve
   are aggregated separately per (principal, resource, service, error code) with
   first/last seen and a count (bounded per file), for the optimizer rollout's
-  AccessDenied watch after a least-privilege change is merged.
+  AccessDenied watch after a least-privilege change is merged. CloudTrail often logs a
+  denied call with ``requestParameters: null`` (a denied ``AssumeRole`` always does, in
+  the public flaws.cloud trail); its resource is then read from the standard message
+  ``... is not authorized to perform: <action> on resource: <ARN>``, only when the
+  action named there is the event's own IAM action.
 
 **Role sessions** (``userIdentity.type`` ``AssumedRole``) are also kept per session so
 the upload's commit can attribute each access to the principal that assumed the role
@@ -39,6 +43,7 @@ the upload's commit can attribute each access to the principal that assumed the 
 import gzip
 import io
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -51,6 +56,12 @@ MAX_DENIED_PAIRS = 20_000  # Distinct denied (principal, resource, service, code
 MAX_ERROR_CODE = 64
 MAX_KEY = 128  # Access key IDs (AWS: 16-128 characters) and session descriptors.
 ISSUING = frozenset({"AssumeRole", "AssumeRoleWithWebIdentity", "AssumeRoleWithSAML"})
+MAX_ERROR_MESSAGE = 4096
+# The resource in a standard AccessDenied message ("User: <ARN> is not authorized to perform:
+# <action> on resource: <ARN> [because ...]").
+DENIED_MESSAGE = re.compile(
+    r"not authorized to perform: ([A-Za-z0-9-]+:[A-Za-z0-9]+) on resource: (arn:[^\s]+)"
+)
 
 
 class ExportError(ValueError):
@@ -87,6 +98,20 @@ def decode_export(body: bytes) -> list[dict]:
     return value
 
 
+def _dict(value) -> dict:
+    """``value`` if it is a JSON object, else empty (mistyped fields never raise)."""
+    return value if isinstance(value, dict) else {}
+
+
+def _issuer(identity: dict) -> dict:
+    return _dict(_dict(identity.get("sessionContext")).get("sessionIssuer"))
+
+
+def _items(record: dict) -> list:
+    found = record.get("resources")
+    return found if isinstance(found, list) else []
+
+
 def _partition(arn: str) -> str:
     parts = arn.split(":")
     return parts[1] if len(parts) > 1 and parts[0] == "arn" and parts[1] else "aws"
@@ -96,7 +121,7 @@ def principal_of(record: dict) -> str:
     identity = record.get("userIdentity")
     if not isinstance(identity, dict):
         return ""
-    issuer = (identity.get("sessionContext") or {}).get("sessionIssuer") or {}
+    issuer = _issuer(identity)
     if identity.get("type") in ("AssumedRole", "FederatedUser") or issuer.get("arn"):
         arn = issuer.get("arn")
         if isinstance(arn, str) and arn:
@@ -108,7 +133,7 @@ def principal_of(record: dict) -> str:
 
 
 def _resources(record: dict, kind: str) -> str:
-    for item in record.get("resources") or ():
+    for item in _items(record):
         if isinstance(item, dict) and item.get("type") == kind and isinstance(item.get("ARN"), str):
             return item["ARN"]
     return ""
@@ -155,7 +180,7 @@ def resource_of(record: dict, service: str, principal: str) -> str:
         target = request.get("resourceArn")
         if isinstance(target, str) and target:
             return target
-    for item in record.get("resources") or ():
+    for item in _items(record):
         if isinstance(item, dict) and isinstance(item.get("ARN"), str) and item["ARN"]:
             return item["ARN"]
     return ""
@@ -174,8 +199,7 @@ def issuer_of(identity: dict) -> tuple[str, str, str]:
     """
     kind = identity.get("type")
     if kind == "AssumedRole":
-        issuer = (identity.get("sessionContext") or {}).get("sessionIssuer") or {}
-        role = _text(issuer.get("arn")) if isinstance(issuer, dict) else ""
+        role = _text(_issuer(identity).get("arn"))
         return "", _text(identity.get("accessKeyId"), MAX_KEY), role
     if kind in ("IAMUser", "Root"):
         return _text(identity.get("arn")), "", ""
@@ -273,11 +297,26 @@ def _time(value) -> datetime | None:
     return parsed if parsed.tzinfo is not None else None
 
 
-def _record_denial(result: Normalized, record: dict, service: str, occurred: datetime) -> None:
+def denied_resource(record: dict, action: str) -> str:
+    """The resource ARN a standard AccessDenied ``errorMessage`` names for ``action``, else ""."""
+    message = record.get("errorMessage")
+    if not isinstance(message, str) or len(message) > MAX_ERROR_MESSAGE:
+        return ""
+    found = DENIED_MESSAGE.search(message)
+    if not found or found[1].lower() != action.lower():
+        return ""
+    return found[2].rstrip(".,;")
+
+
+def _record_denial(
+    result: Normalized, record: dict, service: str, occurred: datetime, action: str = ""
+) -> None:
     """Aggregate a denied attempt by (principal, resource, service, error code); never use."""
     code = record.get("errorCode")
     principal = principal_of(record)
     resource = resource_of(record, service, principal) if principal else ""
+    if principal and not resource and action:
+        resource = denied_resource(record, action)
     if (
         not isinstance(code, str)
         or not principal
@@ -343,7 +382,7 @@ def normalize_export(records: list[dict], start: datetime, end: datetime) -> Nor
         result.records += 1
         source = record.get("eventSource")
         occurred = _time(record.get("eventTime"))
-        if not isinstance(source, str) or occurred is None:
+        if not isinstance(source, str) or not isinstance(record.get("eventName"), str) or occurred is None:
             result.malformed += 1
             continue
         if not start <= occurred <= end:
@@ -357,7 +396,7 @@ def normalize_export(records: list[dict], start: datetime, end: datetime) -> Nor
             continue
         if record.get("errorCode"):
             result.denied += 1
-            _record_denial(result, record, service, occurred)
+            _record_denial(result, record, service, occurred, mapped[0])
             continue
         if service == "sts" and record.get("eventName") in ISSUING:
             _record_issuance(result, record, occurred)

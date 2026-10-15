@@ -104,6 +104,31 @@ def by_pair(result, computed, kind=P.REMOVE):
     }
 
 
+def test_collector_identity_is_excluded_from_topics_epi_and_proposals():
+    # The collector role reads every bucket (as a catalog/metadata reader would) and is
+    # assumed by an operator; it must not pull topics, count as excess or be proposed.
+    collector = node("role:zg", NodeType.ROLE, metadata={"zerograph_collector": True})
+    operator = node("svc:operator", NodeType.SERVICE)
+    reads = [grant("role:zg", f"lake:{i}") for i in range(4)] + [grant("role:zg", f"pay:{i}") for i in range(2)]
+    snapshot = small([collector, operator], [*reads, assume("svc:operator", "role:zg")])
+    computed, result = run(snapshot)
+    baseline_computed, baseline = run(small())
+    ids = computed.graph.ids
+    zg = ids.index("role:zg")
+    assert computed.summary["collector_excluded"] == {"identities": 1, "grants": 6}
+    assert zg not in computed.context.direct
+    assert all(p.subject != zg and p.target != zg for p in result.proposals)
+    # Every other proposal, topic and graph-wide EPI is what it is without the collector (the
+    # operator, a dormant identity of its own, may still be proposed for disabling).
+    operator_index = ids.index("svc:operator")
+    others = sorted(p.id for p in result.proposals if p.subject != operator_index)
+    assert others == sorted(p.id for p in baseline.proposals)
+    assert [(t.name, len(t.resources)) for t in computed.topics] == [
+        (t.name, len(t.resources)) for t in baseline_computed.topics
+    ]
+    assert computed.summary["privilege"]["roles"]["epi"] == baseline_computed.summary["privilege"]["roles"]["epi"]
+
+
 def test_remove_grant_tiers_by_hand():
     computed, result = run(small())
     removals = by_pair(result, computed)

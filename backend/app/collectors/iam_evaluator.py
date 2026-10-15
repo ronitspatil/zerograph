@@ -1,4 +1,14 @@
-"""Conservative, finite-request IAM evaluation. Unknown context never becomes a confirmed allow."""
+"""Conservative, finite-request IAM evaluation. Unknown context never becomes a confirmed allow.
+
+Access needs a grant: an identity-policy or resource-policy Allow that matches the request
+(possibly, when a condition or variable is unresolved). Permissions boundaries, session
+policies, SCPs and RCPs only restrict: they can deny or make an allow conditional, never
+create one. So a request no collected policy grants is denied ("no applicable grant")
+even when restricting domains are unknown (``restrictions_complete=False``); unknown
+restricting domains only keep a granted request ``CONDITIONAL``. A caller that knows a
+granting source was not collected (for example S3 ACLs or access points) records that on
+the resource instead of turning every absent grant into possible access.
+"""
 
 import fnmatch
 import ipaddress
@@ -174,9 +184,16 @@ def evaluate(
     scp_levels: list[list[dict]] | None = None,
     session: list[dict] | None = None,
     rcp_levels: list[list[dict]] | None = None,
-    scope_complete: bool = True,
+    restrictions_complete: bool = True,
     require_resource_allow: bool = False,
 ) -> Evaluation:
+    """Decision for ``request``.
+
+    ``restrictions_complete`` is whether every policy domain that can restrict the request
+    (boundaries, session policies, SCPs, RCPs, endpoint policies) was collected; when it is
+    false an otherwise certain grant is ``CONDITIONAL``. It never turns an absent grant
+    into possible access.
+    """
     identity_result = policy_result(identity, request)
     resource_result = policy_result(resource or [], request, True)
     gates = [policy_result(p, request) for p in (boundary, session) if p is not None]
@@ -220,10 +237,7 @@ def evaluate(
     if require_resource_allow and direct_trust_possible:
         possible = resource_possible
     if not possible:
-        if not scope_complete:
-            return Evaluation(
-                Decision.CONDITIONAL, ("Collection is incomplete; absent grants are not proof of denial",)
-            )
+        # Restricting domains (known or not) cannot create a grant.
         return Evaluation(Decision.DENY, ("No applicable grant",))
     certain = (
         identity_result[0] and resource_result[0]
@@ -233,7 +247,7 @@ def evaluate(
     if require_resource_allow and direct_trust_possible:
         certain = direct_trust_certain or (identity_result[0] and resource_result[0])
     if (
-        not scope_complete
+        not restrictions_complete
         or not certain
         or any(r[3] for r in all_results)
         or any(not r[0] for r in organization)

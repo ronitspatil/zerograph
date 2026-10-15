@@ -95,7 +95,46 @@ def test_direct_user_grant_bypasses_implicit_boundary_but_not_explicit_deny():
 
 
 def test_incomplete_collection_is_not_confirmed():
-    assert evaluate(REQUEST, [policy()], scope_complete=False).decision == Decision.CONDITIONAL
+    assert evaluate(REQUEST, [policy()], restrictions_complete=False).decision == Decision.CONDITIONAL
+
+
+ALLOW_ALL = policy(action="*")
+
+
+@pytest.mark.parametrize(
+    "restricting",
+    [
+        {},
+        {"boundary": [ALLOW_ALL]},
+        {"session": [ALLOW_ALL]},
+        {"scp_levels": [[ALLOW_ALL]]},
+        {"rcp_levels": [[ALLOW_ALL]]},
+        {"boundary": [ALLOW_ALL], "session": [ALLOW_ALL], "scp_levels": [[ALLOW_ALL]], "rcp_levels": [[ALLOW_ALL]]},
+    ],
+    ids=["unknown", "boundary", "session", "scp", "rcp", "all"],
+)
+def test_absent_grant_is_no_access_even_with_unknown_restrictions(restricting):
+    # Restricting domains never create a grant, whether collected (allowing everything)
+    # or unknown: no identity or resource Allow means no edge.
+    unrelated = [policy(action="ec2:*")]
+    for identity in ([], unrelated):
+        result = evaluate(REQUEST, identity, [], restrictions_complete=False, **restricting)
+        assert result.decision == Decision.DENY
+        assert result.reasons == ("No applicable grant",)
+
+
+def test_grant_with_unknown_restrictions_is_conditional():
+    for kwargs in ({}, {"boundary": [ALLOW_ALL]}, {"scp_levels": [[ALLOW_ALL]]}):
+        result = evaluate(REQUEST, [policy()], restrictions_complete=False, **kwargs)
+        assert result.decision == Decision.CONDITIONAL
+    # A bucket-policy grant alone is a grant (same account), conditional on unknown restrictions.
+    bucket = [policy(Principal={"AWS": PRINCIPAL})]
+    assert evaluate(REQUEST, [], bucket, restrictions_complete=False).decision == Decision.CONDITIONAL
+    # A grant that depends on unresolved context stays conditional; a restricting deny still wins.
+    conditioned = policy(Condition={"StringEquals": {"aws:SourceVpce": "vpce-123"}})
+    assert evaluate(REQUEST, [conditioned], restrictions_complete=False).decision == Decision.CONDITIONAL
+    denied = evaluate(REQUEST, [policy()], scp_levels=[[policy("Deny")]], restrictions_complete=False)
+    assert denied.decision == Decision.DENY
 
 
 def test_ip_and_unsupported_conditions():

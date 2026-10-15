@@ -164,6 +164,86 @@ def test_normalize_counts_window_denied_malformed_unmapped_and_aggregates():
         normalize_export([], datetime(2026, 1, 1), NOW)
 
 
+# Sanitized excerpt of the public flaws.cloud trail (account, user, IDs and IP replaced): a
+# denied AssumeRole is logged with requestParameters null; only errorMessage names the role.
+FLAWS_DENIED_ASSUME_ROLE = {
+    "eventVersion": "1.05",
+    "userIdentity": {
+        "type": "IAMUser",
+        "principalId": "AIDAEXAMPLEEXAMPLE01",
+        "arn": USER,
+        "accountId": ACCOUNT,
+        "accessKeyId": "AKIAEXAMPLEEXAMPLE01",
+        "userName": "alice",
+    },
+    "eventSource": "sts.amazonaws.com",
+    "eventName": "AssumeRole",
+    "awsRegion": "us-east-1",
+    "sourceIPAddress": "192.0.2.10",
+    "userAgent": "aws-cli/1.11.56 Python/2.7.10 Darwin/16.4.0 botocore/1.5.19",
+    "errorCode": "AccessDenied",
+    "errorMessage": f"User: {USER} is not authorized to perform: sts:AssumeRole on resource: "
+    f"arn:aws:iam::{ACCOUNT}:role/service-role/lake-reader",
+    "requestParameters": None,
+    "responseElements": None,
+    "requestID": "00000000-0000-0000-0000-000000000001",
+    "eventID": "00000000-0000-0000-0000-000000000002",
+    "eventType": "AwsApiCall",
+    "recipientAccountId": ACCOUNT,
+}
+
+
+def test_denied_attempt_without_request_parameters_names_its_resource_from_the_message():
+    target = f"arn:aws:iam::{ACCOUNT}:role/service-role/lake-reader"
+    modern = {
+        **FLAWS_DENIED_ASSUME_ROLE,
+        "errorMessage": f"User: {USER} is not authorized to perform: sts:AssumeRole on resource: {target} "
+        "because no identity-based policy allows the sts:AssumeRole action",
+    }
+    for record in (FLAWS_DENIED_ASSUME_ROLE, modern):
+        result = normalize_export([{**record, "eventTime": stamp()}], *window())
+        assert list(result.denied_access) == [(USER, target, "sts", "AccessDenied")]
+        assert result.stats()["denied"] == 1 and result.denied_unrecorded == 0 and not result.access
+    # The message must name the event's own action; anything else stays unrecorded.
+    for message in (
+        f"User: {USER} is not authorized to perform: iam:PassRole on resource: {target}",
+        "Access Denied",
+        None,
+        ["not a string"],
+    ):
+        record = {**FLAWS_DENIED_ASSUME_ROLE, "eventTime": stamp(), "errorMessage": message}
+        result = normalize_export([record], *window())
+        assert not result.denied_access and result.denied_unrecorded == 1
+
+
+@pytest.mark.parametrize(
+    "path, value",
+    [
+        (("eventName",), ["GetObject"]),
+        (("eventName",), {"name": "GetObject"}),
+        (("resources",), 1),
+        (("resources",), True),
+        (("userIdentity", "sessionContext"), "x"),
+        (("userIdentity", "sessionContext"), [1]),
+        (("userIdentity", "sessionContext", "sessionIssuer"), "x"),
+        (("userIdentity", "sessionContext", "sessionIssuer"), 1),
+    ],
+)
+def test_mistyped_record_fields_never_raise(path, value):
+    """A garbled export (a field of the wrong JSON type) is counted, never a server error."""
+    for record in (role_event(), {**role_event(), "errorCode": "AccessDenied"}, user_event()):
+        record = json.loads(json.dumps(record))
+        record.setdefault("userIdentity", {}).setdefault("sessionContext", {}).setdefault("sessionIssuer", {})
+        target = record
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = value
+        stats = normalize_export([record], *window()).stats()
+        assert stats["records"] == 1
+    malformed = normalize_export([{**role_event(), "eventName": ["GetObject"]}], *window()).stats()
+    assert malformed["malformed"] == 1 and not malformed["service_events"]
+
+
 # Upload API
 
 

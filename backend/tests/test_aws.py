@@ -1,3 +1,4 @@
+import json
 from unittest.mock import Mock
 
 import pytest
@@ -50,6 +51,9 @@ def collector():
     s3.get_bucket_policy.side_effect = error("NoSuchBucketPolicy")
     s3.get_bucket_tagging.return_value = {"TagSet": [{"Key": "classification", "Value": "patient"}]}
     s3.get_bucket_encryption.return_value = {"ServerSideEncryptionConfiguration": {}}
+    s3.get_bucket_ownership_controls.return_value = {
+        "OwnershipControls": {"Rules": [{"ObjectOwnership": "BucketOwnerEnforced"}]}
+    }
     return AWSCollector(session), iam, s3, org
 
 
@@ -62,6 +66,104 @@ def test_live_collector_enriches_metadata_but_does_not_claim_complete_access():
     assert snapshot.edges
     assert all(e.certainty == "conditional" for e in snapshot.edges)
     assert any("session" in warning for warning in snapshot.warnings)
+
+
+def test_absent_s3_grant_is_no_edge_even_with_unknown_policy_domains():
+    # SCPs unknown (Organizations denied), RCPs/session/ACLs uncollected: a principal no policy
+    # grants gets no edge; one granted gets a conditional edge.
+    c, iam, s3, org = collector()
+    org.describe_organization.side_effect = error("AccessDeniedException")
+    page = iam.get_account_authorization_details.return_value
+    page["RoleDetailList"].append(
+        {
+            "Arn": "arn:aws:iam::123456789012:role/idle",
+            "RoleName": "idle",
+            "RolePolicyList": [
+                {"PolicyDocument": {"Statement": [{"Effect": "Allow", "Action": "ec2:*", "Resource": "*"}]}}
+            ],
+            "AssumeRolePolicyDocument": {"Statement": []},
+        }
+    )
+    snapshot = c.collect()
+    assert c.coverage["scp_inventory"] == "unknown"
+    assert not [e for e in snapshot.edges if e.source.endswith(":role/idle")]
+    worker = [e for e in snapshot.edges if e.source == ARN]
+    assert [(e.type.value, e.actions, e.certainty) for e in worker] == [
+        ("CAN_READ", ["s3:GetObject"], "conditional")
+    ]
+    # A bucket policy naming the principal is a grant source of its own.
+    c, iam, s3, _ = collector()
+    iam.get_account_authorization_details.return_value["RoleDetailList"][0]["RolePolicyList"] = []
+    s3.get_bucket_policy.side_effect = None
+    grant = {"Effect": "Allow", "Principal": {"AWS": ARN}, "Action": "s3:PutObject"}
+    grant["Resource"] = "arn:aws:s3:::customer-email/*"
+    s3.get_bucket_policy.return_value = {"Policy": json.dumps({"Statement": [grant]})}
+    edges = c.collect().edges
+    assert [(e.type.value, e.actions) for e in edges] == [("CAN_WRITE", ["s3:PutObject"])]
+
+
+@pytest.mark.parametrize(
+    "response, ownership, sources",
+    [
+        ({"Rules": [{"ObjectOwnership": "BucketOwnerEnforced"}]}, "BucketOwnerEnforced", ["access_point"]),
+        ({"Rules": [{"ObjectOwnership": "ObjectWriter"}]}, "ObjectWriter", ["acl", "access_point"]),
+        ({"Rules": [{"ObjectOwnership": "BucketOwnerPreferred"}]}, "BucketOwnerPreferred", ["acl", "access_point"]),
+        (error("OwnershipControlsNotFoundError"), "absent", ["acl", "access_point"]),
+        (error("AccessDenied"), "unknown", ["acl", "access_point"]),
+    ],
+)
+def test_uncollected_grant_sources_are_flagged_once_per_bucket_never_edges(response, ownership, sources):
+    c, iam, s3, _ = collector()
+    iam.get_account_authorization_details.return_value["RoleDetailList"][0]["RolePolicyList"] = []
+    if isinstance(response, ClientError):
+        s3.get_bucket_ownership_controls.side_effect = response
+    else:
+        s3.get_bucket_ownership_controls.return_value = {"OwnershipControls": response}
+    snapshot = c.collect()
+    bucket = next(node for node in snapshot.nodes if node.type.value == "S3Bucket")
+    assert bucket.metadata["object_ownership"] == ownership
+    assert bucket.metadata["uncollected_grant_sources"] == sources
+    # ACLs or access points could grant access, but nothing collected does: no edge.
+    assert snapshot.edges == []
+    assert c.coverage["uncollected_grant_sources"] == {
+        "acl": int("acl" in sources),
+        "access_point": 1,
+    }
+    status = "observed" if ownership not in {"absent", "unknown"} else ownership
+    assert c.coverage["object_ownership"][status] == 1
+    assert ("s3_acl_uncollected" in c.warning_counts) is ("acl" in sources)
+    assert c.warning_counts["s3_access_points_uncollected"] == 1
+
+
+def test_collector_principal_is_marked_and_its_access_labelled():
+    c, iam, _, _ = collector()
+    page = iam.get_account_authorization_details.return_value
+    page["RoleDetailList"].append(
+        {
+            "Arn": "arn:aws:iam::123456789012:role/app",
+            "RoleName": "app",
+            "RolePolicyList": page["RoleDetailList"][0]["RolePolicyList"],
+            "AssumeRolePolicyDocument": {"Statement": []},
+        }
+    )
+    snapshot = c.collect()
+    nodes = {node.id: node for node in snapshot.nodes}
+    # The caller is assumed-role/worker/test: the worker role is the collector.
+    assert nodes[ARN].metadata["zerograph_collector"] is True
+    assert "zerograph_collector" not in nodes["arn:aws:iam::123456789012:role/app"].metadata
+    assert c.coverage["collector_principal"] == "identified"
+    for edge in snapshot.edges:
+        labelled = any(item.startswith("zerograph_collector:") for item in edge.evidence)
+        assert labelled is (edge.source == ARN)
+    # A caller that is not in the inventory marks nothing.
+    c, _, _, _ = collector()
+    c.sts.get_caller_identity.return_value = {
+        "Account": "123456789012",
+        "Arn": "arn:aws:sts::123456789012:assumed-role/elsewhere/test",
+    }
+    snapshot = c.collect()
+    assert c.coverage["collector_principal"] == "not_inventoried"
+    assert not any(node.metadata.get("zerograph_collector") for node in snapshot.nodes)
 
 
 def test_bucket_access_denied_is_reported_as_unknown():
@@ -478,15 +580,18 @@ def test_aws_managed_policy_beyond_bounds_degrades_to_unknown_access(oversize):
     c, iam, _, _ = collector()
     deny = {"Effect": "Deny", "Action": "s3:*", "Resource": "*"}
     document = large_policy(2**20 + 1, deny_s3=True) if oversize == "bytes" else {"Statement": [deny] * 2049}
-    with_managed_role(iam, SUPPORT_ROLE, SUPPORT_POLICY, document)
+    # An inline grant of its own, so the role has edges the unevaluated Deny could have removed.
+    inline = [{"PolicyDocument": {"Statement": [{"Effect": "Allow", "Action": "s3:*", "Resource": "*"}]}}]
+    with_managed_role(iam, SUPPORT_ROLE, SUPPORT_POLICY, document)["RolePolicyList"] = inline
     snapshot = c.collect()
     # The same inventory without that attachment: the policy must contribute nothing.
     baseline_collector, baseline_iam, _, _ = collector()
     baseline_role = with_managed_role(baseline_iam, SUPPORT_ROLE, SUPPORT_POLICY, {})
     baseline_role["AttachedManagedPolicies"] = []
+    baseline_role["RolePolicyList"] = inline
     baseline = baseline_collector.collect()
     # Recorded by ARN and SHA-256, marked unevaluated, never evaluated or stored in full.
-    attachment = next(p for p in snapshot.policies if p.principal == SUPPORT_ROLE)
+    attachment = next(p for p in snapshot.policies if p.principal == SUPPORT_ROLE and p.kind == "managed")
     marker = attachment.document["ZeroGraphUnevaluated"]
     assert attachment.arn == SUPPORT_POLICY and "Statement" not in attachment.document
     assert marker["status"] == "too_large/unevaluated"
@@ -547,7 +652,14 @@ def test_unevaluated_aws_managed_group_policy_marks_members():
     c, iam, _, _ = collector()
     page = iam.get_account_authorization_details.return_value
     page["UserDetailList"] = [
-        {"UserName": "ana", "Arn": "arn:aws:iam::123456789012:user/ana", "GroupList": ["ops"]}
+        {
+            "UserName": "ana",
+            "Arn": "arn:aws:iam::123456789012:user/ana",
+            "GroupList": ["ops"],
+            "UserPolicyList": [
+                {"PolicyDocument": {"Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}]}}
+            ],
+        }
     ]
     page["GroupDetailList"] = [
         {
@@ -566,7 +678,7 @@ def test_unevaluated_aws_managed_group_policy_marks_members():
     assert user.metadata["policies_unevaluated"] == [SUPPORT_POLICY]
     edges = [e for e in snapshot.edges if e.source == user.id]
     assert edges and all(any("too large to evaluate" in item for item in e.evidence) for e in edges)
-    assert next(p for p in snapshot.policies if p.principal == user.id).kind == "group-managed"
+    assert {p.kind for p in snapshot.policies if p.principal == user.id} == {"inline", "group-managed"}
 
 
 def test_request_page_and_wall_budgets_fail_closed(monkeypatch):
@@ -660,13 +772,21 @@ def test_actual_botocore_models_validate_paginated_requests_without_network():
         },
         {"Bucket": "customer-email", "ExpectedBucketOwner": "123456789012"},
     )
+    s3.add_response(
+        "get_bucket_ownership_controls",
+        {"OwnershipControls": {"Rules": [{"ObjectOwnership": "BucketOwnerEnforced"}]}},
+        {"Bucket": "customer-email", "ExpectedBucketOwner": "123456789012"},
+    )
     with sts, iam, s3, org:
         snapshot = c.collect()
         for stub in (sts, iam, s3, org):
             stub.assert_no_pending_responses()
     assert len(snapshot.nodes) == 2
     assert all(edge.certainty == "conditional" for edge in snapshot.edges)
-    assert c.requests == 9
+    bucket = next(node for node in snapshot.nodes if node.type.value == "S3Bucket")
+    assert bucket.metadata["object_ownership"] == "BucketOwnerEnforced"
+    assert bucket.metadata["uncollected_grant_sources"] == ["access_point"]
+    assert c.requests == 10
 
 
 def cli_args(tmp_path):
@@ -830,6 +950,7 @@ def test_readonly_permission_templates_match_sdk_operation_contract():
         "s3:GetBucketPolicy",
         "s3:GetBucketTagging",
         "s3:GetEncryptionConfiguration",
+        "s3:GetBucketOwnershipControls",
         "organizations:DescribeOrganization",
         "organizations:ListParents",
         "organizations:ListPoliciesForTarget",
