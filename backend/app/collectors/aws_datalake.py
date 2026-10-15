@@ -1349,7 +1349,7 @@ class DataLakeInventory:
                 resources,
                 principal["boundary"],
                 principal["scps"],
-                scope_complete=True,
+                restrictions_complete=False,
             )
             cache[key] = result.decision != Decision.DENY
         return cache[key]

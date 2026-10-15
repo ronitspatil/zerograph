@@ -826,7 +826,7 @@ class AWSCollector:
                             resource_policies,
                             principal["boundary"],
                             principal["scps"],
-                            scope_complete=False,
+                            restrictions_complete=False,
                         )
                         if result.decision != Decision.DENY:
                             possible.append(action)
@@ -858,7 +858,7 @@ class AWSCollector:
                     boundary=source["boundary"],
                     scp_levels=source["scps"],
                     require_resource_allow=True,
-                    scope_complete=True,
+                    restrictions_complete=False,
                 )
                 if result.decision != Decision.DENY:
                     self._edge(

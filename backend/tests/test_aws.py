@@ -1,3 +1,4 @@
+import json
 from unittest.mock import Mock
 
 import pytest
@@ -62,6 +63,40 @@ def test_live_collector_enriches_metadata_but_does_not_claim_complete_access():
     assert snapshot.edges
     assert all(e.certainty == "conditional" for e in snapshot.edges)
     assert any("session" in warning for warning in snapshot.warnings)
+
+
+def test_absent_s3_grant_is_no_edge_even_with_unknown_policy_domains():
+    # SCPs unknown (Organizations denied), RCPs/session/ACLs uncollected: a principal no policy
+    # grants gets no edge; one granted gets a conditional edge.
+    c, iam, s3, org = collector()
+    org.describe_organization.side_effect = error("AccessDeniedException")
+    page = iam.get_account_authorization_details.return_value
+    page["RoleDetailList"].append(
+        {
+            "Arn": "arn:aws:iam::123456789012:role/idle",
+            "RoleName": "idle",
+            "RolePolicyList": [
+                {"PolicyDocument": {"Statement": [{"Effect": "Allow", "Action": "ec2:*", "Resource": "*"}]}}
+            ],
+            "AssumeRolePolicyDocument": {"Statement": []},
+        }
+    )
+    snapshot = c.collect()
+    assert c.coverage["scp_inventory"] == "unknown"
+    assert not [e for e in snapshot.edges if e.source.endswith(":role/idle")]
+    worker = [e for e in snapshot.edges if e.source == ARN]
+    assert [(e.type.value, e.actions, e.certainty) for e in worker] == [
+        ("CAN_READ", ["s3:GetObject"], "conditional")
+    ]
+    # A bucket policy naming the principal is a grant source of its own.
+    c, iam, s3, _ = collector()
+    iam.get_account_authorization_details.return_value["RoleDetailList"][0]["RolePolicyList"] = []
+    s3.get_bucket_policy.side_effect = None
+    grant = {"Effect": "Allow", "Principal": {"AWS": ARN}, "Action": "s3:PutObject"}
+    grant["Resource"] = "arn:aws:s3:::customer-email/*"
+    s3.get_bucket_policy.return_value = {"Policy": json.dumps({"Statement": [grant]})}
+    edges = c.collect().edges
+    assert [(e.type.value, e.actions) for e in edges] == [("CAN_WRITE", ["s3:PutObject"])]
 
 
 def test_bucket_access_denied_is_reported_as_unknown():
@@ -478,15 +513,18 @@ def test_aws_managed_policy_beyond_bounds_degrades_to_unknown_access(oversize):
     c, iam, _, _ = collector()
     deny = {"Effect": "Deny", "Action": "s3:*", "Resource": "*"}
     document = large_policy(2**20 + 1, deny_s3=True) if oversize == "bytes" else {"Statement": [deny] * 2049}
-    with_managed_role(iam, SUPPORT_ROLE, SUPPORT_POLICY, document)
+    # An inline grant of its own, so the role has edges the unevaluated Deny could have removed.
+    inline = [{"PolicyDocument": {"Statement": [{"Effect": "Allow", "Action": "s3:*", "Resource": "*"}]}}]
+    with_managed_role(iam, SUPPORT_ROLE, SUPPORT_POLICY, document)["RolePolicyList"] = inline
     snapshot = c.collect()
     # The same inventory without that attachment: the policy must contribute nothing.
     baseline_collector, baseline_iam, _, _ = collector()
     baseline_role = with_managed_role(baseline_iam, SUPPORT_ROLE, SUPPORT_POLICY, {})
     baseline_role["AttachedManagedPolicies"] = []
+    baseline_role["RolePolicyList"] = inline
     baseline = baseline_collector.collect()
     # Recorded by ARN and SHA-256, marked unevaluated, never evaluated or stored in full.
-    attachment = next(p for p in snapshot.policies if p.principal == SUPPORT_ROLE)
+    attachment = next(p for p in snapshot.policies if p.principal == SUPPORT_ROLE and p.kind == "managed")
     marker = attachment.document["ZeroGraphUnevaluated"]
     assert attachment.arn == SUPPORT_POLICY and "Statement" not in attachment.document
     assert marker["status"] == "too_large/unevaluated"
@@ -547,7 +585,14 @@ def test_unevaluated_aws_managed_group_policy_marks_members():
     c, iam, _, _ = collector()
     page = iam.get_account_authorization_details.return_value
     page["UserDetailList"] = [
-        {"UserName": "ana", "Arn": "arn:aws:iam::123456789012:user/ana", "GroupList": ["ops"]}
+        {
+            "UserName": "ana",
+            "Arn": "arn:aws:iam::123456789012:user/ana",
+            "GroupList": ["ops"],
+            "UserPolicyList": [
+                {"PolicyDocument": {"Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}]}}
+            ],
+        }
     ]
     page["GroupDetailList"] = [
         {
@@ -566,7 +611,7 @@ def test_unevaluated_aws_managed_group_policy_marks_members():
     assert user.metadata["policies_unevaluated"] == [SUPPORT_POLICY]
     edges = [e for e in snapshot.edges if e.source == user.id]
     assert edges and all(any("too large to evaluate" in item for item in e.evidence) for e in edges)
-    assert next(p for p in snapshot.policies if p.principal == user.id).kind == "group-managed"
+    assert {p.kind for p in snapshot.policies if p.principal == user.id} == {"inline", "group-managed"}
 
 
 def test_request_page_and_wall_budgets_fail_closed(monkeypatch):
