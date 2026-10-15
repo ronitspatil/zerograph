@@ -503,11 +503,11 @@ export function TopicLens({
             />
             <small className="optimized-note" role="status">
               {!optimized
-                ? "Current: colored by granted weight outside each topic."
+                ? "Current: access as granted today."
                 : whatifError
                   ? `Optimized view unavailable: ${whatifError}`
                   : whatif
-                    ? `${setDescription(proposalSet)}: ${count(whatif.links.reduce((sum, l) => sum + l.removed, 0))} cross-topic grants removed · colored by identity EPI after (without hubs) · simulated, not applied`
+                    ? `${setDescription(proposalSet)}: ${count(whatif.links.reduce((sum, l) => sum + l.removed, 0))} cross-topic grants removed · simulated, not applied`
                     : `${setDescription(proposalSet)}: loading…`}
             </small>
           </div>
