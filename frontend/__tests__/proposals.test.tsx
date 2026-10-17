@@ -265,6 +265,10 @@ describe("Proposals view", () => {
     await act(async () => {});
     expect(within(panel).getByText("40 → 12")).toBeInTheDocument();
     expect(within(panel).getByText("2 → 1")).toBeInTheDocument();
+    // The decision row sits in the panel's sticky review footer.
+    const review = panel.querySelector(".proposal-review") as HTMLElement;
+    for (const name of ["Accept", "Reject", "Clear"])
+      expect(within(review).getByRole("button", { name })).toBeInTheDocument();
     fireEvent.click(within(panel).getByRole("button", { name: "Accept" }));
     await act(async () => {});
     const decision = calls.find((c) => c.path.endsWith("/decision"));

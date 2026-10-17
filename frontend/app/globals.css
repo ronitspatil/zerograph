@@ -694,7 +694,7 @@
   }
   /* Sized for the longest label ("Export visible role page") so switching
      graph modes never resizes or re-wraps the heading. */
-  .heading-actions .button-outline {
+  .heading-actions .heading-export {
     min-width: 200px;
   }
 
@@ -1584,6 +1584,17 @@
   .proposal-row-meta {
     text-align: right;
   }
+  /* One line at every width: a longer count after Load more never wraps the
+     heading and pushes the list down (it truncates, full text in the title). */
+  .proposal-list > .panel-heading {
+    flex-wrap: nowrap;
+  }
+  .proposal-shown {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .proposal-more {
     display: flex;
     justify-content: center;
@@ -1657,6 +1668,21 @@
     flex-wrap: wrap;
     gap: 8px;
     margin: 8px 0;
+  }
+  /* The Review row pins to the bottom edge of the scrolling panel (the panel's
+     16px padding is cancelled so it spans the full width and covers what
+     scrolls under it); further down, the pull request section scrolls past. */
+  .proposal-review {
+    position: sticky;
+    bottom: -16px;
+    z-index: 1;
+    margin: 0 -16px;
+    padding: 12px 16px 16px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .proposal-review .proposal-actions {
+    margin-bottom: 4px;
   }
   .proposal-footnote {
     display: block;
@@ -2114,6 +2140,10 @@
     border-radius: 10px;
     padding: 0 20px 20px;
     box-shadow: 0 16px 48px #00000066;
+    /* On a short screen the guide scrolls inside the backdrop's 16px inset
+       instead of overflowing it (its heading and "Got it" were cut off). */
+    max-height: 100%;
+    overflow-y: auto;
   }
   .guide-modal > .panel-heading {
     margin: 0 -20px 8px;
@@ -2294,6 +2324,9 @@
     .proposal-detail {
       height: auto;
       overflow-y: visible;
+      position: static;
+    }
+    .proposal-review {
       position: static;
     }
     .proposal-metrics {

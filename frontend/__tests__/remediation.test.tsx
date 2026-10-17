@@ -44,6 +44,15 @@ function mount(canAdmin = true) {
   );
 }
 describe("Remediation hub", () => {
+  it("shows one notice with the demo safety caveat", () => {
+    const { container } = mount();
+    const notices = container.querySelectorAll(".notice");
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toHaveTextContent("Single policy.");
+    expect(notices[0]).toHaveTextContent(
+      "Sample policy and action history are synthetic; use real audit evidence before proposing production changes.",
+    );
+  });
   it("requires explicit coverage attestation and sends original evidence", async () => {
     vi.mocked(api).mockResolvedValue(preview);
     mount();

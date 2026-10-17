@@ -120,10 +120,6 @@ export function Proposals({
         <Rollout canAdmin={canAdmin} refreshKey={rolloutKey} />
       ) : tab === "advanced" ? (
         <section className="advanced-remediation" aria-label="Advanced">
-          <div className="notice">
-            <b>Single policy.</b> Trim one pasted IAM policy against usage you
-            supply, for a policy outside the collected graph.
-          </div>
           {advanced}
         </section>
       ) : (
@@ -621,7 +617,14 @@ function ProposalQueue({
         <div className="panel proposal-list">
           <div className="panel-heading">
             <h3>Proposals</h3>
-            <span className="muted">
+            <span
+              className="muted proposal-shown"
+              title={
+                list
+                  ? `${count(rows.length)} of ${count(list.view.total)} shown`
+                  : undefined
+              }
+            >
               {list
                 ? `${count(rows.length)} of ${count(list.view.total)} shown`
                 : error
@@ -904,38 +907,42 @@ function ProposalEvidence({
           </dd>
         </dl>
       </div>
-      <span className="section-label">Review</span>
-      <div className="proposal-actions">
-        <Button
-          variant={p.decision?.state === "accepted" ? "outline" : "default"}
-          disabled={!canAdmin || p.decision?.state === "accepted"}
-          onClick={() => onDecide("accepted")}
-        >
-          Accept
-        </Button>
-        <Button
-          variant="outline"
-          disabled={!canAdmin || p.decision?.state === "rejected"}
-          onClick={() => onDecide("rejected")}
-        >
-          Reject
-        </Button>
-        <Button
-          variant="outline"
-          disabled={!canAdmin || !p.decision}
-          onClick={() => onDecide("pending")}
-        >
-          Clear
-        </Button>
+      {/* Sticks to the bottom of the scrolling evidence panel, so the decision
+          buttons stay in view however long the evidence above them is. */}
+      <div className="proposal-review">
+        <span className="section-label">Review</span>
+        <div className="proposal-actions">
+          <Button
+            variant={p.decision?.state === "accepted" ? "outline" : "default"}
+            disabled={!canAdmin || p.decision?.state === "accepted"}
+            onClick={() => onDecide("accepted")}
+          >
+            Accept
+          </Button>
+          <Button
+            variant="outline"
+            disabled={!canAdmin || p.decision?.state === "rejected"}
+            onClick={() => onDecide("rejected")}
+          >
+            Reject
+          </Button>
+          <Button
+            variant="outline"
+            disabled={!canAdmin || !p.decision}
+            onClick={() => onDecide("pending")}
+          >
+            Clear
+          </Button>
+        </div>
+        <small className="proposal-footnote">
+          {p.decision
+            ? `${p.decision.state === "accepted" ? "Accepted" : "Rejected"} by ${p.decision.actor}${p.decision.stale ? " (evidence changed since)" : ""}. `
+            : ""}
+          {canAdmin
+            ? "Decisions carry forward to later revisions."
+            : "Administrators record decisions and open pull requests."}
+        </small>
       </div>
-      <small className="proposal-footnote">
-        {p.decision
-          ? `${p.decision.state === "accepted" ? "Accepted" : "Rejected"} by ${p.decision.actor}${p.decision.stale ? " (evidence changed since)" : ""}. `
-          : ""}
-        {canAdmin
-          ? "Decisions carry forward to later revisions."
-          : "Administrators record decisions and open pull requests."}
-      </small>
       <span className="section-label">Pull request</span>
       <div className="proposal-pr">
         {draft === null ? (
