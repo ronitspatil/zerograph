@@ -720,6 +720,7 @@ export function Console({ demo }: { demo: boolean }) {
                 {view === "graph" && (
                   <Button
                     variant="outline"
+                    className="heading-export"
                     onClick={exportGraph}
                     disabled={!filtered.nodes.length || revisionStale}
                   >

@@ -694,7 +694,7 @@
   }
   /* Sized for the longest label ("Export visible role page") so switching
      graph modes never resizes or re-wraps the heading. */
-  .heading-actions .button-outline {
+  .heading-actions .heading-export {
     min-width: 200px;
   }
 
