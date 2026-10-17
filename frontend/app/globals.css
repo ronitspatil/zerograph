@@ -1658,6 +1658,21 @@
     gap: 8px;
     margin: 8px 0;
   }
+  /* The Review row pins to the bottom edge of the scrolling panel (the panel's
+     16px padding is cancelled so it spans the full width and covers what
+     scrolls under it); further down, the pull request section scrolls past. */
+  .proposal-review {
+    position: sticky;
+    bottom: -16px;
+    z-index: 1;
+    margin: 0 -16px;
+    padding: 12px 16px 16px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .proposal-review .proposal-actions {
+    margin-bottom: 4px;
+  }
   .proposal-footnote {
     display: block;
     color: var(--muted);
@@ -2294,6 +2309,9 @@
     .proposal-detail {
       height: auto;
       overflow-y: visible;
+      position: static;
+    }
+    .proposal-review {
       position: static;
     }
     .proposal-metrics {

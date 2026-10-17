@@ -904,38 +904,42 @@ function ProposalEvidence({
           </dd>
         </dl>
       </div>
-      <span className="section-label">Review</span>
-      <div className="proposal-actions">
-        <Button
-          variant={p.decision?.state === "accepted" ? "outline" : "default"}
-          disabled={!canAdmin || p.decision?.state === "accepted"}
-          onClick={() => onDecide("accepted")}
-        >
-          Accept
-        </Button>
-        <Button
-          variant="outline"
-          disabled={!canAdmin || p.decision?.state === "rejected"}
-          onClick={() => onDecide("rejected")}
-        >
-          Reject
-        </Button>
-        <Button
-          variant="outline"
-          disabled={!canAdmin || !p.decision}
-          onClick={() => onDecide("pending")}
-        >
-          Clear
-        </Button>
+      {/* Sticks to the bottom of the scrolling evidence panel, so the decision
+          buttons stay in view however long the evidence above them is. */}
+      <div className="proposal-review">
+        <span className="section-label">Review</span>
+        <div className="proposal-actions">
+          <Button
+            variant={p.decision?.state === "accepted" ? "outline" : "default"}
+            disabled={!canAdmin || p.decision?.state === "accepted"}
+            onClick={() => onDecide("accepted")}
+          >
+            Accept
+          </Button>
+          <Button
+            variant="outline"
+            disabled={!canAdmin || p.decision?.state === "rejected"}
+            onClick={() => onDecide("rejected")}
+          >
+            Reject
+          </Button>
+          <Button
+            variant="outline"
+            disabled={!canAdmin || !p.decision}
+            onClick={() => onDecide("pending")}
+          >
+            Clear
+          </Button>
+        </div>
+        <small className="proposal-footnote">
+          {p.decision
+            ? `${p.decision.state === "accepted" ? "Accepted" : "Rejected"} by ${p.decision.actor}${p.decision.stale ? " (evidence changed since)" : ""}. `
+            : ""}
+          {canAdmin
+            ? "Decisions carry forward to later revisions."
+            : "Administrators record decisions and open pull requests."}
+        </small>
       </div>
-      <small className="proposal-footnote">
-        {p.decision
-          ? `${p.decision.state === "accepted" ? "Accepted" : "Rejected"} by ${p.decision.actor}${p.decision.stale ? " (evidence changed since)" : ""}. `
-          : ""}
-        {canAdmin
-          ? "Decisions carry forward to later revisions."
-          : "Administrators record decisions and open pull requests."}
-      </small>
       <span className="section-label">Pull request</span>
       <div className="proposal-pr">
         {draft === null ? (
