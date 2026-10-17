@@ -1584,6 +1584,17 @@
   .proposal-row-meta {
     text-align: right;
   }
+  /* One line at every width: a longer count after Load more never wraps the
+     heading and pushes the list down (it truncates, full text in the title). */
+  .proposal-list > .panel-heading {
+    flex-wrap: nowrap;
+  }
+  .proposal-shown {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .proposal-more {
     display: flex;
     justify-content: center;

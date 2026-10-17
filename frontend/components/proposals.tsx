@@ -617,7 +617,14 @@ function ProposalQueue({
         <div className="panel proposal-list">
           <div className="panel-heading">
             <h3>Proposals</h3>
-            <span className="muted">
+            <span
+              className="muted proposal-shown"
+              title={
+                list
+                  ? `${count(rows.length)} of ${count(list.view.total)} shown`
+                  : undefined
+              }
+            >
               {list
                 ? `${count(rows.length)} of ${count(list.view.total)} shown`
                 : error
