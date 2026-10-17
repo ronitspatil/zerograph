@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { ArrowLeft, LoaderCircle } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
-import { formatCount } from "@/lib/format";
+import { formatCount, formatPp } from "@/lib/format";
 import { epiPrecise, TIER_HINTS, TIER_LABELS, TIERS } from "@/lib/proposals";
 import { selectionBody, setDescription, useProposalSet } from "@/lib/optimized";
 import type {
@@ -23,6 +23,7 @@ import {
   epiText,
   EVIDENCE_LABELS,
   PrivilegeRows,
+  ShareChange,
   windowText,
 } from "@/components/privilege";
 import { FLAG_LABELS, topicEpi } from "@/components/topic-lens";
@@ -294,28 +295,38 @@ export function TopicPage({
           </small>
         </div>
         <div className="metric-card">
-          <span>Identity EPI now → after</span>
-          <strong>
-            {after
-              ? `${epiPrecise(topicEpi(after, "before"))} → ${epiPrecise(topicEpi(after, "after"))}`
-              : "—"}
+          <span>Identity EPI, now → after</span>
+          <strong className="share-change">
+            {after ? (
+              <ShareChange
+                before={topicEpi(after, "before")}
+                after={topicEpi(after, "after")}
+              />
+            ) : (
+              "—"
+            )}
           </strong>
           <small>
             {after
-              ? `Without hubs ${epiPrecise(after.identities?.before.epi_excl_hubs)} → ${epiPrecise(after.identities?.after.epi_excl_hubs)} · ${setDescription(set)}`
+              ? `${formatPp(topicEpi(after, "before"), topicEpi(after, "after"))} · without hubs ${epiPrecise(after.identities?.before.epi_excl_hubs)} → ${epiPrecise(after.identities?.after.epi_excl_hubs)} · ${setDescription(set)}`
               : setDescription(set)}
           </small>
         </div>
         <div className="metric-card">
-          <span>Role EPI now → after</span>
-          <strong>
-            {after
-              ? `${epiPrecise(after.roles?.before.epi)} → ${epiPrecise(after.roles?.after.epi)}`
-              : "—"}
+          <span>Role EPI, now → after</span>
+          <strong className="share-change">
+            {after ? (
+              <ShareChange
+                before={after.roles?.before.epi}
+                after={after.roles?.after.epi}
+              />
+            ) : (
+              "—"
+            )}
           </strong>
           <small>
             {after
-              ? `Without hubs ${epiPrecise(after.roles?.before.epi_excl_hubs)} → ${epiPrecise(after.roles?.after.epi_excl_hubs)}`
+              ? `${formatPp(after.roles?.before.epi, after.roles?.after.epi)} · without hubs ${epiPrecise(after.roles?.before.epi_excl_hubs)} → ${epiPrecise(after.roles?.after.epi_excl_hubs)}`
               : "What-if, not applied"}
           </small>
         </div>

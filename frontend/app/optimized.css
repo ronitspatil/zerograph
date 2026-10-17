@@ -81,9 +81,13 @@
 .topic-optimized .optimized-set select {
   width: 144px;
 }
+/* Three fixed lines: switching Current / Optimized never resizes the panel. */
 .optimized-note {
-  display: block;
-  min-height: 36px;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  height: 54px;
   font-size: 12px;
   line-height: 18px;
   color: var(--muted);
@@ -214,10 +218,17 @@
   color: var(--muted);
   font-size: 12px;
 }
+.topic-section-body .topic-tabs button:hover {
+  color: var(--text);
+}
+/* Pressed filters and tabs: raised, like every segmented switch. */
 .topic-section-body .topic-tabs button[aria-pressed="true"] {
   color: var(--text);
   border-color: var(--border-strong);
-  background: var(--accent-soft);
+  background: var(--surface-raised);
+}
+.tier-counts .text-link:not(:disabled) {
+  color: var(--text);
 }
 .tier-counts .text-link:disabled {
   color: var(--subtle);
