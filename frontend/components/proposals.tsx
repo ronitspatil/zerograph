@@ -120,10 +120,6 @@ export function Proposals({
         <Rollout canAdmin={canAdmin} refreshKey={rolloutKey} />
       ) : tab === "advanced" ? (
         <section className="advanced-remediation" aria-label="Advanced">
-          <div className="notice">
-            <b>Single policy.</b> Trim one pasted IAM policy against usage you
-            supply, for a policy outside the collected graph.
-          </div>
           {advanced}
         </section>
       ) : (

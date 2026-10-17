@@ -99,12 +99,13 @@ export function RemediationHub({
   }
   return (
     <section className="remediation-page">
-      {demo && (
-        <div className="notice">
-          Sample policy and action history are synthetic; use real audit
-          evidence before proposing production changes.
-        </div>
-      )}
+      {/* One notice: what this tool is for and, in the demo, the safety caveat. */}
+      <div className="notice">
+        <b>Single policy.</b> Trim one pasted IAM policy against usage you
+        supply, for a policy outside the collected graph.
+        {demo &&
+          " Sample policy and action history are synthetic; use real audit evidence before proposing production changes."}
+      </div>
       <div className="remediation-grid">
         <div className="panel form-panel">
           <div className="panel-heading">
