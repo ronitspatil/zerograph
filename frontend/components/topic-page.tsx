@@ -245,13 +245,13 @@ export function TopicPage({
   if (unavailable)
     return (
       <section className="topic-page">
-        <Button variant="ghost" onClick={onBack}>
-          <ArrowLeft size={14} aria-hidden="true" />
-          Back to topics
-        </Button>
-        <div className="empty-state">
-          <h3>Topic not available</h3>
-          <p>{unavailable}</p>
+        <div className="topic-page-head">
+          <Button variant="ghost" size="small" onClick={onBack}>
+            <ArrowLeft size={14} aria-hidden="true" />
+            Topics
+          </Button>
+          <h1>Topic not available</h1>
+          <p className="topic-reason">{unavailable}</p>
         </div>
       </section>
     );
@@ -271,7 +271,7 @@ export function TopicPage({
           Topics
         </Button>
         <div className="topic-page-title">
-          <h2 title={topic?.label}>{topic?.label ?? "Loading topic…"}</h2>
+          <h1 title={topic?.label}>{topic?.label ?? "Loading topic…"}</h1>
           <span className="node-type">
             {topic
               ? topic.kind === "anchored"

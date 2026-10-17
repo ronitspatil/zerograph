@@ -707,41 +707,46 @@ export function Console({ demo }: { demo: boolean }) {
           </div>
         </header>
         <main className="main-content">
-          <div className="page-heading">
-            <div>
-              <h1>{titles[view].title}</h1>
-              <p>{titles[view].description}</p>
-            </div>
-            {/* Export belongs to the graph it exports. Add source is hidden where it
-                would point at itself (Data sources) or off-topic (a topic page), and is
-                primary only on views without their own primary action. */}
-            {view !== "sources" && view !== "topic" && (
-              <div className="heading-actions">
-                {view === "graph" && (
-                  <Button
-                    variant="outline"
-                    className="heading-export"
-                    onClick={exportGraph}
-                    disabled={!filtered.nodes.length || revisionStale}
-                  >
-                    <ArrowDownToLine size={14} aria-hidden="true" />
-                    {roles ? "Export visible role page" : "Export visible view"}
-                  </Button>
-                )}
-                <Button
-                  variant={
-                    view === "overview" || view === "activity"
-                      ? "default"
-                      : "outline"
-                  }
-                  onClick={() => setView("sources")}
-                >
-                  <Plus size={14} aria-hidden="true" />
-                  Add source
-                </Button>
+          {/* A topic page titles itself with the topic's name. */}
+          {view !== "topic" && (
+            <div className="page-heading">
+              <div>
+                <h1>{titles[view].title}</h1>
+                <p>{titles[view].description}</p>
               </div>
-            )}
-          </div>
+              {/* Export belongs to the graph it exports. Add source is hidden where it
+                would point at itself (Data sources), and is
+                primary only on views without their own primary action. */}
+              {view !== "sources" && (
+                <div className="heading-actions">
+                  {view === "graph" && (
+                    <Button
+                      variant="outline"
+                      className="heading-export"
+                      onClick={exportGraph}
+                      disabled={!filtered.nodes.length || revisionStale}
+                    >
+                      <ArrowDownToLine size={14} aria-hidden="true" />
+                      {roles
+                        ? "Export visible role page"
+                        : "Export visible view"}
+                    </Button>
+                  )}
+                  <Button
+                    variant={
+                      view === "overview" || view === "activity"
+                        ? "default"
+                        : "outline"
+                    }
+                    onClick={() => setView("sources")}
+                  >
+                    <Plus size={14} aria-hidden="true" />
+                    Add source
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
           {error && (
             <div className="error-banner" role="alert">
               {error}
