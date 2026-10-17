@@ -149,7 +149,7 @@ describe("Optimizer overview tiles", () => {
       render(<OptimizerTiles reloadKey={0} onOpenQueue={() => {}} />);
     });
     expect(screen.getByText("95.7% → 95.6%")).toBeInTheDocument();
-    expect(screen.getByText(/Without hubs 60.3% → 41.1%/)).toBeInTheDocument();
+    expect(screen.getByText(/without hubs 60.3% → 41.1%/)).toBeInTheDocument();
     expect(screen.getByText("5,164")).toBeInTheDocument();
     expect(screen.getByText("18,248")).toBeInTheDocument();
     expect(screen.getByText(/1,500 accepted/)).toBeInTheDocument();

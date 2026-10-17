@@ -93,9 +93,8 @@ export function UsageUpload({
         </span>
       </div>
       <p className="muted usage-intro">
-        Upload CloudTrail export files (JSON or .json.gz, as delivered to S3) to
-        compare granted access with observed use. Attest only services whose
-        events the files capture completely for the whole window.
+        CloudTrail export files (JSON or .json.gz, as delivered to S3). Attest
+        only services the files capture completely for the whole window.
       </p>
       <div className="two-columns">
         <label>
@@ -137,9 +136,9 @@ export function UsageUpload({
           onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
         />
         <small className="muted">
-          Up to 3.9 MB per file. Needed access counts as used only with 90 days
-          of attested coverage ending within the last 7 days; otherwise it is
-          inferred from peers.
+          Up to 3.9 MB per file. Use counts as evidence with 90 days of attested
+          coverage ending in the last 7 days; otherwise need is inferred from
+          peers.
         </small>
       </label>
       {progress && <p className="muted">{progress}</p>}
@@ -148,7 +147,11 @@ export function UsageUpload({
           {error}
         </p>
       )}
-      <Button disabled={busy || !canAdmin || !files.length} onClick={submit}>
+      <Button
+        variant="outline"
+        disabled={busy || !canAdmin || !files.length}
+        onClick={submit}
+      >
         {busy ? "Uploading…" : "Upload usage evidence"}
       </Button>
       {result && (
@@ -167,8 +170,8 @@ export function UsageUpload({
                 <tr>
                   <th>Service</th>
                   <th>Attested</th>
-                  <th>Events</th>
-                  <th>Unmapped</th>
+                  <th className="num">Events</th>
+                  <th className="num">Unmapped</th>
                   <th>Coverage</th>
                 </tr>
               </thead>
@@ -177,8 +180,8 @@ export function UsageUpload({
                   <tr key={row.service}>
                     <td>{row.service}</td>
                     <td>{row.attested ? "Yes" : "No"}</td>
-                    <td>{formatCount(row.events)}</td>
-                    <td>{formatCount(row.unmapped)}</td>
+                    <td className="num">{formatCount(row.events)}</td>
+                    <td className="num">{formatCount(row.unmapped)}</td>
                     <td>{row.complete ? "Complete" : "Incomplete"}</td>
                   </tr>
                 ))}

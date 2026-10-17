@@ -1,3 +1,4 @@
+import { formatPercent } from "@/lib/format";
 import type { ProposalTier, ProposalType } from "@/lib/types";
 
 export const TIERS: ProposalTier[] = [
@@ -53,7 +54,5 @@ export const COVERAGE_LABELS: Record<string, string> = {
 
 /** "47.9%" style index text with one decimal (EPI deltas are often small). */
 export function epiPrecise(value: number | null | undefined): string {
-  return typeof value === "number" && Number.isFinite(value)
-    ? `${(value * 100).toFixed(1)}%`
-    : "—";
+  return formatPercent(value);
 }

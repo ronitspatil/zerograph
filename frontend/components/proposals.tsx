@@ -7,7 +7,7 @@ import {
   useState,
 } from "react";
 import { api, ApiError } from "@/lib/api";
-import { formatCount } from "@/lib/format";
+import { formatCount, formatPp } from "@/lib/format";
 import {
   ATTRIBUTION_LABELS,
   COVERAGE_LABELS,
@@ -31,6 +31,7 @@ import type {
 } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Rollout } from "@/components/rollout";
+import { ShareChange } from "@/components/privilege";
 import { setCustomSet, useProposalSet } from "@/lib/optimized";
 
 const PAGE = 50;
@@ -119,11 +120,6 @@ export function Proposals({
         <Rollout canAdmin={canAdmin} refreshKey={rolloutKey} />
       ) : tab === "advanced" ? (
         <section className="advanced-remediation" aria-label="Advanced">
-          <div className="notice">
-            <b>Advanced: single policy.</b> Trim one pasted IAM policy against
-            usage you supply. The proposal queue is the primary way to
-            remediate; use this for a policy outside the collected graph.
-          </div>
           {advanced}
         </section>
       ) : (
@@ -416,10 +412,9 @@ function ProposalQueue({
   return (
     <section className="proposals-page">
       <div className="notice proposal-notice">
-        <b>Proposed, not applied.</b> Accepted, eligible proposals become draft
-        pull requests in your policy repository (Create PR); nothing is applied
-        by ZeroGraph and merging happens there. No proposal removes access that
-        was observed used.
+        <b>Proposed, not applied.</b> Accepted proposals become draft pull
+        requests in your policy repository; nothing is applied by ZeroGraph. No
+        proposal removes access observed in use.
       </div>
       <div className="proposal-metrics">
         <div className="metric-card">
@@ -428,32 +423,44 @@ function ProposalQueue({
           <small>
             {summary
               ? `${count(summary.decisions.accepted)} accepted · ${count(summary.decisions.rejected)} rejected`
-              : "Loading"}
+              : error
+                ? "Unavailable"
+                : "Loading"}
           </small>
         </div>
         <div className="metric-card">
-          <span>Identity EPI now → after high tier</span>
-          <strong>
-            {high
-              ? `${epiPrecise(high.identities.before.epi)} → ${epiPrecise(high.identities.after.epi)}`
-              : "—"}
+          <span>Identity EPI, now → high tier</span>
+          <strong className="share-change">
+            {high ? (
+              <ShareChange
+                before={high.identities.before.epi}
+                after={high.identities.after.epi}
+              />
+            ) : (
+              "—"
+            )}
           </strong>
           <small>
             {high
-              ? `Without hubs ${epiPrecise(high.identities.before.epi_excl_hubs)} → ${epiPrecise(high.identities.after.epi_excl_hubs)}`
+              ? `${formatPp(high.identities.before.epi, high.identities.after.epi)} · without hubs ${epiPrecise(high.identities.before.epi_excl_hubs)} → ${epiPrecise(high.identities.after.epi_excl_hubs)}`
               : "Excess privilege index"}
           </small>
         </div>
         <div className="metric-card">
-          <span>Role EPI now → after high tier</span>
-          <strong>
-            {high
-              ? `${epiPrecise(high.roles.before.epi)} → ${epiPrecise(high.roles.after.epi)}`
-              : "—"}
+          <span>Role EPI, now → high tier</span>
+          <strong className="share-change">
+            {high ? (
+              <ShareChange
+                before={high.roles.before.epi}
+                after={high.roles.after.epi}
+              />
+            ) : (
+              "—"
+            )}
           </strong>
           <small>
             {summary
-              ? `${count(summary.high_tier.counts.grants_removed ?? 0)} grants · ${count(summary.high_tier.counts.disabled_nodes ?? 0)} disabled, if all applied`
+              ? `${high ? `${formatPp(high.roles.before.epi, high.roles.after.epi)} · ` : ""}${count(summary.high_tier.counts.grants_removed ?? 0)} grants · ${count(summary.high_tier.counts.disabled_nodes ?? 0)} disabled, if all applied`
               : "What-if, not applied"}
           </small>
         </div>
@@ -575,6 +582,7 @@ function ProposalQueue({
         ) : (
           <>
             <Button
+              variant="outline"
               size="small"
               disabled={!bulkScope || !canAdmin || !bulkRows.length}
               onClick={() => {
@@ -609,10 +617,19 @@ function ProposalQueue({
         <div className="panel proposal-list">
           <div className="panel-heading">
             <h3>Proposals</h3>
-            <span className="muted">
+            <span
+              className="muted proposal-shown"
+              title={
+                list
+                  ? `${count(rows.length)} of ${count(list.view.total)} shown`
+                  : undefined
+              }
+            >
               {list
                 ? `${count(rows.length)} of ${count(list.view.total)} shown`
-                : "Loading"}
+                : error
+                  ? "Unavailable"
+                  : "Loading"}
             </span>
           </div>
           <div className="proposal-rows" aria-busy={busy}>
@@ -636,18 +653,24 @@ function ProposalQueue({
                 </span>
                 <span className="proposal-row-meta">
                   <small>{topics.get(p.topic_id) ?? "No topic"}</small>
+                  {/* Only a recorded decision is shown; undecided is the default. */}
                   <small>
                     {p.decision
                       ? p.decision.state === "accepted"
                         ? "Accepted"
                         : "Rejected"
-                      : "Proposed"}
+                      : "\u00a0"}
                   </small>
                 </span>
               </button>
             ))}
             {list && !rows.length && (
               <p className="empty-line">No proposals match these filters.</p>
+            )}
+            {!list && error && (
+              <p className="empty-line">
+                Proposals could not be loaded. Refresh the workspace to retry.
+              </p>
             )}
           </div>
           <div className="proposal-more">
@@ -659,7 +682,9 @@ function ProposalQueue({
                 void loadPage(filters, list.view.next_cursor, list.revision)
               }
             >
-              {list?.view.next_cursor == null ? "All shown" : "Load more"}
+              {list && list.view.next_cursor == null
+                ? "All shown"
+                : "Load more"}
             </Button>
           </div>
         </div>
@@ -805,7 +830,7 @@ function ProposalEvidence({
             ? "Never in the window"
             : p.type === "remove_assumption"
               ? "Never assumed in the window"
-            : value(evidence, "last_used_hint")}
+              : value(evidence, "last_used_hint")}
         </dd>
         {peers && (
           <>
@@ -882,37 +907,42 @@ function ProposalEvidence({
           </dd>
         </dl>
       </div>
-      <span className="section-label">Review</span>
-      <div className="proposal-actions">
-        <Button
-          disabled={!canAdmin || p.decision?.state === "accepted"}
-          onClick={() => onDecide("accepted")}
-        >
-          Accept
-        </Button>
-        <Button
-          variant="outline"
-          disabled={!canAdmin || p.decision?.state === "rejected"}
-          onClick={() => onDecide("rejected")}
-        >
-          Reject
-        </Button>
-        <Button
-          variant="outline"
-          disabled={!canAdmin || !p.decision}
-          onClick={() => onDecide("pending")}
-        >
-          Clear
-        </Button>
+      {/* Sticks to the bottom of the scrolling evidence panel, so the decision
+          buttons stay in view however long the evidence above them is. */}
+      <div className="proposal-review">
+        <span className="section-label">Review</span>
+        <div className="proposal-actions">
+          <Button
+            variant={p.decision?.state === "accepted" ? "outline" : "default"}
+            disabled={!canAdmin || p.decision?.state === "accepted"}
+            onClick={() => onDecide("accepted")}
+          >
+            Accept
+          </Button>
+          <Button
+            variant="outline"
+            disabled={!canAdmin || p.decision?.state === "rejected"}
+            onClick={() => onDecide("rejected")}
+          >
+            Reject
+          </Button>
+          <Button
+            variant="outline"
+            disabled={!canAdmin || !p.decision}
+            onClick={() => onDecide("pending")}
+          >
+            Clear
+          </Button>
+        </div>
+        <small className="proposal-footnote">
+          {p.decision
+            ? `${p.decision.state === "accepted" ? "Accepted" : "Rejected"} by ${p.decision.actor}${p.decision.stale ? " (evidence changed since)" : ""}. `
+            : ""}
+          {canAdmin
+            ? "Decisions carry forward to later revisions."
+            : "Administrators record decisions and open pull requests."}
+        </small>
       </div>
-      <small className="proposal-footnote">
-        {p.decision
-          ? `${p.decision.state === "accepted" ? "Accepted" : "Rejected"} by ${p.decision.actor}${p.decision.stale ? " (evidence changed since)" : ""}. `
-          : ""}
-        {canAdmin
-          ? "Decisions carry forward to later revisions."
-          : "Administrators record decisions and open pull requests."}
-      </small>
       <span className="section-label">Pull request</span>
       <div className="proposal-pr">
         {draft === null ? (
@@ -921,6 +951,9 @@ function ProposalEvidence({
           <>
             <div className="proposal-actions">
               <Button
+                variant={
+                  p.decision?.state === "accepted" ? "default" : "outline"
+                }
                 disabled={
                   !canAdmin ||
                   creating ||

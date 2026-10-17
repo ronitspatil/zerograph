@@ -261,10 +261,10 @@ describe("topics lens", () => {
     );
     expect(
       within(panel).getByText("Roles flagged").nextSibling,
-    ).toHaveTextContent("900 (60%)");
+    ).toHaveTextContent("900 (60.0%)");
     expect(
       within(panel).getByText("Weight outside topic").nextSibling,
-    ).toHaveTextContent("18%");
+    ).toHaveTextContent("18.0%");
     expect(panel).toHaveTextContent("Hub role, Privileged");
     fireEvent.click(
       within(panel).getByRole("button", { name: "Show 50 more" }),
@@ -292,7 +292,7 @@ describe("topics lens", () => {
       within(panel).getByText("Without hub roles").nextSibling,
     ).toHaveTextContent("0");
     expect(within(panel).getByText("data-lake").nextSibling).toHaveTextContent(
-      "25%",
+      "25.0%",
     );
     fireEvent.click(
       within(panel).getByRole("button", { name: "Open neighborhood" }),
@@ -414,7 +414,7 @@ describe("topics lens", () => {
     const panel = screen.getByRole("complementary", { name: "Topic details" });
     expect(
       within(panel).getByText("Identities (without hubs)").nextSibling,
-    ).toHaveTextContent("98% (63%)");
+    ).toHaveTextContent("98.0% (63.0%)");
     expect(
       within(panel).getByText("Dormant identities").nextSibling,
     ).toHaveTextContent("6,097");
@@ -425,22 +425,22 @@ describe("topics lens", () => {
       await screen.findByRole("button", { name: "data-lake · 4,500" }),
     );
     expect(within(panel).getByText("Roles EPI").nextSibling).toHaveTextContent(
-      "48%",
+      "48.0%",
     );
     expect(
       within(panel).getByText("Identities EPI").nextSibling,
-    ).toHaveTextContent("98%");
+    ).toHaveTextContent("98.0%");
     expect(panel).toHaveTextContent("30 used · 10 inferred");
     fireEvent.click(within(panel).getByRole("button", { name: "Roles" }));
     const button = await within(panel).findByRole("button", {
       name: /role:etl/,
     });
     expect(button).toHaveTextContent(
-      "Dormant (no observed use) · EPI 75% used",
+      "Dormant (no observed use) · EPI 75.0% used",
     );
     fireEvent.click(button);
     expect(within(panel).getByText("EPI").nextSibling).toHaveTextContent(
-      "75% (75% without hubs)",
+      "75.0% (75.0% without hubs)",
     );
     expect(
       within(panel).getByText("Needed from").nextSibling,

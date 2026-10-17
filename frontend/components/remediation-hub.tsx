@@ -99,12 +99,13 @@ export function RemediationHub({
   }
   return (
     <section className="remediation-page">
-      {demo && (
-        <div className="notice">
-          The sample policy and action history below are synthetic. Connect real
-          audit evidence before proposing production changes.
-        </div>
-      )}
+      {/* One notice: what this tool is for and, in the demo, the safety caveat. */}
+      <div className="notice">
+        <b>Single policy.</b> Trim one pasted IAM policy against usage you
+        supply, for a policy outside the collected graph.
+        {demo &&
+          " Sample policy and action history are synthetic; use real audit evidence before proposing production changes."}
+      </div>
       <div className="remediation-grid">
         <div className="panel form-panel">
           <div className="panel-heading">
@@ -301,43 +302,45 @@ export function RemediationHub({
           <span className="muted">{formatCount(records.length)} proposals</span>
         </div>
         {records.length ? (
-          <table>
-            <thead>
-              <tr>
-                <th>Identity</th>
-                <th>Actions removed</th>
-                <th>Status</th>
-                <th>Review</th>
-              </tr>
-            </thead>
-            <tbody>
-              {records.map((r) => (
-                <tr key={r.id}>
-                  <td>
-                    {identities.find((n) => n.id === r.identity_id)?.name ||
-                      r.identity_id}
-                  </td>
-                  <td>{formatCount(r.removed_actions.length)}</td>
-                  <td>{r.status.replaceAll("_", " ")}</td>
-                  <td>
-                    {r.pr_url ? (
-                      <a
-                        className="text-link"
-                        href={r.pr_url}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        Open PR
-                        <ArrowUpRight size={12} aria-hidden="true" />
-                      </a>
-                    ) : (
-                      "Preview"
-                    )}
-                  </td>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Identity</th>
+                  <th>Actions removed</th>
+                  <th>Status</th>
+                  <th>Review</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {records.map((r) => (
+                  <tr key={r.id}>
+                    <td>
+                      {identities.find((n) => n.id === r.identity_id)?.name ||
+                        r.identity_id}
+                    </td>
+                    <td>{formatCount(r.removed_actions.length)}</td>
+                    <td>{r.status.replaceAll("_", " ")}</td>
+                    <td>
+                      {r.pr_url ? (
+                        <a
+                          className="text-link"
+                          href={r.pr_url}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Open PR
+                          <ArrowUpRight size={12} aria-hidden="true" />
+                        </a>
+                      ) : (
+                        "Preview"
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         ) : (
           <p className="empty-line">No remediation proposals yet.</p>
         )}

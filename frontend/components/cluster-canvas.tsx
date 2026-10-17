@@ -870,9 +870,9 @@ export function ClusterCanvas({
           ))
         ) : (
           <>
-            <span>Circle area: entities</span>
+            <span>Area: entities</span>
             <span>Color: most common type</span>
-            <span>Line width: relationships between clusters</span>
+            <span>Line: relationships between clusters</span>
           </>
         )}
       </div>

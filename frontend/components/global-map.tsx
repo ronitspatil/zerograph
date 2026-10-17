@@ -606,7 +606,6 @@ export function GlobalMap({
                 <span>Entities without relationships</span>
                 <b>{count(map.view.isolated_nodes)}</b>
               </div>
-              <small>{map.view.notice}</small>
             </>
           )}
         </aside>

@@ -1,15 +1,12 @@
 "use client";
 import { useEffect, useState } from "react";
 import { api, ApiError } from "@/lib/api";
-import { formatCount } from "@/lib/format";
+import { formatCount, formatPp } from "@/lib/format";
 import { epiPrecise } from "@/lib/proposals";
+import { ShareChange } from "@/components/privilege";
 import type { OptimizerOverview, WhatIfSide } from "@/lib/types";
 
 const count = formatCount;
-
-function arrow(now: WhatIfSide | undefined, after: WhatIfSide | undefined) {
-  return `${epiPrecise(now?.epi)} → ${epiPrecise(after?.epi)}`;
-}
 
 function arrowCore(now: WhatIfSide | undefined, after: WhatIfSide | undefined) {
   return `${epiPrecise(now?.epi_excl_hubs)} → ${epiPrecise(after?.epi_excl_hubs)}`;
@@ -56,27 +53,39 @@ export function OptimizerTiles({
   return (
     <section className="optimizer-tiles" aria-label="Least-privilege optimizer">
       <div className="metric-card">
-        <span>Identity EPI now → accepted</span>
-        <strong>
-          {ready
-            ? arrow(data.now.identities, data.after_accepted.identities)
-            : "—"}
+        <span>Identity EPI, now → accepted</span>
+        <strong className="share-change">
+          {ready ? (
+            <ShareChange
+              before={data.now.identities?.epi}
+              after={data.after_accepted.identities?.epi}
+            />
+          ) : (
+            "—"
+          )}
         </strong>
         <small>
           {ready
-            ? `Without hubs ${arrowCore(data.now.identities, data.after_accepted.identities)} · ${count(data.accepted.selected)} accepted`
+            ? `${formatPp(data.now.identities?.epi, data.after_accepted.identities?.epi)} · without hubs ${arrowCore(data.now.identities, data.after_accepted.identities)} · ${count(data.accepted.selected)} accepted`
             : note || "Excess privilege index, what-if"}
         </small>
       </div>
       <div className="metric-card">
-        <span>Identity EPI now → high tier</span>
-        <strong>
-          {ready ? arrow(data.now.identities, data.after_high.identities) : "—"}
+        <span>Identity EPI, now → high tier</span>
+        <strong className="share-change">
+          {ready ? (
+            <ShareChange
+              before={data.now.identities?.epi}
+              after={data.after_high.identities?.epi}
+            />
+          ) : (
+            "—"
+          )}
         </strong>
         <small>
           {ready
-            ? `Without hubs ${arrowCore(data.now.identities, data.after_high.identities)} · ${count(data.high.selected)} proposals`
-            : "If every high-tier proposal were applied"}
+            ? `${formatPp(data.now.identities?.epi, data.after_high.identities?.epi)} · without hubs ${arrowCore(data.now.identities, data.after_high.identities)} · ${count(data.high.selected)} proposals`
+            : "If every high-tier proposal applied"}
         </small>
       </div>
       <div className="metric-card">
@@ -84,7 +93,7 @@ export function OptimizerTiles({
         <strong>{data ? count(data.dormant_identities) : "—"}</strong>
         <small>
           {data
-            ? `${count(data.dormant_roles)} dormant roles · no observed use`
+            ? `${count(data.dormant_roles)} dormant roles`
             : "No observed use in the window"}
         </small>
       </div>

@@ -81,9 +81,13 @@
 .topic-optimized .optimized-set select {
   width: 144px;
 }
+/* Three fixed lines: switching Current / Optimized never resizes the panel. */
 .optimized-note {
-  display: block;
-  min-height: 36px;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  height: 54px;
   font-size: 12px;
   line-height: 18px;
   color: var(--muted);
@@ -107,6 +111,8 @@
   align-items: flex-start;
   gap: var(--space-2);
   min-width: 0;
+  /* With the page's 16px gap, the same 24px below the title as other page headings. */
+  margin-bottom: var(--space-2);
 }
 .topic-page-title {
   display: flex;
@@ -116,10 +122,10 @@
   min-width: 0;
   max-width: 100%;
 }
-.topic-page-title h2 {
+/* The topic name is the page title (the console's generic heading is not shown
+   on a topic page); the back button above it is the breadcrumb. */
+.topic-page-title h1 {
   margin: 0;
-  font-size: 20px;
-  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -214,10 +220,17 @@
   color: var(--muted);
   font-size: 12px;
 }
+.topic-section-body .topic-tabs button:hover {
+  color: var(--text);
+}
+/* Pressed filters and tabs: raised, like every segmented switch. */
 .topic-section-body .topic-tabs button[aria-pressed="true"] {
   color: var(--text);
   border-color: var(--border-strong);
-  background: var(--accent-soft);
+  background: var(--surface-raised);
+}
+.tier-counts .text-link:not(:disabled) {
+  color: var(--text);
 }
 .tier-counts .text-link:disabled {
   color: var(--subtle);
