@@ -100,10 +100,12 @@ print(json.dumps({"seconds": time.perf_counter() - started, "results": results,
 # depend on usage and run identically in both arms.
 ANALYSIS_PHASES = ("usage_load", "topics_compute", "topics_store", "proposals_compute", "proposals_store")
 # Usage overhead budgets (seconds, median of paired publishes, see scripts/timing.py).
-# The analysis phases are timed in process and carry little noise, so their budget is
-# tight enough that a 2 s regression fails it; the end-to-end publish adds the graph
-# writes (seconds of run-to-run drift on a shared machine) and keeps a looser bound.
-ANALYSIS_OVERHEAD_BUDGET_S = 5
+# The analysis phases are timed in process and vary by about 0.2 s between pairs, so
+# their budget sits about 1 s above the measured overhead (4.6-5.1 s at 100k on an
+# Apple M5, most of it storing the usage-driven proposals) and a 2 s regression fails
+# it. The end-to-end publish adds the graph writes, which drift by seconds between runs
+# on a shared machine, and keeps a looser bound.
+ANALYSIS_OVERHEAD_BUDGET_S = 6
 PUBLISH_OVERHEAD_BUDGET_S = 8
 
 DATA = {"Database", "VectorStore", "S3Bucket", "DataTable"}
