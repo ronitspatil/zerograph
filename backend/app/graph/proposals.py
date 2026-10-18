@@ -96,7 +96,9 @@ from app.graph.whatif import BASIS_CODES, IDENTITY_RECORD, ROLE_RECORD, WhatIfMo
 # Bump when proposal types, tiers, evidence or stored fields change: other versions read as missing.
 # 2: remove_assumption; identity use includes attributed role-session use.
 # 3: nothing is proposed for (or merged into) the collector's own identity.
-PROPOSAL_VERSION = 3
+# 4: removing a grant of a wildcard identity statement (expanded to concrete actions by the
+#    collector) is never-auto ``wildcard``.
+PROPOSAL_VERSION = 4
 TIERS = ("high", "medium", "low", "inferred", "manual")
 TYPES = (
     "remove_grant",
