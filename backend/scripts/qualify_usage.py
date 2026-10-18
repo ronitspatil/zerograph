@@ -66,6 +66,8 @@ def timed(owner, name, label=None):
     setattr(owner, name, wrapper)
 for name in ("begin_revision", "write_nodes", "write_edges", "finish_revision"):
     timed(CypherGraphStore, name)
+for name in ("publish_sets", "store_analysis", "compute_clusters", "store_clusters"):
+    timed(tasks, name)
 if sys.argv[2] == "without":
     tasks.load_usage = lambda *args, **kwargs: None
 else:
@@ -92,6 +94,17 @@ results = topics.backfill_missing()
 print(json.dumps({"seconds": time.perf_counter() - started, "results": results,
                   "maxrss": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}))
 """
+
+# Worker phases that usage evidence changes: loading it, topics and EPI, and proposals
+# (remove_assumption and usage-aware tiers). Graph writes, analysis and clusters do not
+# depend on usage and run identically in both arms.
+ANALYSIS_PHASES = ("usage_load", "topics_compute", "topics_store", "proposals_compute", "proposals_store")
+# Usage overhead budgets (seconds, median of paired publishes, see scripts/timing.py).
+# The analysis phases are timed in process and carry little noise, so their budget is
+# tight enough that a 2 s regression fails it; the end-to-end publish adds the graph
+# writes (seconds of run-to-run drift on a shared machine) and keeps a looser bound.
+ANALYSIS_OVERHEAD_BUDGET_S = 5
+PUBLISH_OVERHEAD_BUDGET_S = 8
 
 DATA = {"Database", "VectorStore", "S3Bucket", "DataTable"}
 PRINCIPALS = {"HumanUser", "ServiceAccount", "AIAgent", "MCPServer"}
@@ -418,14 +431,16 @@ def main() -> None:  # noqa: C901 - one linear qualification run
     parser.add_argument(
         "--glue", action="store_true", help="Add Glue databases/tables to the data-lake topic (GLUE_FIXTURE)"
     )
-    parser.add_argument("--publish-runs", type=int, default=2, help="Publications per arm (alternating)")
+    parser.add_argument(
+        "--publish-runs", type=int, default=3, help="Publication pairs (one per arm, ABBA order)"
+    )
     parser.add_argument("--requests", type=int, default=100)
     parser.add_argument("--chunk-bytes", type=int, default=3_900_000)
     parser.add_argument("--records-per-file", type=int, default=25_000)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    if not 1000 <= args.size <= 100_000 or not 1 <= args.publish_runs <= 4:
-        parser.error("Size 1000..100000 and 1..4 publish runs are required")
+    if not 1000 <= args.size <= 100_000 or not 1 <= args.publish_runs <= 6:
+        parser.error("Size 1000..100000 and 1..6 publish runs are required")
 
     from alembic import command
     from alembic.config import Config
@@ -452,6 +467,7 @@ def main() -> None:  # noqa: C901 - one linear qualification run
     )
     from qualify_topics import accuracy, digest, stored_rows
     from sqlalchemy import create_engine, text
+    from timing import arm_order, paired
 
     if not graph_is_empty(args.graph_uri):
         parser.error(f"Graph at {args.graph_uri} is not empty; use a disposable instance")
@@ -555,6 +571,7 @@ def main() -> None:  # noqa: C901 - one linear qualification run
                     + phases.get("usage_load", 0),
                     3,
                 ),
+                "analysis_seconds": round(sum(phases.get(name, 0) for name in ANALYSIS_PHASES), 3),
                 "worker_peak_rss_mb": round(rss_bytes(measured["maxrss"]) / 2**20, 1),
                 "phases_s": phases,
                 "job": {"status": job["status"], "node_count": job["node_count"]},
@@ -629,23 +646,45 @@ def main() -> None:  # noqa: C901 - one linear qualification run
                 summary.usage_fingerprint == usage.evidence(db, "demo").fingerprint != ""
             )
 
-        # 3. Alternating publications without and with usage (Phase 1 vs Phase 2 publish).
-        for arm in ["without", "with"] * args.publish_runs:
-            publish(arm)
-        without = [p for p in report["publishes"] if p["arm"] == "without"]
-        enabled = [p for p in report["publishes"] if p["arm"] == "with"]
+        # 3. Publication pairs without and with usage (Phase 1 vs Phase 2 publish), in ABBA
+        # order; the overhead is the median of the per-pair differences (scripts/timing.py).
+        pairs = []
+        for order in arm_order(args.publish_runs):
+            pair = {arm: publish(arm) for arm in order}
+            pairs.append((pair["without"], pair["with"]))
+        without = [a for a, _ in pairs]
+        enabled = [b for _, b in pairs]
+        publish_delta = paired([a["seconds"] for a in without], [b["seconds"] for b in enabled])
+        analysis_delta = paired(
+            [a["analysis_seconds"] for a in without], [b["analysis_seconds"] for b in enabled]
+        )
         report["overhead"] = {
-            "publish_seconds_without": [p["seconds"] for p in without],
-            "publish_seconds_with": [p["seconds"] for p in enabled],
+            "pairs": len(pairs),
+            "order": [list(order) for order in arm_order(args.publish_runs)],
+            "analysis_phases": list(ANALYSIS_PHASES),
+            "analysis_delta_median_seconds": analysis_delta["median"],
+            "analysis_deltas_seconds": analysis_delta["deltas"],
+            "publish_delta_median_seconds": publish_delta["median"],
+            "publish_deltas_seconds": publish_delta["deltas"],
+            "budgets_seconds": {"analysis": ANALYSIS_OVERHEAD_BUDGET_S, "publish": PUBLISH_OVERHEAD_BUDGET_S},
+            # Former statistic (fastest run with usage minus fastest without), for comparison.
             "publish_delta_min_seconds": round(
                 min(p["seconds"] for p in enabled) - min(p["seconds"] for p in without), 2
             ),
+            "publish_seconds_without": [p["seconds"] for p in without],
+            "publish_seconds_with": [p["seconds"] for p in enabled],
+            "analysis_seconds_without": [p["analysis_seconds"] for p in without],
+            "analysis_seconds_with": [p["analysis_seconds"] for p in enabled],
             "topic_phase_seconds_without": [p["topic_seconds"] for p in without],
             "topic_phase_seconds_with": [p["topic_seconds"] for p in enabled],
             "worker_rss_mb_without": [p["worker_peak_rss_mb"] for p in without],
             "worker_rss_mb_with": [p["worker_peak_rss_mb"] for p in enabled],
         }
         print(json.dumps(report["overhead"]), flush=True)
+        if report["publishes"][-1]["arm"] != "with":
+            # An even number of ABBA pairs ends without usage; the checks below read the
+            # current revision with usage, so publish it once more (not part of a pair).
+            enabled.append(publish("with"))
         revision = enabled[-1]["revision"]
 
         # 4. Accuracy after usage refinement, and EPI against the brute-force reference.
@@ -878,7 +917,10 @@ def main() -> None:  # noqa: C901 - one linear qualification run
         "epi_used_matches_reference_1e-6": report["epi_used"]["match"],
         "epi_inferred_matches_reference_1e-6": report["epi_inferred"]["match"],
         "role_epi_at_most_3s": report["role_epi_seconds"] <= 3,
-        "publish_overhead_at_most_5s": overhead["publish_delta_min_seconds"] <= 5,
+        f"usage_analysis_overhead_at_most_{ANALYSIS_OVERHEAD_BUDGET_S}s": overhead["analysis_delta_median_seconds"]
+        <= ANALYSIS_OVERHEAD_BUDGET_S,
+        f"publish_overhead_at_most_{PUBLISH_OVERHEAD_BUDGET_S}s": overhead["publish_delta_median_seconds"]
+        <= PUBLISH_OVERHEAD_BUDGET_S,
         "dormant_recall_at_least_0.9": (report["dormant"]["recall"] or 0) >= 0.9,
         "no_dormant_with_observed_use": report["dormant"]["with_observed_use"] == 0,
         "no_dormant_with_attributed_use": report["dormant"]["with_attributed_use"] == 0,
