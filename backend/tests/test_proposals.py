@@ -238,6 +238,52 @@ def test_kms_condition_deny_and_resource_policy_are_manual(environment):
         assert P.TIERS[removals[pair].tier] == "manual"
 
 
+@pytest.mark.parametrize(
+    "statement",
+    [
+        {"Effect": "Allow", "Action": "*", "Resource": "*"},  # AdministratorAccess
+        {"Effect": "Allow", "Action": ["s3:*"], "Resource": "*"},  # AmazonS3FullAccess
+        {"Effect": "Allow", "Action": ["s3:Get*", "s3:List*"], "Resource": ["lake:*", "pay:*"]},
+        {"Effect": "Allow", "NotAction": ["iam:*"], "Resource": "*"},  # PowerUserAccess
+        # Exact actions on resource patterns (AmazonSageMakerFullAccess: glue:GetTable on database/*).
+        {"Effect": "Allow", "Action": ["s3:GetObject"], "Resource": ["lake:*", "pay:*"]},
+    ],
+)
+def test_removing_a_grant_of_a_wildcard_statement_is_manual(environment, statement):
+    """The AWS collector expands wildcard policies to concrete edge actions (``s3:GetObject``),
+    so the wildcard is only visible in the policy document: a removal rewrites it (never-auto)."""
+    snapshot = small()
+    snapshot.policies = [
+        PolicyAttachment(principal="role:a", kind="managed", name="admin", document={"Statement": [statement]})
+    ]
+    factory, _ = environment
+    from app.graph.policies import store_policies
+
+    with factory() as db:
+        store_policies(db, "tenant-a", "r1", ((p.id, p.model_dump_json()) for p in snapshot.policies))
+        db.commit()
+        policies = policy_index(db, "tenant-a", "r1")
+    computed, result = run(snapshot, policies=policies)
+    removals = [p for pair, p in by_pair(result, computed).items() if pair[0] == "role:a"]
+    assert removals
+    for proposal in removals:
+        assert P.TIERS[proposal.tier] == "manual" and "wildcard" in proposal.reasons
+    assert any(P.TIERS[p.base_tier] == "high" for p in removals)  # Was high before the fix.
+    # A statement naming the exact assets stays automatic.
+    exact = {"Effect": "Allow", "Action": ["s3:GetObject"], "Resource": ["lake:0", "lake:1", "lake:3", "pay:0"]}
+    snapshot.policies = [
+        PolicyAttachment(principal="role:a", kind="inline", name="exact", document={"Statement": [exact]})
+    ]
+    with factory() as db:
+        store_policies(db, "tenant-a", "r2", ((p.id, p.model_dump_json()) for p in snapshot.policies))
+        db.commit()
+        policies = policy_index(db, "tenant-a", "r2")
+    computed, result = run(snapshot, policies=policies)
+    assert any(
+        P.TIERS[p.tier] != "manual" for pair, p in by_pair(result, computed).items() if pair[0] == "role:a"
+    )
+
+
 def test_merge_split_wildcard_and_toxic():
     lake = [node(f"lake:{i}", NodeType.BUCKET, tags=["topic=lake"]) for i in range(6)]
     pay = [

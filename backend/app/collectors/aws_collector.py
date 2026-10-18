@@ -50,16 +50,19 @@ from app.graph.schema import (
 READ_ACTIONS = ("s3:GetObject", "s3:GetObjectVersion", "s3:ListBucket")
 WRITE_ACTIONS = ("s3:PutObject", "s3:DeleteObject", "s3:DeleteObjectVersion")
 SDK_CONFIG = Config(retries={"mode": "standard", "total_max_attempts": 3}, connect_timeout=5, read_timeout=10)
+# Ceilings an operator may raise the limits to (``ZG_AWS_COLLECTION_LIMITS``): enterprise
+# accounts (thousands of roles, users and buckets) within the publication caps and the
+# unchanged wall-time budget.
 HARD_LIMITS = {
-    "max_roles": 1000,
-    "max_users": 1000,
-    "max_groups": 1000,
-    "max_buckets": 1000,
-    "max_pages": 1000,
-    "max_requests": 10000,
-    "max_policy_documents": 5000,
-    "max_evaluations": 1000000,
-    "max_edges": 15000,
+    "max_roles": 10000,
+    "max_users": 10000,
+    "max_groups": 5000,
+    "max_buckets": 10000,
+    "max_pages": 10000,
+    "max_requests": 100000,
+    "max_policy_documents": 50000,
+    "max_evaluations": 100_000_000,
+    "max_edges": 500_000,
     "max_org_depth": 20,
     "max_seconds": 600,
     "max_policy_attachments": MAX_SNAPSHOT_POLICIES,

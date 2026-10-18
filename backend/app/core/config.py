@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     # Glue Data Catalog, Lake Formation and Athena inventory (needs the data lake read
     # permissions; denials are warnings, never failures).
     aws_data_lake: bool = True
+    # Collection budgets above the defaults for large accounts, e.g.
+    # ``{"max_roles": 2500, "max_evaluations": 12000000}`` (``CollectionLimits`` fields,
+    # each within its hard ceiling; validated before AssumeRole).
+    aws_collection_limits: dict[str, int] = Field(default_factory=dict)
     # Peer baseline for inferred need: a grant is needed when at least this share of
     # same-topic, same-role peers were observed using it.
     peer_baseline_share: float = Field(default=0.5, gt=0, le=1)
