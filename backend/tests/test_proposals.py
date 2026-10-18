@@ -744,3 +744,139 @@ def test_lake_formation_grants_are_manual_never_iam_edits():
     assert P.TIERS[removal.base_tier] != "manual"
     # IAM-only grants on the same kind of asset are not affected.
     assert "lakeformation" not in by_pair(result, computed)[("role:a", "pay:0")].reasons
+
+
+ACCOUNT, PARTNER = "123456789012", "210987654321"
+
+
+def role_arn(name, account=ACCOUNT):
+    return f"arn:aws:iam::{account}:role/{name}"
+
+
+def trust_policy(principal, condition=None):
+    statement = {"Effect": "Allow", "Principal": principal, "Action": "sts:AssumeRole"}
+    if condition:
+        statement["Condition"] = condition
+    return {"Version": "2012-10-17", "Statement": [statement]}
+
+
+@pytest.mark.parametrize(
+    ("principal", "accounts"),
+    [
+        ({"AWS": f"arn:aws:iam::{PARTNER}:root"}, {PARTNER}),
+        ({"AWS": PARTNER}, {PARTNER}),
+        ({"AWS": [role_arn("ci", PARTNER), f"arn:aws:iam::{ACCOUNT}:user/alice"]}, {PARTNER, ACCOUNT}),
+        ({"AWS": f"arn:aws:sts::{PARTNER}:assumed-role/ci/session"}, {PARTNER}),
+        ({"Federated": f"arn:aws:iam::{PARTNER}:saml-provider/okta"}, {PARTNER}),
+        ({"Federated": f"arn:aws:iam::{ACCOUNT}:oidc-provider/token.actions.githubusercontent.com"}, {ACCOUNT}),
+        ({"Federated": "cognito-identity.amazonaws.com"}, set()),
+        ({"Service": "lambda.amazonaws.com"}, set()),
+        ("*", {"*"}),
+        ({"AWS": "*"}, {"*"}),
+        ({"AWS": "AROAEXAMPLEUNIQUEID"}, {"*"}),  # A unique ID names no account: anyone, for safety.
+    ],
+)
+def test_trusted_accounts_of_a_trust_policy(principal, accounts):
+    from app.graph.policies import trusted_accounts
+
+    assert trusted_accounts(trust_policy(principal)) == accounts
+    # Deny statements and malformed entries name nobody.
+    assert trusted_accounts({"Statement": [{"Effect": "Deny", "Principal": "*"}, "x"]}) == frozenset()
+
+
+def partner_snapshot() -> GraphSnapshot:
+    """``small()`` plus dormant roles in ``ACCOUNT`` trusted by a partner, by anyone (with a
+    condition), by the same account and by a service, each with an unused grant."""
+    trusts = {
+        "partner": trust_policy({"AWS": f"arn:aws:iam::{PARTNER}:root"}),
+        "anyone": trust_policy("*", {"StringEquals": {"aws:PrincipalOrgID": "o-example"}}),
+        "partner-saml": trust_policy({"Federated": f"arn:aws:iam::{PARTNER}:saml-provider/okta"}),
+        "local": trust_policy({"AWS": f"arn:aws:iam::{ACCOUNT}:root"}),
+        "service": trust_policy({"Service": "lambda.amazonaws.com"}),
+    }
+    roles = [node(role_arn(name), NodeType.ROLE, account_id=ACCOUNT, provider="aws") for name in trusts]
+    snapshot = small(roles, [grant(role.id, "lake:3") for role in roles])
+    snapshot.policies = [
+        PolicyAttachment(principal=role_arn(name), kind="trust", name="trust", document=document)
+        for name, document in trusts.items()
+    ]
+    return snapshot
+
+
+def stored_index(factory, snapshot, revision="r1"):
+    from app.graph.policies import store_policies
+
+    with factory() as db:
+        store_policies(db, "tenant-a", revision, ((p.id, p.model_dump_json()) for p in snapshot.policies))
+        db.commit()
+        return policy_index(db, "tenant-a", revision)
+
+
+def test_disabling_a_role_another_account_trusts_is_manual(environment):
+    """A partner (another account, or anyone) may depend on a dormant role it can assume:
+    disabling it is never-auto ``cross_account``. Same-account and service trust stay automatic."""
+    factory, _ = environment
+    snapshot = partner_snapshot()
+    computed, result = run(snapshot, policies=stored_index(factory, snapshot))
+    disabled = {pair[0]: p for pair, p in by_pair(result, computed, P.DISABLE_ROLE).items()}
+    for name in ("partner", "anyone", "partner-saml"):
+        found = disabled[role_arn(name)]
+        assert P.TIERS[found.tier] == "manual" and found.reasons == ("cross_account",), name
+        assert P.TIERS[found.base_tier] == "high" and found.detail["external_trust"] is True
+    for name in ("local", "service"):
+        found = disabled[role_arn(name)]
+        assert P.TIERS[found.tier] == "high" and found.reasons == () and found.detail["external_trust"] is False
+    # Grant removals on the partner-trusted role do not change its trust: tiers unchanged.
+    removals = by_pair(result, computed)
+    assert "cross_account" not in removals[(role_arn("partner"), "lake:3")].reasons
+    # Without stored trust policies nothing is labelled cross-account.
+    computed, result = run(snapshot)
+    assert all("cross_account" not in p.reasons for p in result.proposals)
+    assert P.check_invariant(computed, result.proposals) == []
+
+
+def test_toxic_hop_from_a_non_aws_agent_is_not_cross_account(environment):
+    """An agent (no AWS account) assuming an AWS role is ``non_aws``, not cross-account; the hop is
+    cross-account only when the role's trust names another account or the ends' accounts differ."""
+    factory, _ = environment
+    role = role_arn("agent-runtime")
+    other = role_arn("ci", PARTNER)
+    nodes = [
+        node(f"pay:{i}", NodeType.BUCKET, tags=["topic=payments"], sensitivity="restricted") for i in range(2)
+    ]
+    nodes += [
+        node("agent:bot", NodeType.AGENT, internet_exposed=True, authenticated=False),
+        node(role, NodeType.ROLE, account_id=ACCOUNT, provider="aws"),
+        node(other, NodeType.ROLE, account_id=PARTNER, provider="aws", internet_exposed=True, authenticated=False),
+    ]
+    edges = [grant(role, "pay:0"), assume("agent:bot", role), assume(other, role)]
+    snapshot = GraphSnapshot(nodes=nodes, edges=edges)
+    findings = P.findings_from(CompactGraph.from_snapshot(snapshot).analyze().findings)
+    observed = [(role, "pay:0", "read")]  # The grant is used, so the hops are what can be cut.
+
+    def hops(policies):
+        computed, result = run(snapshot, observed=observed, findings=findings, policies=policies)
+        return {pair: p for pair, p in by_pair(result, computed, P.TOXIC).items()}
+
+    snapshot.policies = [
+        PolicyAttachment(principal=role, kind="trust", name="trust", document=trust_policy(
+            {"Service": "bedrock.amazonaws.com", "AWS": other}))
+    ]  # fmt: skip
+    found = hops(stored_index(factory, snapshot))
+    agent_hop, partner_hop = found[("agent:bot", role)], found[(other, role)]
+    assert P.TIERS[agent_hop.tier] == "manual" and "trust" in agent_hop.reasons
+    # The role's trust names the partner account: every hop into it is a cross-account change.
+    assert "cross_account" in agent_hop.reasons and agent_hop.detail["trust_scope"] == "cross_account"
+    assert "cross_account" in partner_hop.reasons
+    # A service-only trust: the agent hop is non-AWS, the partner hop still crosses accounts.
+    snapshot.policies = [
+        PolicyAttachment(principal=role, kind="trust", name="trust",
+                         document=trust_policy({"Service": "bedrock.amazonaws.com"}))
+    ]  # fmt: skip
+    found = hops(stored_index(factory, snapshot, "r2"))
+    agent_hop, partner_hop = found[("agent:bot", role)], found[(other, role)]
+    assert agent_hop.reasons == ("trust",) and agent_hop.detail["trust_scope"] == "non_aws"
+    assert "cross_account" in partner_hop.reasons and partner_hop.detail["trust_scope"] == "cross_account"
+    # No trust policy stored at all: still non-AWS (the missing account is not another account).
+    found = hops(None)
+    assert found[("agent:bot", role)].reasons == ("trust",)

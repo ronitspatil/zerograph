@@ -49,7 +49,7 @@ evidence alone would give and `reasons` lists why:
 | `deny` | A Deny statement of the principal matches the action and asset |
 | `resource_policy` | The principal has identity policies but none grants it (resource policy or elsewhere) |
 | `trust` | The change re-points or cuts role assumption (merge, split, cutting an `ASSUMES_ROLE` hop) |
-| `cross_account` | A trust change across accounts |
+| `cross_account` | A trust-affecting proposal (`disable_role`, `merge_roles`, `split_role`, `remove_assumption`, or a `break_toxic_path` cut of an `ASSUMES_ROLE` hop) on a role whose stored trust policy lets another account assume it: an Allow naming another account (bare ID, `:root`, role, user or session ARN, or a SAML/OIDC provider registered in another account), or any principal (`"*"`, `{"AWS": "*"}`, `NotPrincipal`, an unparseable AWS principal), whatever its conditions. A partner may depend on such a role even when this account saw no use. Also an assumption hop between two nodes in known, different accounts |
 | `service_linked` | `:role/aws-service-role/` ARN, `scp_exempt_service_linked_role` metadata or a `service-linked` tag |
 | `break_glass` | `break-glass`, `emergency`, `disaster-recovery` or a `dr` token in ID, name or tags |
 | `kms` | A KMS key (`:kms:` ARN or `service=kms` metadata) |
@@ -63,6 +63,13 @@ Deleting an identity is never proposed. Nothing is proposed for the collector's 
 identity (`zerograph_collector` metadata, set by the AWS collector from its verified caller
 identity): no proposal names it as subject or target, its grants are left out of topics and
 excess privilege, and any proposal dropped for it is counted in `guards.collector_excluded`.
+A node's account is its `account_id`, else the account in its ARN. A node with neither (an
+agent, MCP server or human from a non-AWS source) is **non-AWS**, never cross-account: an
+`ASSUMES_ROLE` hop from it has evidence `trust_scope: non_aws` (`same_account` and
+`cross_account` otherwise, on `remove_assumption` and hop `break_toxic_path` proposals), and
+is `cross_account` only when the role's trust policy names another account. `disable_role`
+evidence says whether the role is externally trusted (`external_trust`). Grant removals on
+an externally trusted role keep their tier (they do not change who can assume it).
 Removing an identity-policy grant on an asset in
 another account is not a trust change and keeps its evidence tier (the resource-side
 policy still has to allow access, so removing the identity side can only reduce access).

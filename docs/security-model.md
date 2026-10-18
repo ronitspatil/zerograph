@@ -24,6 +24,8 @@ GCP, Azure, and Okta SDKs are available as optional dependencies; live collector
 
 Literal same-account role trust grants can authorize AssumeRole without an identity Allow. Account-root delegation still requires an identity grant, and role permissions boundaries remain applicable.
 
+Role trust policies are also stored with the revision and read by the optimizer: a role whose trust policy lets another account (or any principal, whatever its conditions) assume it is a dependency of that account, so disabling, merging, splitting or re-pointing it is never automatic (`cross_account`, [proposals.md](proposals.md)). Nodes without an AWS account (agents, MCP servers, humans from other sources) are labelled non-AWS rather than cross-account; their hops into AWS roles stay manual (`trust`).
+
 ## Sensitive data classification
 
 Regex classification scans labels and schema metadata for PII, PCI, PHI, and credential indicators. Presidio can be supplied through the classifier adapter after installing the optional classifier dependencies and an appropriate local NLP model. Metadata matches are hypotheses; no raw sensitive values are emitted or logged. These classifications do not establish the presence or absence of sensitive object contents.
