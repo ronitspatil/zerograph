@@ -141,7 +141,7 @@ Rows (`revision_proposal_summary`, `revision_proposals`, `revision_proposal_mode
 migration `0011`) are written with `COPY` in the publication transaction, recomputed with
 the topics when usage evidence changes (topic sweep), backfilled by a 60 s worker sweep
 (`backfill-proposals`; `python -m app.graph.proposals --tenant T` by hand) for current
-revisions without proposals of `PROPOSAL_VERSION` (1), deleted by retention with their
+revisions without proposals of `PROPOSAL_VERSION` (5), deleted by retention with their
 revision, and carried by the PostgreSQL backup (decisions too).
 
 Storage is kept cheap because it is on the publish path (~92k rows at 100k nodes). Rows
