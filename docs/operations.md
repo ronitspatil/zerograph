@@ -34,7 +34,7 @@ The assumed role needs read-only access to IAM authorization details and managed
 
 ## GitOps destination
 
-Configure `ZG_GIT_PROVIDER` (`github` or `gitlab`), `ZG_GIT_REPOSITORY`, `ZG_GIT_TENANT_ID`, `ZG_GIT_BASE_BRANCH`, `ZG_GIT_TOKEN`, and optionally `ZG_GIT_POLICY_PREFIX`. The destination is bound to the configured tenant; other tenants cannot use it. Use a dedicated GitHub App installation token or a narrowly scoped GitLab token. Rotate credentials outside this application.
+Configure `ZG_GIT_PROVIDER` (`github` or `gitlab`), `ZG_GIT_REPOSITORY`, `ZG_GIT_TENANT_ID`, `ZG_GIT_BASE_BRANCH`, `ZG_GIT_TOKEN`, and optionally `ZG_GIT_POLICY_PREFIX`. For self-managed GitLab, set `ZG_GIT_GITLAB_URL` to the instance's external URL (default `https://gitlab.com`; a relative root such as `https://git.example.com/gitlab` is supported). It must be HTTPS; plain HTTP is accepted only for a loopback host outside production, for local qualification. Review URLs returned by the instance must be on that same scheme, host and port. The destination is bound to the configured tenant; other tenants cannot use it. Use a dedicated GitHub App installation token or a narrowly scoped GitLab token. Rotate credentials outside this application.
 
 PR generation writes a policy proposal to a dedicated branch and opens a draft PR or merge request. It adds a proposal file under `security/zerograph/<tenant-hash>/`; it does not rewrite your existing Terraform resources, merge, deploy, or change cloud IAM. Reviewers must connect the approved proposal to the actual infrastructure configuration. Retries reuse the same branch and proposal path. A changed graph revision requires a fresh preview.
 

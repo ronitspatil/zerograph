@@ -71,7 +71,9 @@ never requested can be discarded.
 `zerograph/<tenant_key>/<change_id>-revert`: each rewritten file is restored **byte for byte**
 to `render(Remediation.original)` (the stored document) and each added disable policy is
 removed. It rewrites or removes a file only when the base branch still holds exactly what
-the change wrote (GitHub blob SHA / GitLab last commit compare-and-swap). Every file is
+the change wrote (GitHub blob SHA / GitLab last commit compare-and-swap; GitLab compares
+the file's content at that commit, so the client always sends the last commit it just read
+for that file on that branch). Every file is
 checked before any is written, and before the revert branch is created: a file missing from
 the base (the change's pull request was never merged, even if it was recorded as merged),
 a base that already holds the restored original, or a file edited since the merge is a
