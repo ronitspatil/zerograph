@@ -67,12 +67,11 @@ sys.path.insert(0, str(BACKEND / "tests"))
 
 from qualify_aws_emulated import (  # noqa: E402
     COLLECTOR,
-    AllBuckets,
     EXTERNAL_ID,
     MOTO_GAPS,
     REGION,
+    AllBuckets,
     Checks,
-    Recording as EmulatedRecording,
     allow,
     document,
     env_for_sdk,
@@ -80,18 +79,9 @@ from qualify_aws_emulated import (  # noqa: E402
     moto_server,
     session,
 )
+from qualify_aws_emulated import Recording as EmulatedRecording  # noqa: E402
 
 TENANT = "tenant-enterprise"
-
-
-class Recording(EmulatedRecording):
-    """The worker's collector, recorded; its S3 client lists every bucket in one call because
-    moto honours ``MaxBuckets`` but never returns a ``ContinuationToken`` (see moto_gaps)."""
-
-    def __new__(cls, *args, **kwargs):
-        instance = super().__new__(cls, *args, **kwargs)
-        instance.s3 = AllBuckets(instance.s3)
-        return instance
 
 USAGE_DAYS = 95
 TOPICS = ("data-lake", "payments", "ml", "ci-cd", "hr", "marketing", "logistics", "security")
@@ -196,6 +186,16 @@ WORKGROUPS = {
 }
 S3_READ = ["s3:GetObject", "s3:ListBucket"]
 S3_WRITE = ["s3:PutObject"]
+
+
+class Recording(EmulatedRecording):
+    """The worker's collector, recorded; its S3 client lists every bucket in one call because
+    moto honours ``MaxBuckets`` but never returns a ``ContinuationToken`` (see moto_gaps)."""
+
+    def __new__(cls, *args, **kwargs):
+        instance = super().__new__(cls, *args, **kwargs)
+        instance.s3 = AllBuckets(instance.s3)
+        return instance
 
 
 def _rng(*parts) -> random.Random:
@@ -787,8 +787,8 @@ def seed(boto3) -> tuple[dict, Truth]:  # noqa: C901 - one linear account build
                     ),
                 )["Policy"]["Arn"]
                 iam.attach_group_policy(GroupName=group, PolicyArn=policy)
-            else:  # Contractors: one topic bucket and a planted over-grant on another topic's bucket.
-                spec["grants"] = [_rng(topic, "contractors").choice(buckets)]
+            else:  # Contractors: two topic buckets and a planted over-grant on another topic's bucket.
+                spec["grants"] = _rng(topic, "contractors").sample(buckets, 2)
                 spec["over"] = _rng(topic, "contractors-over").choice(other)
                 iam.put_group_policy(
                     GroupName=group,
@@ -872,7 +872,9 @@ def seed(boto3) -> tuple[dict, Truth]:  # noqa: C901 - one linear account build
     for database, (_, is_governed, tables) in DATABASES.items():
         if is_governed:
             continue
-        for table in tables:  # Hybrid: IAM policies decide (moto lists no implicit grant; see gaps).
+        # Hybrid: IAM policies decide (moto lists no implicit grant; see gaps).
+        lf_grant("IAM_ALLOWED_PRINCIPALS", {"Database": {"Name": database}}, ["ALL"])
+        for table in tables:
             lf_grant("IAM_ALLOWED_PRINCIPALS", {"Table": {"DatabaseName": database, "Name": table}}, ["ALL"])
     for role_arn, table in sorted(truth.lf_grants):
         name = table.rsplit("/", 1)[-1]
@@ -1388,7 +1390,7 @@ def app_environment(world: dict, work: Path, database_url: str | None) -> None:
         ZG_AWS_COLLECTION_LIMITS=json.dumps(COLLECTION_LIMITS),
         ZG_GIT_PROVIDER="github",
         ZG_GIT_REPOSITORY=REPOSITORY,
-        ZG_GIT_TOKEN="secret-token-value-enterprise",
+        ZG_GIT_TOKEN="secret-token-value",  # What tests/fake_git.py expects.
         ZG_GIT_TENANT_ID=TENANT,
         AWS_ACCESS_KEY_ID=key["AccessKeyId"],
         AWS_SECRET_ACCESS_KEY=key["SecretAccessKey"],
@@ -1465,6 +1467,34 @@ def run_pipeline(world: dict, truth: Truth, work: Path, checks: Checks, phases: 
         command.upgrade(config, "head")
     else:
         Base.metadata.create_all(session_factory().kw["bind"])
+    import app.main as main_module
+
+    class FailureLog:
+        """The request middleware logs failures without the exception; keep the traceback (it is
+        called inside the ``except`` block) so a 500 in the run is diagnosable."""
+
+        def __init__(self, real):
+            self.real = real
+
+        def bind(self, **fields):
+            real = self.real.bind(**fields)
+
+            class Bound:
+                def error(self, message, *rest, **kwargs):
+                    import traceback
+
+                    result.setdefault("server_errors", []).append(traceback.format_exc()[-3000:])
+                    return real.error(message, *rest, **kwargs)
+
+                def __getattr__(self, name):
+                    return getattr(real, name)
+
+            return Bound()
+
+        def __getattr__(self, name):
+            return getattr(self.real, name)
+
+    main_module.logger = FailureLog(main_module.logger)
     app = create_app()
     app.dependency_overrides[current_actor] = lambda: Actor(
         "qualifier", TENANT, frozenset({"admin", "analyst", "viewer"})
@@ -1722,6 +1752,17 @@ def check_truth(client, world, truth: Truth, published, simulated, revision, che
     planted_roles = {
         a for a, r in truth.roles.items() if r["kind"] in ("dormant", "out-of-window", "operator", "cross-account-unused")
     }
+    # A role that grants what a principal able to assume it was itself observed using is kept
+    # (documented invariant guard): such operators are dormant but not proposed for disabling.
+    guarded = {
+        a
+        for a in planted_roles
+        if any(
+            a in u["assumable"] and {b for b, c in u["used"].items() if c} & set(truth.roles[a]["grants"])
+            for u in truth.users.values()
+            if u["state"] == "active"
+        )
+    }
     planted_users = {a for a, u in truth.users.items() if u["state"] in ("dormant", "out-of-window")}
     active = {p for p, _, _ in observed}
     proposals = all_proposals(client)
@@ -1741,7 +1782,13 @@ def check_truth(client, world, truth: Truth, published, simulated, revision, che
         "missed_roles": sorted(planted_roles - flagged)[:5],
         "missed_users": sorted(planted_users - flagged)[:5],
     }
-    checks("dormant roles: recall 1.0 (flagged and proposed for disabling)", planted_roles <= flagged & disabled_roles, result["dormant"])
+    result["dormant"]["not_proposed_roles"] = sorted(planted_roles - disabled_roles)[:5]
+    result["dormant"]["guarded_roles"] = sorted(guarded)
+    checks(
+        "dormant roles: recall 1.0 (flagged; proposed for disabling unless guarded)",
+        planted_roles <= flagged and planted_roles - guarded <= disabled_roles and not guarded & disabled_roles,
+        result["dormant"],
+    )
     checks("dormant users: recall 1.0 (flagged and proposed for disabling)", planted_users <= flagged & disabled_users, result["dormant"])
     checks("no dormant flag on a principal with observed use", not flagged & active, sorted(flagged & active)[:5])
     never_assumed = set()
@@ -1969,6 +2016,8 @@ def rollout_flow(client, world, truth: Truth, revision: str, checks: Checks, flo
         "assets_removed": whatif.get("assets_removed", []),
         "risk_delta": whatif.get("risk_delta"),
     }
+    flow["whatif"]["accepted_targets"] = sorted(removed_targets)
+    flow["whatif"]["used_not_after"] = sorted(used - after_assets)
     checks(
         "what-if removes exactly the accepted unused assets and keeps the used ones",
         set(whatif.get("assets_removed", [])) == removed_targets and used <= after_assets,
