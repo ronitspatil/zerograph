@@ -462,9 +462,13 @@ The evaluation preflight is `principals × buckets × 6 + principals × roles �
 where principals are roles plus users. The default 500-role and 500-bucket bounds
 are **individual ceilings**, not simultaneous capacity: 500 of each exceeds 100,000
 evaluations and fails before enrichment. A 100-role/100-bucket inventory without
-users needs 69,900 evaluations. Operators may construct
-`CollectionLimits` within hard caps for an approved larger sandbox; no unbounded
-CLI override is exposed. Account inventory is not an AWS transaction and may
+users needs 69,900 evaluations. For larger accounts the in-app job takes
+`ZG_AWS_COLLECTION_LIMITS`, a JSON object of `CollectionLimits` fields (for example
+`{"max_roles": 2500, "max_users": 1000, "max_evaluations": 12000000, "max_edges": 100000}`
+for a 1,500-role, 400-user, 300-bucket account), validated against the hard ceilings
+(10,000 roles, users and buckets; 100,000,000 evaluations; 500,000 edges; the 600-second
+wall-time budget is not raisable) before AssumeRole; unknown names fail the job. No
+unbounded CLI override is exposed. Account inventory is not an AWS transaction and may
 change during scanning; conflicting duplicates are rejected rather than guessed.
 
 `sdk_requests` counts collector SDK invocations, excluding the single bootstrap
