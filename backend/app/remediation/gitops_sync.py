@@ -23,6 +23,8 @@ REQUESTS_PER_FILE = 4
 SECONDS_PER_FILE = 3
 FILE_PATH = re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+){0,3}")
 PURPOSES = ("change", "revert")
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+INSTANCE_ROOT = re.compile(r"(?:/[A-Za-z0-9_.~-]+){0,4}")
 
 
 @dataclass(frozen=True)
@@ -80,6 +82,36 @@ def valid_branch(value):
     return value
 
 
+def gitlab_instance(url, environment):
+    """(scheme, host, port, root path) of a GitLab instance URL.
+
+    HTTPS with an optional relative root (``https://git.example.com/gitlab``); plain HTTP
+    only on a loopback host outside production. No credentials, query or fragment.
+    """
+    try:
+        if not isinstance(url, str) or len(url) > 200 or not url.isascii():
+            raise ValueError
+        parts = urlsplit(url)
+        host, port = parts.hostname, parts.port or (443 if parts.scheme == "https" else 80)
+    except ValueError:
+        raise GitOpsError("Invalid GitLab instance URL") from None
+    root = parts.path.rstrip("/")
+    if (
+        not host
+        or parts.scheme not in {"https", "http"}
+        or (parts.scheme == "http" and (environment == "production" or host not in LOOPBACK_HOSTS))
+        or parts.username is not None
+        or parts.password is not None
+        or parts.query
+        or parts.fragment
+        or any(c.isspace() or not c.isprintable() for c in url)
+        or not INSTANCE_ROOT.fullmatch(root)
+        or any(p in {".", ".."} for p in root.split("/"))
+    ):
+        raise GitOpsError("Invalid GitLab instance URL")
+    return parts.scheme, host, port, root
+
+
 class GitOpsClient:
     """Bounded review-only adapter: create missing resources, never update them."""
 
@@ -107,11 +139,15 @@ class GitOpsClient:
             raise GitOpsError("Invalid policy destination")
         self.provider, self.repository, self.prefix = settings.git_provider, repository, prefix
         self.base = valid_branch(settings.git_base_branch)
-        self.api = (
-            f"https://api.github.com/repos/{repository}"
-            if self.provider == "github"
-            else f"https://gitlab.com/api/v4/projects/{quote(repository, safe='')}"
-        )
+        if self.provider == "github":
+            self.web = ("https", "github.com", 443, "")
+            self.api = f"https://api.github.com/repos/{repository}"
+        else:
+            self.web = gitlab_instance(settings.git_gitlab_url, settings.environment)
+            scheme, host, port, root = self.web
+            default = port == (443 if scheme == "https" else 80)
+            netloc = (f"[{host}]" if ":" in host else host) + ("" if default else f":{port}")
+            self.api = f"{scheme}://{netloc}{root}/api/v4/projects/{quote(repository, safe='')}"
         self.client = httpx.Client(
             timeout=20,
             follow_redirects=False,
@@ -297,7 +333,7 @@ class GitOpsClient:
                 and data.get("merged_at") is None
             )
             number, url, body = data.get("number"), data.get("html_url"), data.get("body")
-            expected, host = f"/{self.repository}/pull/{number}", "github.com"
+            expected = f"/{self.repository}/pull/{number}"
         else:
             matching = (
                 data.get("source_branch") == branch
@@ -309,16 +345,30 @@ class GitOpsClient:
                 and data.get("merged_at") is None
             )
             number, url, body = data.get("iid"), data.get("web_url"), data.get("description")
-            expected, host = f"/{self.repository}/-/merge_requests/{number}", "gitlab.com"
+            expected = f"{self.web[3]}/{self.repository}/-/merge_requests/{number}"
         if not matching or data.get("draft") is not True or not isinstance(body, str) or marker not in body:
             raise GitOpsConflict("Existing review identity, draft state or proposal scope does not match")
-        parsed = urlsplit(url) if isinstance(url, str) else None
+        try:
+            parsed = urlsplit(url) if isinstance(url, str) else None
+            origin = (
+                None
+                if parsed is None
+                else (
+                    parsed.scheme,
+                    parsed.hostname,
+                    parsed.port or (443 if parsed.scheme == "https" else 80),
+                    parsed.username,
+                    parsed.password,
+                )
+            )
+        except ValueError:
+            parsed = origin = None
+        scheme, host, port, _ = self.web
         if (
             type(number) is not int
             or number <= 0
             or parsed is None
-            or parsed.scheme != "https"
-            or parsed.netloc != host
+            or origin != (scheme, host, port, None, None)
             or parsed.path.casefold() != expected.casefold()
             or parsed.query
             or parsed.fragment

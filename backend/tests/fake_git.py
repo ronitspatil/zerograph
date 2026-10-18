@@ -7,14 +7,22 @@ the customer's repository (three-way: the review's changes are applied onto the
 base branch); a review that is never merged leaves the base untouched, so a revert of
 an unmerged change can be exercised by simply not calling it. GitLab's
 ``last_commit_id`` is the last commit that changed the file (per file, as in GitLab's
-Files API), not the branch head. Every request is recorded; any merge, close or
-force-push attempt by the client fails the test.
+Files API), not the branch head; after a merge it stays the branch commit that changed the
+file, not the merge commit. Every request is recorded; any merge, close or force-push
+attempt by the client fails the test.
+
+GitLab compare-and-swap, as observed on GitLab CE 19.4: an update or delete with
+``last_commit_id`` is refused (400) only when the file's content at that commit differs
+from its current content. A commit where the file is absent, an unknown commit or no
+``last_commit_id`` at all skips the check, so the client must always send the last
+commit it read for that file on that branch (asserted here). ``gitlab_url`` models a
+self-managed instance (scheme, host, port and relative root).
 """
 
 import base64
 import hashlib
 import json
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 import httpx
 
@@ -27,6 +35,9 @@ PROJECT_ID = 100
 
 def blob_sha(content: bytes) -> str:
     return hashlib.sha1(f"blob {len(content)}\0".encode() + content, usedforsecurity=False).hexdigest()
+
+
+GITLAB_URL = "https://gitlab.com"
 
 
 def settings(provider: str = "github", tenant: str = "tenant-a", **extra) -> Settings:
@@ -42,13 +53,18 @@ def settings(provider: str = "github", tenant: str = "tenant-a", **extra) -> Set
 
 
 class FakeRepository:
-    def __init__(self, provider: str = "github"):
+    def __init__(self, provider: str = "github", gitlab_url: str = GITLAB_URL):
         self.provider = provider
+        self.gitlab_url = gitlab_url.rstrip("/")
         self.commits = 0
         self.branches: dict[str, dict] = {}  # name -> {"head", "tree", "fork", "last"}
+        self.snapshots: dict[str, dict[str, bytes]] = {}  # commit -> tree at that commit
         self.reviews: list[dict] = []
         self.requests: list[httpx.Request] = []
+        # Called with each write request before it is applied (a person acting concurrently).
+        self.before_write = None
         self.branches["main"] = {"head": self._commit(), "tree": {}, "fork": {}, "last": {}}
+        self.snapshots[self.branches["main"]["head"]] = {}
 
     # -- helpers -------------------------------------------------------------
 
@@ -98,9 +114,11 @@ class FakeRepository:
             else:
                 base["tree"][path] = after
         base["head"] = self._commit()
+        self.snapshots[base["head"]] = dict(base["tree"])
         for path in set(branch["fork"]) | set(branch["tree"]):
             if branch["fork"].get(path) != branch["tree"].get(path):
-                base["last"][path] = base["head"]
+                # GitLab's last commit for a merged file is the branch commit that changed it.
+                base["last"][path] = branch["last"].get(path, branch["head"])
         review["_merged"] = True
 
     def _review_json(self, review: dict) -> dict:
@@ -123,7 +141,7 @@ class FakeRepository:
             "state": "merged" if review["_merged"] else "opened",
             "draft": review["draft"],
             "merged_at": "2026-10-07T00:00:00Z" if review["_merged"] else None,
-            "web_url": f"https://gitlab.com/{REPOSITORY}/-/merge_requests/{review['number']}",
+            "web_url": f"{self.gitlab_url}/{REPOSITORY}/-/merge_requests/{review['number']}",
             "source_branch": review["_branch"],
             "target_branch": "main",
             "source_project_id": PROJECT_ID,
@@ -158,21 +176,28 @@ class FakeRepository:
             state["tree"][path] = content
         state["head"] = self._commit()
         state["last"][path] = state["head"]
+        self.snapshots[state["head"]] = dict(state["tree"])
 
     # -- transport -----------------------------------------------------------
 
     def __call__(self, request: httpx.Request) -> httpx.Response:  # noqa: C901 - one contract table
         self.requests.append(request)
-        assert request.url.scheme == "https"
         assert request.headers["authorization"] == "Bearer secret-token-value"
         github = self.provider == "github"
-        assert request.url.host == ("api.github.com" if github else "gitlab.com")
+        instance = urlsplit("https://api.github.com" if github else self.gitlab_url)
+        assert (request.url.scheme, request.url.host, request.url.port) == (
+            instance.scheme,
+            instance.hostname,
+            instance.port,
+        ), str(request.url)
         raw = request.url.raw_path.decode().split("?", 1)[0]
-        prefix = f"/repos/{REPOSITORY}" if github else f"/api/v4/projects/{OWNER}%2F{NAME}"
+        prefix = f"/repos/{REPOSITORY}" if github else f"{instance.path}/api/v4/projects/{OWNER}%2F{NAME}"
         assert raw.startswith(prefix), raw
         path, method = raw[len(prefix) :], request.method
         payload = json.loads(request.content) if request.content else {}
         assert not path.endswith("/merge") and "force" not in payload, "Client must never merge or force"
+        if method != "GET" and self.before_write is not None:
+            self.before_write(request)
         if not github and path == "" and method == "GET":
             return httpx.Response(200, json={"id": PROJECT_ID, "path_with_namespace": REPOSITORY})
         # Branches.
@@ -223,15 +248,17 @@ class FakeRepository:
                     self._set(ref, file_path, None)
                     return httpx.Response(200, json={})
             else:
-                last = self.last_commit(file_path, ref)
                 if method == "POST":
                     if current is not None:
                         return httpx.Response(400, json={"message": "exists"})
                     self._set(ref, file_path, payload["content"].encode())
                     return httpx.Response(201, json={})
                 if method in ("PUT", "DELETE"):
-                    if current is None or payload.get("last_commit_id") != last:
-                        return httpx.Response(400, json={"message": "stale"})
+                    # GitLab skips the check without a last_commit_id: the client must send one.
+                    assert "last_commit_id" in payload, "GitLab updates must carry last_commit_id"
+                    seen = self.snapshots.get(payload["last_commit_id"], {}).get(file_path)
+                    if current is None or (seen is not None and seen != current):
+                        return httpx.Response(400, json={"message": "changed since"})
                     self._set(ref, file_path, payload["content"].encode() if method == "PUT" else None)
                     return httpx.Response(
                         200 if method == "PUT" else 204, json={} if method == "PUT" else None
@@ -243,7 +270,8 @@ class FakeRepository:
                 assert params["state" if github else "scope"] == "all"
                 branch = params["head"].split(":", 1)[1] if github else params["source_branch"]
                 found = [self._review_json(r) for r in self.reviews if r["_branch"] == branch]
-                return httpx.Response(200, json=found)
+                # GitLab sends an empty X-Next-Page on the last page.
+                return httpx.Response(200, json=found, headers={} if github else {"x-next-page": ""})
             if method == "POST":
                 branch = payload["head"] if github else payload["source_branch"]
                 if any(r["_branch"] == branch for r in self.reviews):
