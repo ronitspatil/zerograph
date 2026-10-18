@@ -327,6 +327,37 @@ one bucket) collect 81 principals x 100 buckets with the default limits (55,080
 evaluations, 80 edges, 0.6 s) and 300 x 300 with `max_evaluations` raised to 1,000,000
 (629,700 evaluations, 299 edges, 2.7 s), the edges exactly the planted grants.
 
+**Enterprise simulation** (`backend/scripts/qualify_enterprise_sim.py --output DIR
+[--database-url postgresql+psycopg://...]`). The whole pipeline against an emulated
+enterprise member account (moto, no AWS account), with a planted ground truth: 1,469 IAM
+roles (application roles in 8 topics, near-duplicates, dormant and out-of-window roles,
+developer/operator roles assumed through group policies, 10 Identity Center permission-set
+roles, AWS-managed admin hubs, 22 service-linked roles, break-glass, GitHub OIDC and
+partner-account roles), 400 users in 40 Identity-Center-style groups, 300 buckets
+(tag/name topics, bucket policies, an Object Ownership and encryption mix), 7 Glue
+databases / 29 tables (one Lake Formation governed with named and column grants, hybrid
+others, LF-Tags), 5 Athena workgroups and a toxic path (an exposed, unauthenticated agent
+that may assume a role reading restricted HR data, submitted as a second source). 95 days
+of activity become 451,603 CloudTrail records in 91 export files (user, AWS service,
+SAML with `onBehalfOf`, web identity and partner sessions, mixed-case Glue names, 315
+denied attempts, sessions issued before the window and activity entirely outside it).
+The run collects through `ZG_AWS_ROLE_ARN`/`ZG_AWS_COLLECTION_LIMITS` and the worker job,
+uploads the trail through `/usage/uploads`, runs the topic and proposal sweeps, accepts a
+sample, simulates it and rolls it out as draft PRs against `tests/fake_git.py`. On SQLite
+and on PostgreSQL 16 (memory graph) all 89 checks pass in 117-140 s, peak RSS about
+1 GB: inventory complete (6.2 million evaluations, 20,553 edges, 47 s), topics 100%
+(tagged, name-only and role primary topics), EPI equal to the brute force for 1,872
+members and 9 topics, dormant recall 1.0 (98 roles, 56 users), never-assumed recall 1.0
+(204), high-tier `remove_grant` precision and recall 1.0 (193 proposed; 152 role and
+40 group over-grants planted), every never-auto category manual, nothing proposed for
+the collector or against observed use, canary gating, a byte-exact revert and the
+AccessDenied auto-revert (draft, never merged). It found the collection limits fixed in
+`ZG_AWS_COLLECTION_LIMITS` and wildcard statements (`AdministratorAccess`, `s3:*`,
+`database/*` patterns), which the collector expands to concrete actions, giving
+high-tier removals instead of never-auto `wildcard`. Every moto gap is listed in the
+report's `moto_gaps` (ListBuckets pagination, Access Advisor, Organizations from a member,
+LF-Tag search, implicit `IAM_ALLOWED_PRINCIPALS`, no IAM authorization or CloudTrail).
+
 ## Provision a sandbox read role
 
 `deploy/aws/collector-role-policy.example.json` is a narrow example for sandbox

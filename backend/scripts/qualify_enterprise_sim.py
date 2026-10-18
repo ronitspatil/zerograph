@@ -2229,6 +2229,19 @@ def record_gaps(result: dict, truth: Truth) -> None:
             "AWSOrganizationsNotInUseException (moto keeps the organization in the management account)",
             f"scp_inventory {coverage.get('scp_inventory')}; the SCP is not applied to edges",
         )
+    gap(
+        "s3:ListBuckets pagination (MaxBuckets)",
+        "MaxBuckets honoured but no ContinuationToken: the collector saw 100 of 300 buckets and reported the "
+        "inventory complete",
+        "the run's collector lists every bucket in one call (MaxBuckets dropped); the collector's "
+        "ContinuationToken loop is covered by Stubber tests; live gate for accounts over 100 buckets",
+    )
+    if warnings.get("glue_resource_policy_unknown"):
+        gap(
+            "glue:GetResourcePolicy without a policy",
+            "HTTP 200 with an empty body instead of EntityNotFoundException",
+            "warning glue_resource_policy_unknown (coverage unknown instead of absent)",
+        )
     absent = sum(1 for item in truth.buckets.values() if item["ownership"] == "absent")
     gap(
         "s3:GetBucketOwnershipControls / GetBucketEncryption on buckets without explicit configuration",
