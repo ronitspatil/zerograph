@@ -155,12 +155,18 @@ class Statement:
     any_resource: bool
     condition: bool
 
-    @property
-    def wildcard(self) -> bool:
-        """Grants by pattern: ``*``/``NotAction``, a wildcard action (``s3:*``, ``s3:Get*``) or
-        every resource (``*``/``NotResource``). Collectors expand it to concrete actions on each
-        asset, so removing one asset rewrites the wildcard statement."""
-        return self.any_action or self.any_resource or any("*" in action for action in self.actions)
+    def wildcard(self, resource: str) -> bool:
+        """Grants ``resource`` by pattern: ``*``/``NotAction``, a wildcard action (``s3:*``,
+        ``s3:Get*``), every resource (``*``/``NotResource``) or a resource pattern naming more than
+        this asset (``database/*``, ``acme-*``; ``bucket/*`` object scope is exact). Collectors
+        expand it to concrete actions on each asset, so removing one asset rewrites the statement."""
+        if self.any_action or self.any_resource or any("*" in action for action in self.actions):
+            return True
+        exact = (resource, resource + "/*")
+        return any(
+            pattern not in exact and any(fnmatchcase(target, pattern) for target in exact)
+            for pattern in self.resources
+        )
 
     def matches(self, actions: tuple[str, ...], resource: str) -> bool:
         if not self.any_action and not any(
@@ -234,7 +240,7 @@ class PolicyIndex:
             reasons.append("deny")
         if not allows:
             reasons.append("resource_policy")
-        if any(s.wildcard for s in allows):
+        if any(s.wildcard(resource) for s in allows):
             reasons.append("wildcard")
         return reasons
 

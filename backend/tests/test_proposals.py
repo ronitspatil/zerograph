@@ -245,6 +245,8 @@ def test_kms_condition_deny_and_resource_policy_are_manual(environment):
         {"Effect": "Allow", "Action": ["s3:*"], "Resource": "*"},  # AmazonS3FullAccess
         {"Effect": "Allow", "Action": ["s3:Get*", "s3:List*"], "Resource": ["lake:*", "pay:*"]},
         {"Effect": "Allow", "NotAction": ["iam:*"], "Resource": "*"},  # PowerUserAccess
+        # Exact actions on resource patterns (AmazonSageMakerFullAccess: glue:GetTable on database/*).
+        {"Effect": "Allow", "Action": ["s3:GetObject"], "Resource": ["lake:*", "pay:*"]},
     ],
 )
 def test_removing_a_grant_of_a_wildcard_statement_is_manual(environment, statement):
