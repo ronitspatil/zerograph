@@ -7,8 +7,9 @@ way. ``SourceSnapshot.payload["entity_set"]`` names a source's active set, and
 publication streams the active sets of all of a tenant's sources from SQL.
 
 NDJSON chunk lines are single-key objects: ``{"node": {...}}``, ``{"edge": {...}}``,
-``{"policy": {...}}`` (a policy document attached to a principal) or
-``{"warning": "..."}``. Each line is validated with the same Pydantic models as the
+``{"policy": {...}}`` (a policy document attached to a principal),
+``{"reference": "<node ID>"}`` (a node another source defines, which edges may end at;
+staged as kind ``ref``) or ``{"warning": "..."}``. Each line is validated with the same Pydantic models as the
 single-body ingestion endpoint.
 """
 
@@ -23,10 +24,21 @@ from sqlalchemy import and_, delete, func, insert, or_, select
 from sqlalchemy.orm import Session, aliased
 
 from app.db.models import IngestionJob, StagedEntity, UploadSession, now
-from app.graph.schema import MAX_SNAPSHOT_POLICIES, Edge, GraphSnapshot, Node, PolicyAttachment
+from app.graph.schema import (
+    MAX_SNAPSHOT_POLICIES,
+    MAX_SNAPSHOT_REFERENCES,
+    Edge,
+    GraphSnapshot,
+    Node,
+    PolicyAttachment,
+)
 
-LINE_KINDS = ("node", "edge", "warning", "policy")
+LINE_KINDS = ("node", "edge", "warning", "policy", "reference")
+# Staged row kind per line kind (``staged_entities.kind`` holds at most 8 characters).
+ROW_KIND = {"reference": "ref"}
+REFERENCE = ROW_KIND["reference"]
 MAX_POLICIES = MAX_SNAPSHOT_POLICIES
+MAX_REFERENCES = MAX_SNAPSHOT_REFERENCES
 MAX_WARNINGS = 1000
 MAX_WARNING_CHARACTERS = 2000
 MAX_CHUNKS = 100_000
@@ -91,6 +103,13 @@ def policy_staged(policy: PolicyAttachment, chunk: int, ordinal: int) -> dict:
     )
 
 
+def reference_staged(node_id: str, chunk: int, ordinal: int) -> dict:
+    """A reference to a node another source defines; never a definition, never a conflict."""
+    if not isinstance(node_id, str) or not 1 <= len(node_id) <= 512:
+        raise ValueError("invalid reference")
+    return _row(REFERENCE, node_id, chunk, ordinal, json.dumps(node_id, ensure_ascii=False))
+
+
 def warning_staged(warning: str, chunk: int, ordinal: int) -> dict:
     return _row("warning", f"{chunk}:{ordinal}", chunk, ordinal, json.dumps(warning, ensure_ascii=False))
 
@@ -110,7 +129,7 @@ def parse_chunk(body: bytes, chunk: int) -> list[dict]:
         except ValueError:
             raise ChunkError(f"Line {number}: invalid JSON") from None
         if not isinstance(item, dict) or len(item) != 1 or next(iter(item)) not in LINE_KINDS:
-            raise ChunkError(f"Line {number}: expected exactly one of node, edge, policy or warning")
+            raise ChunkError(f"Line {number}: expected exactly one of node, edge, policy, reference or warning")
         kind, value = next(iter(item.items()))
         try:
             if kind == "node":
@@ -119,6 +138,8 @@ def parse_chunk(body: bytes, chunk: int) -> list[dict]:
                 row = edge_staged(Edge.model_validate(value), chunk, len(rows))
             elif kind == "policy":
                 row = policy_staged(PolicyAttachment.model_validate(value), chunk, len(rows))
+            elif kind == "reference":
+                row = reference_staged(value, chunk, len(rows))
             else:
                 if not isinstance(value, str) or len(value) > MAX_WARNING_CHARACTERS:
                     raise ValueError("invalid warning")
@@ -133,6 +154,7 @@ def parse_chunk(body: bytes, chunk: int) -> list[dict]:
                     "node": "Node IDs must be unique within a snapshot",
                     "edge": "Duplicate graph edges",
                     "policy": "Duplicate policy attachments",
+                    "reference": "Duplicate node references",
                 }[kind]
             )
         seen.add(key)
@@ -155,6 +177,9 @@ def snapshot_rows(snapshot: GraphSnapshot) -> Iterator[dict]:
     for policy in snapshot.policies:
         yield policy_staged(policy, 0, ordinal)
         ordinal += 1
+    for reference in snapshot.references:
+        yield reference_staged(reference, 0, ordinal)
+        ordinal += 1
 
 
 def insert_rows(db: Session, session_id: str, rows: Iterable[dict]) -> None:
@@ -176,17 +201,18 @@ def counts(db: Session, session_id: str) -> dict[str, int]:
             .group_by(StagedEntity.kind)
         ).all()
     )
-    return {kind: found.get(kind, 0) for kind in LINE_KINDS}
+    return {kind: found.get(ROW_KIND.get(kind, kind), 0) for kind in LINE_KINDS}
 
 
 def missing_endpoints(db: Session, session_id: str) -> int:
-    """Edges (and policy attachments) of the set whose endpoint (principal) is not staged in the same set."""
+    """Edges of the set whose endpoint is neither a node nor a reference of the same set, and
+    policy attachments whose principal is not a node of the set."""
     edge, node = aliased(StagedEntity), aliased(StagedEntity)
 
-    def absent(column):
+    def absent(column, kinds=("node", REFERENCE)):
         return ~(
             select(node.entity_id)
-            .where(node.session_id == session_id, node.kind == "node", node.entity_id == column)
+            .where(node.session_id == session_id, node.kind.in_(kinds), node.entity_id == column)
             .exists()
         )
 
@@ -197,7 +223,7 @@ def missing_endpoints(db: Session, session_id: str) -> int:
             edge.session_id == session_id,
             or_(
                 and_(edge.kind == "edge", or_(absent(edge.source_id), absent(edge.target_id))),
-                and_(edge.kind == "policy", absent(edge.source_id)),
+                and_(edge.kind == "policy", absent(edge.source_id, ("node",))),
             ),
         )
     )

@@ -2,7 +2,9 @@
 
 Semantics match the former in-memory merge (sources in name order, entities in
 submission order, first position wins, identical duplicates collapse, differing
-duplicates are a conflict) followed by ``classification_edges``. Nothing here
+duplicates are a conflict) followed by ``classification_edges``. A node *reference*
+(an edge endpoint another source defines) is not a definition: it never conflicts and
+must resolve to a node some active set defines. Nothing here
 materializes a whole-graph Pydantic snapshot: rows are streamed from SQL, written
 to the graph in bounded batches, and folded into a ``CompactGraph`` for analysis.
 """
@@ -12,10 +14,10 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from app.collectors.data_classifier import RULES
-from app.collectors.staging import canonical_json
+from app.collectors.staging import REFERENCE, canonical_json
 from app.core.config import get_settings
 from app.db.models import StagedEntity
 from app.graph.compact import DATA, CompactGraph
@@ -29,6 +31,10 @@ STREAM_BATCH = 5000
 
 
 class PublicationConflict(ValueError):
+    """Sources disagree or do not fit together; the message names no payload values."""
+
+
+class UnresolvedReference(PublicationConflict):
     pass
 
 
@@ -64,6 +70,28 @@ def check_conflicts(db: Session, set_ids: list[str]) -> None:
     if conflict is not None:
         raise PublicationConflict(
             f"Conflicting {conflict} definitions across sources; reconcile IDs before publishing"
+        )
+
+
+def check_references(db: Session, set_ids: list[str]) -> None:
+    """Every node reference (``GraphSnapshot.references``) must be a node some active set of
+    the tenant defines; a reference is never a definition, so it never conflicts."""
+    reference, node = aliased(StagedEntity), aliased(StagedEntity)
+    unresolved = db.scalar(
+        select(func.count())
+        .select_from(reference)
+        .where(
+            reference.session_id.in_(set_ids),
+            reference.kind == REFERENCE,
+            ~select(node.entity_id)
+            .where(node.session_id.in_(set_ids), node.kind == "node", node.entity_id == reference.entity_id)
+            .exists(),
+        )
+    )
+    if unresolved:
+        raise UnresolvedReference(
+            f"{unresolved} referenced node(s) are not defined by any source of this tenant; "
+            "publish the source that defines them, or restate or remove the references"
         )
 
 
@@ -120,6 +148,7 @@ def publish_sets(
     """Build ``revision`` from the active sets (in source order); the caller swaps the pointer."""
     settings = get_settings()
     check_conflicts(db, set_ids)
+    check_references(db, set_ids)
     check_caps(db, set_ids, settings.max_nodes, settings.max_edges)
     size = settings.graph_batch_size
     compact = CompactGraph()
