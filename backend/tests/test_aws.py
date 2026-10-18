@@ -4,7 +4,7 @@ from unittest.mock import Mock
 import pytest
 from botocore.exceptions import ClientError
 
-from app.collectors.aws_collector import AWSCollector
+from app.collectors.aws_collector import AWSCollector, CollectionLimits
 
 ARN = "arn:aws:iam::123456789012:role/worker"
 
@@ -424,12 +424,13 @@ def test_partition_derived_from_verified_sts_identity():
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"max_evaluations": 1000001},
-        {"max_requests": 10001},
+        {"max_evaluations": 100_000_001},
+        {"max_requests": 100_001},
         {"max_pages": True},
-        {"max_policy_documents": 5001},
+        {"max_policy_documents": 50_001},
         {"max_seconds": 601},
-        {"max_edges": 15001},
+        {"max_edges": 500_001},
+        {"max_roles": 10_001},
     ],
 )
 def test_limits_cannot_override_hard_maxima(kwargs):
@@ -1132,7 +1133,9 @@ def test_cli_rejects_malformed_access_advisor_setting(tmp_path, monkeypatch):
     assert not (tmp_path / "qualification.json").exists()
 
 
-def in_app_collect(monkeypatch, *, role_arn=ARN, account="", identity_account="123456789012", role="worker"):
+def in_app_collect(
+    monkeypatch, *, role_arn=ARN, account="", identity_account="123456789012", role="worker", limits=None
+):
     """Run the worker's AWS collection path with a stubbed AssumeRole and collector session."""
     from app.collectors import tasks
 
@@ -1158,7 +1161,12 @@ def in_app_collect(monkeypatch, *, role_arn=ARN, account="", identity_account="1
 
     monkeypatch.setattr(tasks, "AWSCollector", build)
     settings = tasks.settings.model_copy(
-        update={"aws_role_arn": role_arn, "aws_tenant_id": "t1", "aws_account_id": account}
+        update={
+            "aws_role_arn": role_arn,
+            "aws_tenant_id": "t1",
+            "aws_account_id": account,
+            "aws_collection_limits": limits or {},
+        }
     )
     monkeypatch.setattr(tasks, "settings", settings)
     return (lambda: tasks.collect("aws", {}, "t1")), made, iam, sessions
@@ -1167,11 +1175,45 @@ def in_app_collect(monkeypatch, *, role_arn=ARN, account="", identity_account="1
 def test_in_app_collection_confirms_sts_target_before_inventory(monkeypatch):
     run, made, iam, _ = in_app_collect(monkeypatch)
     snapshot = run()
-    assert made == [{"expected_account": "123456789012", "expected_role_arn": ARN, "access_advisor": False, "data_lake": True}]
+    assert made == [
+        {
+            "limits": CollectionLimits(),
+            "expected_account": "123456789012",
+            "expected_role_arn": ARN,
+            "access_advisor": False,
+            "data_lake": True,
+        }
+    ]
     assert snapshot.nodes
     # An explicit ZG_AWS_ACCOUNT_ID equal to the role ARN's account is accepted.
     run, made, iam, _ = in_app_collect(monkeypatch, account="123456789012")
     assert run().nodes and made[0]["expected_account"] == "123456789012"
+
+
+def test_in_app_collection_takes_enterprise_limits_from_settings(monkeypatch):
+    """A 1,500-role account exceeds the defaults; ZG_AWS_COLLECTION_LIMITS raises them (bounded)."""
+    from app.core.config import Settings
+
+    monkeypatch.setenv("ZG_AWS_COLLECTION_LIMITS", '{"max_roles": 2500, "max_evaluations": 12000000}')
+    configured = Settings()
+    assert configured.aws_collection_limits == {"max_roles": 2500, "max_evaluations": 12000000}
+    run, made, _, _ = in_app_collect(monkeypatch, limits=configured.aws_collection_limits)
+    assert run().nodes
+    assert made[0]["limits"] == CollectionLimits(max_roles=2500, max_evaluations=12_000_000)
+    # The enterprise simulation's account (qualify_enterprise_sim.COLLECTION_LIMITS) fits the ceilings.
+    CollectionLimits(max_roles=2500, max_users=1000, max_evaluations=12_000_000, max_edges=100_000)
+
+
+@pytest.mark.parametrize(
+    ("limits", "message"),
+    [({"max_roles": 10001}, "max_roles must be"), ({"max_seconds": 601}, "max_seconds"), ({"max_rolez": 5}, "Unknown")],
+)
+def test_in_app_collection_limits_fail_closed_before_assume_role(monkeypatch, limits, message):
+    run, made, _, sessions = in_app_collect(monkeypatch, limits=limits)
+    with pytest.raises(ValueError, match=message):
+        run()
+    sessions.assert_not_called()
+    assert made == []
 
 
 @pytest.mark.parametrize(

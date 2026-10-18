@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -8,7 +8,7 @@ from loguru import logger
 from sqlalchemy import or_, select, update
 
 from app.collectors import staging
-from app.collectors.aws_collector import AWSCollector, expected_target
+from app.collectors.aws_collector import AWSCollector, CollectionLimits, expected_target
 from app.collectors.mcp_agent_collector import MCPInventory, collect_mcp
 from app.collectors.publication import publish_sets
 from app.core.auth import Actor
@@ -54,6 +54,15 @@ class StagedUpload:
     session_id: str
 
 
+def collection_limits(configured: dict[str, int]) -> CollectionLimits:
+    """``ZG_AWS_COLLECTION_LIMITS`` over the defaults; unknown names or values beyond a hard
+    ceiling fail the job before any AWS call."""
+    unknown = sorted(set(configured) - {item.name for item in fields(CollectionLimits)})
+    if unknown:
+        raise ValueError(f"Unknown AWS collection limit: {', '.join(unknown)}")
+    return CollectionLimits(**configured)
+
+
 def collect(source: str, payload: dict, tenant: str) -> GraphSnapshot | StagedUpload:
     if source == "snapshot":
         if set(payload) == {"upload_session"}:
@@ -68,6 +77,7 @@ def collect(source: str, payload: dict, tenant: str) -> GraphSnapshot | StagedUp
             raise ValueError("No AWS collector is configured for this tenant")
         # Fail closed before AssumeRole on a malformed target; STS identity is checked before inventory.
         account, role_arn = expected_target(settings.aws_role_arn, settings.aws_account_id)
+        limits = collection_limits(settings.aws_collection_limits)
         session = boto3.Session(region_name=settings.aws_region)
         kwargs = {"RoleArn": settings.aws_role_arn, "RoleSessionName": "ZeroGraphReadOnly"}
         if settings.aws_external_id.get_secret_value():
@@ -81,6 +91,7 @@ def collect(source: str, payload: dict, tenant: str) -> GraphSnapshot | StagedUp
         )
         return AWSCollector(
             session,
+            limits=limits,
             expected_account=account,
             expected_role_arn=role_arn,
             access_advisor=settings.aws_access_advisor,
