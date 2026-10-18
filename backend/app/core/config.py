@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     git_base_branch: str = "main"
     git_token: SecretStr = SecretStr("")
     git_policy_prefix: str = "security/zerograph"
+    # GitLab instance (self-managed GitLab: its external URL, optionally with a relative
+    # root). HTTPS; plain HTTP only on a loopback host outside production (local
+    # qualification). GitHub always uses api.github.com.
+    git_gitlab_url: str = "https://gitlab.com"
     # Optimizer rollout: canary watch window after a change is marked merged, and the
     # AccessDenied events (per change, inside the window) that flag it for revert.
     rollout_watch_days: int = Field(default=7, ge=1, le=90)

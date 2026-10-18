@@ -324,6 +324,86 @@ def test_review_merged_is_a_single_read(provider):
     assert "secret" not in str(error.value)
 
 
+@pytest.mark.parametrize("provider", ["github", "gitlab"])
+def test_a_person_editing_a_file_between_read_and_write_keeps_their_edit(provider):
+    """Compare-and-swap is what protects a concurrent edit: the client writes with the blob SHA
+    (GitHub) or last commit (GitLab) it just read, so an edit landing between that read and the
+    write is refused by the provider, kept, and reported as a conflict."""
+    repo = fake_git.FakeRepository(provider)
+    change_id = str(uuid4())
+    client = lambda: GitOpsClient(fake_git.settings(provider), repo.transport())  # noqa: E731
+    client().open_change(change_id, TENANT_KEY, files_v1()[:1], "t", "body")
+    repo.merge(1)
+    path = f"security/zerograph/{TENANT_KEY}/{change_id}/role-1/inline-a.json"
+    edited = []
+
+    def person(request):
+        if (
+            not edited
+            and request.method == "PUT"
+            and ("/contents/" in request.url.path or "/files/" in request.url.path)
+        ):
+            branch = json.loads(request.content)["branch"]
+            repo._set(branch, path, b"edited by a person\n")
+            edited.append(branch)
+
+    repo.before_write = person
+    original = render(doc({"Effect": "Allow", "Action": "s3:GetObject", "Resource": [A, B]}))
+    with pytest.raises(GitOpsConflict, match="existing content was preserved"):
+        client().open_change(
+            change_id, TENANT_KEY, revert_of(files_v1()[:1], original), "r", "b", purpose="revert"
+        )
+    assert edited and repo.file(path, edited[0]) == b"edited by a person\n"
+    assert len(repo.reviews) == 1  # no revert review over a branch it could not write
+
+
+def test_fake_gitlab_compare_and_swap_matches_the_live_contract():
+    """Pins what GitLab CE 19.4 did in the live qualification: ``last_commit_id`` is checked by
+    the file's content at that commit; an absent file at that commit or an unknown commit skips
+    the check (so the client must send the last commit it read; tests/fake_git.py asserts it)."""
+    import httpx
+
+    repo = fake_git.FakeRepository("gitlab")
+    http = httpx.Client(
+        transport=repo.transport(),
+        base_url="https://gitlab.com/api/v4/projects/acme%2Fpolicies",
+        headers={"Authorization": "Bearer secret-token-value"},
+    )
+    repo.fork("probe")
+    base = repo.branches["main"]["head"]
+
+    def post(name, content):
+        return http.post(
+            f"/repository/files/{name}",
+            json={"branch": "probe", "content": content, "commit_message": "m"},
+        ).status_code
+
+    def put(name, content, commit):
+        return http.put(
+            f"/repository/files/{name}",
+            json={"branch": "probe", "content": content, "commit_message": "m", "last_commit_id": commit},
+        ).status_code
+
+    assert post("c.json", "c1") == 201
+    k1 = repo.branches["probe"]["head"]
+    assert post("d.json", "d1") == 201
+    k2 = repo.branches["probe"]["head"]
+    assert put("c.json", "c2", k2) == 200  # not c's last commit, same content there: accepted
+    assert put("c.json", "c3", k1) == 400  # c changed since k1: refused
+    assert put("c.json", "c4", "0" * 40) == 200  # unknown commit: no check
+    assert put("d.json", "d2", base) == 200  # d absent at that commit: no check
+    assert repo.last_commit("c.json", "probe") != k1
+    # After a merge, a merged file's last commit is the branch commit that changed it.
+    repo.reviews.append(
+        {"number": 1, "_branch": "probe", "_merged": False, "draft": True, "title": "t", "body": ""}
+    )
+    repo.merge(1)
+    merged_last = repo.last_commit("c.json")
+    assert merged_last == repo.branches["probe"]["last"]["c.json"] != repo.branches["main"]["head"]
+    with pytest.raises(AssertionError, match="last_commit_id"):
+        http.put("/repository/files/c.json", json={"branch": "probe", "content": "x", "commit_message": "m"})
+
+
 @pytest.mark.parametrize(
     "files,purpose",
     [
@@ -1043,3 +1123,80 @@ def test_postgres_concurrent_pr_opens_elect_exactly_one_canary(rollout_postgres,
     with factory() as db:
         canaries = db.scalars(select(RolloutChange).where(RolloutChange.canary.is_(True))).all()
         assert len(canaries) == 1 and canaries[0].state == "pr_open"
+
+
+# ---------------------------------------------------------------------------
+# Self-managed GitLab (ZG_GIT_GITLAB_URL)
+
+
+@pytest.mark.parametrize(
+    "instance",
+    ["https://git.example.com:8443/gitlab", "https://git.example.com", "http://127.0.0.1:18929"],
+)
+def test_self_managed_gitlab_change_revert_and_merge_check(instance):
+    """The whole flow against a self-managed instance: API under the instance (and its relative
+    root), review URLs on the instance, the merge check, and the revert after a person merges."""
+    repo = fake_git.FakeRepository("gitlab", gitlab_url=instance)
+    change_id = str(uuid4())
+    config = fake_git.settings("gitlab", git_gitlab_url=instance + "/")
+    client = lambda: GitOpsClient(config, repo.transport())  # noqa: E731
+    pr = client().open_change(change_id, TENANT_KEY, files_v1(), "t", "body")
+    assert pr.url == f"{instance}/{fake_git.REPOSITORY}/-/merge_requests/1"
+    assert client().open_change(change_id, TENANT_KEY, files_v1(), "t", "body") == pr
+    assert client().review_merged(change_id, TENANT_KEY) is False
+    repo.merge(1)
+    assert client().review_merged(change_id, TENANT_KEY) is True
+    original = render(doc({"Effect": "Allow", "Action": "s3:GetObject", "Resource": [A, B]}))
+    revert = client().open_change(
+        change_id, TENANT_KEY, revert_of(files_v1(), original), "r", "b", purpose="revert"
+    )
+    assert revert.url == f"{instance}/{fake_git.REPOSITORY}/-/merge_requests/2"
+    assert all(str(r.url).startswith(f"{instance}/api/v4/projects/") for r in repo.requests)
+
+
+def test_review_url_on_another_host_than_the_instance_is_refused():
+    repo = fake_git.FakeRepository("gitlab", gitlab_url="https://git.example.com")
+    real = repo._review_json
+    repo._review_json = lambda review: {
+        **real(review),
+        "web_url": real(review)["web_url"].replace("git.example.com", "gitlab.com"),
+    }
+    config = fake_git.settings("gitlab", git_gitlab_url="https://git.example.com")
+    with pytest.raises(GitOpsError, match="review URL"):
+        GitOpsClient(config, repo.transport()).open_change(str(uuid4()), TENANT_KEY, files_v1(), "t", "body")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://git.example.com",  # plain HTTP off loopback
+        "http://10.0.0.5:8080",
+        "ftp://git.example.com",
+        "https://user:secret@git.example.com",
+        "https://git.example.com/?x=1",
+        "https://git.example.com/#x",
+        "https://git.example.com/a/../b",
+        "https://",
+        "https://git.example.com:99999",
+        "https://git.example.com/a b",
+        "https://git.example.com/" + "a/" * 5,
+    ],
+)
+def test_invalid_gitlab_instance_url_is_refused_before_any_request(url):
+    repo = fake_git.FakeRepository("gitlab")
+    with pytest.raises(GitOpsError, match="GitLab instance URL"):
+        GitOpsClient(fake_git.settings("gitlab", git_gitlab_url=url), repo.transport())
+    assert not repo.requests
+
+
+def test_plain_http_gitlab_is_loopback_only_and_never_in_production():
+    from app.remediation.gitops_sync import gitlab_instance
+
+    assert gitlab_instance("http://127.0.0.1:18929", "development") == ("http", "127.0.0.1", 18929, "")
+    assert gitlab_instance("http://[::1]:8080/gl/", "test") == ("http", "::1", 8080, "/gl")
+    assert gitlab_instance("https://gitlab.com", "production") == ("https", "gitlab.com", 443, "")
+    with pytest.raises(GitOpsError):
+        gitlab_instance("http://127.0.0.1:18929", "production")
+    # GitHub ignores the GitLab instance setting.
+    client = GitOpsClient(fake_git.settings("github", git_gitlab_url="http://git.example.com"))
+    assert client.api == f"https://api.github.com/repos/{fake_git.REPOSITORY}"
