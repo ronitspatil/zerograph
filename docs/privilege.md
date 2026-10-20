@@ -104,3 +104,26 @@ the real API, then the worker sweep, then alternating publications with usage di
 | Graph-wide identity EPI (without hubs) | 0.983 (0.633); roles 0.479 |
 | Dormant identities | 6,097 detected, recall 1.0 of 2,839 planted, 0 with observed use |
 | `GET /graph/topics` / topic page / `/overview` p95 | 7.0 / 5.3 / 1.8 ms |
+
+### How the publish overhead is checked
+
+Whole publications drift by several seconds between runs on a shared machine (graph
+writes, Docker I/O, other work), so the fastest publish with usage minus the fastest
+without measured anywhere from 3.3 to 9.7 s on unchanged code. The script now:
+
+- publishes in pairs without and with usage, in ABBA order, so drift reaches both arms;
+- times the usage-dependent phases in the worker (usage load, topics and EPI compute
+  and store, proposals compute and store) and gates on their **floor**: per phase,
+  the fastest run with usage minus the fastest without, summed. Contention only adds
+  time and rarely reaches every run of a phase; a regression is in every run;
+- re-measures another window of pairs (up to three) when a budget is missed, with the
+  floors taken over every pair so far;
+- keeps a looser end-to-end bound (fastest publication with usage minus fastest
+  without, at most 10 s) and reports the per-pair differences and the load average.
+
+Budget: analysis overhead at most 6 s. Measured 3.1 to 4.5 s on a quiet machine and up
+to 5.8 s under heavy contention; most of it is storing the usage-driven proposals (about
+2.2 s). The same check with a 2 s sleep injected into topic computation with usage
+measures 7.0 s and fails. Helpers live in `backend/scripts/timing.py`; `qualify_scale.py`
+(publish growth beyond the measured analysis, median over ABBA pairs) and
+`qualify_proposals.py` (metrics p95, best of up to three windows) use them too.
