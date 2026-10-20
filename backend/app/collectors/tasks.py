@@ -306,6 +306,8 @@ def _publish_job(job_id: str, token: str, tenant: str, collected: GraphSnapshot 
         state.revision = revision
         state.updated_at = now()
         _complete(db, job)
+        if published.warnings:
+            job.payload = {"warnings": published.warnings}  # Shown with the job (never credentials).
         job.node_count = published.nodes
         audit(
             db,

@@ -1971,12 +1971,17 @@
   .source-cards p {
     font-size: 12px;
   }
-  .job-error {
+  .job-error,
+  .job-warning {
     display: block;
     color: var(--danger);
     max-width: 360px;
     margin-top: 4px;
     font-size: 12px;
+  }
+  .job-warning {
+    color: var(--warning);
+    overflow-wrap: anywhere;
   }
   .history-panel pre {
     max-width: 480px;

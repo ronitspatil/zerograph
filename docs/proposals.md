@@ -69,7 +69,10 @@ agent, MCP server or human from a non-AWS source) is **non-AWS**, never cross-ac
 `cross_account` otherwise, on `remove_assumption` and hop `break_toxic_path` proposals), and
 is `cross_account` only when the role's trust policy names another account. `disable_role`
 evidence says whether the role is externally trusted (`external_trust`). Grant removals on
-an externally trusted role keep their tier (they do not change who can assume it).
+an externally trusted role keep their tier: they do not change who can assume it, and a
+partner's use of a role in this account is recorded in this account's CloudTrail (the
+role session's data events), so the usage evidence already covers it and an unused grant
+is unused by the partner too.
 Removing an identity-policy grant on an asset in
 another account is not a trust change and keeps its evidence tier (the resource-side
 policy still has to allow access, so removing the identity side can only reduce access).

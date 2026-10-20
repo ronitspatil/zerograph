@@ -428,42 +428,69 @@ def test_references_link_to_another_sources_node_across_metadata_changes(environ
         run(enqueue(factory, "agents", restated), restated)
 
 
-def test_unresolved_references_fail_publication_clearly(environment):
+def dangling(graph, factory, node_id=ROLE) -> bool:
+    return any(node_id in (e.source, e.target) for e in graph.snapshot("tenant-a", current(factory)).edges)
+
+
+def test_unresolved_references_drop_their_edges_and_warn(client, environment):
+    """A stale inventory never blocks publication: edges ending at a reference no source defines
+    are dropped, everything else publishes, and the revision and job carry a bounded warning."""
     factory, graph = environment
-    before = current(factory)
-    agents = GraphSnapshot(nodes=[AGENT], edges=[ASSUMES], references=[ROLE], source="agents")
-    job_id = enqueue(factory, "agents", agents)
-    with pytest.raises(ValueError, match="1 referenced node\\(s\\) are not defined by any source"):
-        run(job_id, agents)
+    agents = GraphSnapshot(
+        nodes=[AGENT, Node(id="mcp:files", name="files", type=NodeType.MCP)],
+        edges=[ASSUMES, Edge(source="agent:bot", target="mcp:files", type=EdgeType.INVOKES)],
+        references=[ROLE, *(f"arn:aws:iam::123456789012:role/gone-{i}" for i in range(7))],
+        source="agents",
+    )
+    job_id = publish(factory, "agents", agents)
+    published = graph.snapshot("tenant-a", current(factory))
+    assert {n.id for n in published.nodes} >= {"agent:bot", "mcp:files"}
+    assert [(e.source, e.target) for e in published.edges] == [("agent:bot", "mcp:files")]
+    [warning] = [w for w in published.warnings if w.startswith("unresolved_references:")]
+    assert "8 referenced node(s) are not defined by any source of this tenant" in warning
+    assert "1 edge(s) ending at them were dropped" in warning
+    assert "Publish the source that defines them, or restate or remove the references" in warning
+    assert "agents: arn:aws:iam::123456789012:role/gone-0" in warning and "and 3 more" in warning  # 5 examples
     with factory() as db:
-        assert db.get(TenantState, "tenant-a").revision == before
-        assert db.get(SourceSnapshot, ("tenant-a", "agents")) is None
-        job = db.get(IngestionJob, job_id)
-        assert job.status == "retrying" and "not defined by any source" in job.error
-    # Once the defining source is published, the reference resolves.
-    publish(factory, "aws", aws_source({}))
-    publish(factory, "agents", agents)
-    # A later collection that drops the role fails clearly instead of leaving a dangling edge.
+        assert db.get(IngestionJob, job_id).status == "completed"
+    job = client.get(f"/api/v1/ingestions/{job_id}").json()
+    assert job["error"] is None and job["warnings"] == [warning]
+    # Once the defining source is published, that reference resolves (the 7 others still warn).
+    aws_job = publish(factory, "aws", aws_source({}))
+    assert dangling(graph, factory)
+    [warning] = [w for w in graph.snapshot("tenant-a", current(factory)).warnings if "unresolved" in w]
+    assert warning.startswith("unresolved_references: 7 ") and "0 edge(s)" in warning
+    assert client.get(f"/api/v1/ingestions/{aws_job}").json()["warnings"] == [warning]
+    # A later collection that drops the role still publishes fresh AWS data; only the edge goes.
     dropped = GraphSnapshot(nodes=aws_source({}).nodes[1:])
-    with pytest.raises(ValueError, match="not defined by any source"):
-        run(enqueue(factory, "aws", dropped), dropped)
-    assert any(n.id == ROLE for n in graph.snapshot("tenant-a", current(factory)).nodes)
+    publish(factory, "aws", dropped)
+    assert not dangling(graph, factory)
+    [warning] = [w for w in graph.snapshot("tenant-a", current(factory)).warnings if "unresolved" in w]
+    assert warning.startswith("unresolved_references: 8 ") and "1 edge(s)" in warning
+    # With every reference resolvable, no warning remains.
+    publish(factory, "agents", agents.model_copy(update={"references": [ROLE]}))
+    publish(factory, "aws", aws_source({}))
+    assert not [w for w in graph.snapshot("tenant-a", current(factory)).warnings if "unresolved" in w]
+    # Genuine conflicting definitions still fail.
+    renamed = GraphSnapshot(nodes=[Node(id="mcp:files", name="other", type=NodeType.MCP)])
+    with pytest.raises(ValueError, match="Conflicting node definitions"):
+        run(enqueue(factory, "other", renamed), renamed)
 
 
 def test_references_resolve_only_within_the_tenant(environment):
-    factory, _ = environment
+    factory, graph = environment
     with factory() as db:
         db.add(TenantState(tenant_id="tenant-b", revision=None))
         db.commit()
     defining = aws_source({})
     run(enqueue(factory, "aws", defining, tenant="tenant-b"), defining)
     agents = GraphSnapshot(nodes=[AGENT], edges=[ASSUMES], references=[ROLE], source="agents")
-    with pytest.raises(ValueError, match="not defined by any source"):
-        run(enqueue(factory, "agents", agents), agents)
+    run(enqueue(factory, "agents", agents), agents)
+    assert not dangling(graph, factory)  # Tenant-b's role does not resolve tenant-a's reference.
     run(enqueue(factory, "agents", agents, tenant="tenant-b"), agents)
     with factory() as db:
-        assert db.get(SourceSnapshot, ("tenant-b", "agents")) is not None
-        assert db.get(SourceSnapshot, ("tenant-a", "agents")) is None
+        revision = db.get(TenantState, "tenant-b").revision
+    assert any(e.target == ROLE for e in graph.snapshot("tenant-b", revision).edges)
 
 
 def test_snapshot_reference_validation():

@@ -1019,7 +1019,7 @@ def test_usage_commit_aggregates_and_policies_copy_on_postgres(postgres_environm
 
 
 def test_node_references_resolve_in_sql_on_postgres(postgres_environment):
-    """References never conflict, resolve against the tenant's sets only, and fail clearly."""
+    """References never conflict, resolve against the tenant's sets only, and drop their edges with a warning when unresolved."""
     factory, graph = postgres_environment
     role = "arn:aws:iam::123456789012:role/runtime"
 
@@ -1046,8 +1046,11 @@ def test_node_references_resolve_in_sql_on_postgres(postgres_environment):
         db.add(TenantState(tenant_id="other", revision="initial"))
         db.commit()
     submit("aws", aws({"v": 1}), tenant="other")
-    with pytest.raises(ValueError, match="not defined by any source"):
-        submit("agents", agents)
+    submit("agents", agents)  # Unresolved in this tenant: published without the edge, with a warning.
+    with factory() as db:
+        revision = db.get(TenantState, "tenant").revision
+    published = graph.snapshot("tenant", revision)
+    assert published.edges == [] and any(w.startswith("unresolved_references: 1") for w in published.warnings)
     submit("aws", aws({"v": 1}))
     submit("agents", agents)
     submit("aws", aws({"v": 2}))

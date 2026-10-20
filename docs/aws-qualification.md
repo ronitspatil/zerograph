@@ -347,7 +347,8 @@ uploads the trail through `/usage/uploads`, runs the topic and proposal sweeps, 
 sample, simulates it and rolls it out as draft PRs against `tests/fake_git.py`. Between
 the agent inventory and the trail it tags the agent's role and collects again: the change
 publishes without a conflict (restating the role, the former approach, conflicts; a
-reference no source defines fails with a clear job error). On SQLite and on PostgreSQL 16
+reference no source defines publishes with its edge dropped and an
+`unresolved_references` warning on the revision and the job). On SQLite and on PostgreSQL 16
 (memory graph) all 99 checks pass (the 89 below took 117-140 s; the re-collection adds
 about one more collection), peak RSS about 1 GB: inventory complete (6.2 million evaluations, 20,553 edges, 47 s), topics 100%
 (tagged, name-only and role primary topics), EPI equal to the brute force for 1,872

@@ -1450,7 +1450,8 @@ def upload_cloudtrail(client, records, start, end, services, checks: Checks, lab
 def agent_reference_flow(client, tasks, world, truth: Truth, role_node, agent_inventory, checks: Checks) -> dict:
     """The agent inventory links to the AWS role by reference: a later collection that changes
     the role's metadata (a new tag) publishes without a conflict; restating the role as it was
-    (the former approach) conflicts, and a reference to a role no source defines fails clearly."""
+    (the former approach) conflicts, and a reference to a role no source defines never blocks
+    publication: its edge is dropped with an ``unresolved_references`` warning."""
     import boto3
 
     from app.db.models import IngestionJob, TenantState
@@ -1505,12 +1506,28 @@ def agent_reference_flow(client, tasks, world, truth: Truth, role_node, agent_in
         stale["status"] == "retrying" and "Conflicting node definitions" in (stale["error"] or "") and stale["revision_unchanged"],
         stale,
     )
-    missing = refused(agent_inventory(f"arn:aws:iam::{world['account']}:role/not-collected"))
+    absent = f"arn:aws:iam::{world['account']}:role/not-collected"
+    job = run_job(client, tasks, {"source": "snapshot", "payload": agent_inventory(absent)}, checks, "agent inventory with an unresolved reference")
+    after, graph = published()
+    warning = [w for w in graph.warnings if w.startswith("unresolved_references:")]
+    missing = {
+        "status": job["status"],
+        "job_warnings": job.get("warnings"),
+        "revision_warning": warning,
+        "edge_dropped": not any(absent in (e.source, e.target) for e in graph.edges),
+        "agent_published": any(n.id == truth.toxic["agent"] for n in graph.nodes),
+        "new_revision": after != revision,
+    }
     checks(
-        "a reference no source defines fails publication clearly (revision unchanged)",
-        missing["status"] == "retrying" and "not defined by any source" in (missing["error"] or "") and missing["revision_unchanged"],
+        "a reference no source defines publishes with its edge dropped and an unresolved_references warning",
+        job["status"] == "completed" and missing["edge_dropped"] and missing["agent_published"] and missing["new_revision"]
+        and len(warning) == 1 and "1 referenced node(s) are not defined by any source" in warning[0]
+        and "1 edge(s) ending at them were dropped" in warning[0] and f"snapshot: {absent}" in warning[0]
+        and job.get("warnings") == warning,
         missing,
     )
+    # Restore the real inventory for the rest of the run.
+    run_job(client, tasks, {"source": "snapshot", "payload": agent_inventory(role)}, checks, "agent inventory restored")
     return {"tags_after": changed.tags if changed else None, "restated": stale, "missing_reference": missing}
 
 

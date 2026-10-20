@@ -127,12 +127,20 @@ instead of a restated `target` node.
 Rules: references are unique within a snapshot and at most 50,000; an edge endpoint
 must be a node or a reference of the same snapshot (checked on validation and on
 upload commit); policy principals must still be nodes of the snapshot; a reference to
-a node the snapshot defines itself simply resolves to it. At publication every
-reference must be a node defined by some active source **of the same tenant**;
-otherwise the attempt fails with `N referenced node(s) are not defined by any source
-of this tenant` (also the job's `error`), the revision and sources are unchanged, and
-the job retries. This includes a later collection that drops a referenced node:
-publish the inventory without the reference (or restate the node) to proceed.
+a node the snapshot defines itself simply resolves to it. At publication a reference
+resolves only to a node defined by some active source **of the same tenant**. An
+unresolved reference never blocks publication (a stale inventory must not freeze fresh
+AWS data): the edges ending at it are dropped, everything else publishes, and the
+revision carries one bounded warning, also returned in the job's `warnings` and shown
+under the job in Data sources and in the console's coverage notice:
+
+    unresolved_references: N referenced node(s) are not defined by any source of this
+    tenant; M edge(s) ending at them were dropped. Publish the source that defines them,
+    or restate or remove the references (<source>: <id>, ... up to 5, and K more)
+
+This includes a later collection that drops a referenced node: the AWS data publishes,
+and the agent's edge to the dropped role disappears until the inventory is fixed.
+Differing definitions of one node or edge ID still fail publication as before.
 References are stored as `staged_entities` rows of kind `ref`, are never counted as
 nodes, and never take part in conflict detection.
 

@@ -71,3 +71,26 @@ it("uploads a large snapshot file in chunks through an upload session", async ()
   expect(JSON.parse(lines[0])).toEqual({ node: nodes[0] });
   expect(paths).not.toContain("ingestions");
 });
+it("shows a completed job's publication warnings beside its source", () => {
+  const warning =
+    "unresolved_references: 1 referenced node(s) are not defined by any source of this tenant";
+  render(
+    <Sources
+      jobs={[
+        {
+          id: "j1",
+          source: "snapshot",
+          status: "completed",
+          error: null,
+          node_count: 2,
+          created_at: "2026-10-19T00:00:00Z",
+          updated_at: "2026-10-19T00:00:00Z",
+          warnings: [warning],
+        },
+      ]}
+      onRefresh={vi.fn()}
+      canAdmin
+    />,
+  );
+  expect(screen.getByText(warning)).toHaveClass("job-warning");
+});

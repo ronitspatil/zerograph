@@ -149,8 +149,9 @@ class GraphSnapshot(BaseModel):
     policies: list[PolicyAttachment] = Field(default_factory=list, max_length=MAX_SNAPSHOT_POLICIES)
     # IDs of nodes another source of the tenant defines (the AWS role an agent assumes): edges
     # may end at them without restating the node, so a later change to that node's metadata is
-    # not a conflict. Publication fails if no active source of the tenant defines one. A
-    # reference to a node this snapshot also defines is allowed (it resolves to that node).
+    # not a conflict. If no active source of the tenant defines one, publication drops the
+    # edges ending at it and warns (``unresolved_references``). A reference to a node this
+    # snapshot also defines is allowed (it resolves to that node).
     references: list[NodeId] = Field(default_factory=list, max_length=MAX_SNAPSHOT_REFERENCES)
 
     @model_validator(mode="after")

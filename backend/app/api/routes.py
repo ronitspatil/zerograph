@@ -1818,6 +1818,7 @@ class JobResponse(BaseModel):
     node_count: int
     created_at: datetime
     updated_at: datetime
+    warnings: list[str] = []  # Publication warnings (``unresolved_references``...).
 
 
 def ensure_tenant_state(db: Session, tenant: str) -> None:
