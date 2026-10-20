@@ -10,6 +10,10 @@ helpers here keep a real regression visible while absorbing that drift:
 * ``paired``: per-pair differences (each "with" run against the "without" run next to
   it) and their median, which a single slow run cannot move. A regression that is
   present in every run still shifts every pair, so the median moves by its full size;
+* ``phase_floor``: for work made of independent phases (load, compute, store), the
+  fastest run of each phase per arm. Contention only ever adds time, and a phase lasts
+  seconds, so with a few runs at least one of them is usually undisturbed; a
+  regression adds its cost to every run and so to the fastest one too;
 * ``best_window``: repeat a latency window when it misses its budget and gate on the
   best window, so a burst of contention cannot fail the check but a slow endpoint,
   which misses in every window, still does.
@@ -35,6 +39,18 @@ def paired(without: list[float], with_: list[float]) -> dict:
         "min": round(min(deltas), 3),
         "max": round(max(deltas), 3),
     }
+
+
+def phase_floor(without: list[dict], with_: list[dict], phases: tuple[str, ...]) -> dict:
+    """Per phase, the fastest ``with_`` run minus the fastest ``without`` run (a phase a
+    run did not perform counts 0), and their sum (seconds, rounded)."""
+    if not without or not with_:
+        raise ValueError("Each arm needs at least one run")
+    delta = {
+        phase: min(run.get(phase, 0.0) for run in with_) - min(run.get(phase, 0.0) for run in without)
+        for phase in phases
+    }
+    return {"phases": {k: round(v, 3) for k, v in delta.items()}, "total": round(sum(delta.values()), 3)}
 
 
 def best_window(

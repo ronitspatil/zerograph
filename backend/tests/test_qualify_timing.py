@@ -5,7 +5,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from timing import arm_order, best_window, paired  # noqa: E402
+from timing import arm_order, best_window, paired, phase_floor  # noqa: E402
 
 
 def test_arm_order_is_abba():
@@ -59,3 +59,16 @@ def test_best_window_reports_the_best_failing_window():
     assert len(result["windows"]) == 3
     with pytest.raises(ValueError):
         best_window(dict, lambda w: True, lambda w: 0, windows=0)
+
+
+def test_phase_floor_ignores_contended_runs_but_keeps_a_regression():
+    phases = ("load", "compute", "store")
+    without = [{"compute": 1.0, "store": 1.3}, {"compute": 2.9, "store": 2.2}]
+    with_ = [{"load": 0.5, "compute": 2.1, "store": 3.4}, {"load": 1.4, "compute": 6.0, "store": 3.6}]
+    floor = phase_floor(without, with_, phases)
+    assert floor["phases"] == {"load": 0.5, "compute": 1.1, "store": 2.1}
+    assert floor["total"] == 3.7
+    slower = [{**run, "compute": run["compute"] + 2} for run in with_]
+    assert phase_floor(without, slower, phases)["total"] == 5.7
+    with pytest.raises(ValueError):
+        phase_floor([], with_, phases)
