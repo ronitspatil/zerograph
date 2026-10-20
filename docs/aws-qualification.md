@@ -349,8 +349,9 @@ the agent inventory and the trail it tags the agent's role and collects again: t
 publishes without a conflict (restating the role, the former approach, conflicts; a
 reference no source defines publishes with its edge dropped and an
 `unresolved_references` warning on the revision and the job). On SQLite and on PostgreSQL 16
-(memory graph) all 99 checks pass (the 89 below took 117-140 s; the re-collection adds
-about one more collection), peak RSS about 1 GB: inventory complete (6.2 million evaluations, 20,553 edges, 47 s), topics 100%
+(memory graph) all 103 checks pass in 164-182 s (the re-collection and three agent
+inventory publications add about 45 s to the 117-140 s of the 89 checks below), peak RSS
+about 1 GB: inventory complete (6.2 million evaluations, 20,553 edges, 47 s), topics 100%
 (tagged, name-only and role primary topics), EPI equal to the brute force for 1,872
 members and 9 topics, dormant recall 1.0 (98 roles, 56 users), never-assumed recall 1.0
 (204), high-tier `remove_grant` precision and recall 1.0 (193 proposed; 152 role and
