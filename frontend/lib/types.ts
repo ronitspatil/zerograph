@@ -219,6 +219,8 @@ export interface Job {
   node_count: number;
   created_at: string;
   updated_at: string;
+  /** Publication warnings of a completed job (e.g. unresolved_references). */
+  warnings?: string[];
 }
 export interface Remediation {
   id: string;

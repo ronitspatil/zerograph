@@ -25,7 +25,9 @@ client at it with ``AWS_ENDPOINT_URL``. It then:
    AWS collection through the settings path (``ZG_AWS_ROLE_ARN``/``ZG_AWS_EXTERNAL_ID``,
    ``POST /ingestions`` with source ``aws``, the worker's ``process_job``: STS
    AssumeRole into the emulator, the real collector, staging, publication), the agent
-   inventory as a second source, the CloudTrail upload through ``/usage/uploads``, the
+   inventory as a second source that references the AWS role by ID, a re-collection after
+   the role's metadata changes (no conflict; restating the role would conflict, and a
+   reference no source defines fails clearly), the CloudTrail upload through ``/usage/uploads``, the
    worker's topic and proposal backfill sweeps, topics, the excess-privilege index (EPI),
    proposals, accepting a sample, what-if, GitOps draft PRs against the local fake
    provider (``tests/fake_git.py``) with canary gating, verify, a byte-exact revert and the
@@ -33,7 +35,10 @@ client at it with ``AWS_ENDPOINT_URL``. It then:
 4. **Asserts against the ground truth**: inventory completeness, topic accuracy, EPI
    against the independent brute force (``qualify_usage.reference_privilege``), dormant
    and never-assumed recall, high-tier ``remove_grant`` precision and recall, never-auto
-   categories manual, the collector excluded, no proposal removing observed use, and the
+   categories manual (disabling a dormant role a partner account trusts is ``cross_account``;
+   same-account dormant roles stay automatic), the toxic path's agent hop labelled
+   ``non_aws`` rather than cross-account, the collector excluded, no proposal removing
+   observed use, and the
    rollout invariants (draft only, canary gating, byte-exact revert). Timings and RSS are
    reported per phase.
 
@@ -1442,6 +1447,90 @@ def upload_cloudtrail(client, records, start, end, services, checks: Checks, lab
     return body
 
 
+def agent_reference_flow(client, tasks, world, truth: Truth, role_node, agent_inventory, checks: Checks) -> dict:
+    """The agent inventory links to the AWS role by reference: a later collection that changes
+    the role's metadata (a new tag) publishes without a conflict; restating the role as it was
+    (the former approach) conflicts, and a reference to a role no source defines never blocks
+    publication: its edge is dropped with an ``unresolved_references`` warning."""
+    import boto3
+
+    from app.db.models import IngestionJob, TenantState
+    from app.db.session import session_factory
+    from app.graph.repository import get_graph_store
+
+    def published():
+        with session_factory()() as db:
+            revision = db.get(TenantState, TENANT).revision
+        return revision, get_graph_store().snapshot(TENANT, revision)
+
+    role = truth.toxic["role"]
+    revision, graph = published()
+    edge = any(e.source == truth.toxic["agent"] and e.target == role for e in graph.edges)
+    checks(
+        "agent inventory links to the AWS role by reference (no restated node; edge published)",
+        edge and [n.id for n in graph.nodes].count(role) == 1,
+        {"edge": edge},
+    )
+    credentials = world["member_credentials"]
+    member = session(boto3, credentials["AccessKeyId"], credentials["SecretAccessKey"], credentials["SessionToken"])
+    member.client("iam").tag_role(
+        RoleName=role.rsplit("/", 1)[-1], Tags=[{"Key": "owner", "Value": "support-platform"}]
+    )
+    job = run_job(client, tasks, {"source": "aws", "payload": {}}, checks, "aws re-collection after the role's metadata changed")
+    revision, graph = published()
+    changed = next((n for n in graph.nodes if n.id == role), None)
+    edge = any(e.source == truth.toxic["agent"] and e.target == role for e in graph.edges)
+    checks(
+        "role metadata change re-published without a conflict; the agent edge stays",
+        job["status"] == "completed" and changed is not None and "owner=support-platform" in changed.tags and edge,
+        {"status": job["status"], "tags": changed.tags if changed else None, "edge": edge},
+    )
+
+    def refused(payload: dict) -> dict:
+        with patch("app.api.routes.ingest.delay"):
+            response = client.post("/api/v1/ingestions", json={"source": "snapshot", "payload": payload})
+        job_id = response.json()["id"]
+        try:
+            tasks.process_job(job_id)
+        except ValueError:
+            pass
+        found = client.get(f"/api/v1/ingestions/{job_id}").json()
+        with session_factory()() as db:  # Retire the refused job so nothing retries it later.
+            db.get(IngestionJob, job_id).status = "failed"
+            db.commit()
+        return {"status": found["status"], "error": found.get("error"), "revision_unchanged": published()[0] == revision}
+
+    stale = refused(agent_inventory(role, role_node.model_dump(mode="json")))
+    checks(
+        "restating the role as first collected conflicts after its metadata changed (the former approach)",
+        stale["status"] == "retrying" and "Conflicting node definitions" in (stale["error"] or "") and stale["revision_unchanged"],
+        stale,
+    )
+    absent = f"arn:aws:iam::{world['account']}:role/not-collected"
+    job = run_job(client, tasks, {"source": "snapshot", "payload": agent_inventory(absent)}, checks, "agent inventory with an unresolved reference")
+    after, graph = published()
+    warning = [w for w in graph.warnings if w.startswith("unresolved_references:")]
+    missing = {
+        "status": job["status"],
+        "job_warnings": job.get("warnings"),
+        "revision_warning": warning,
+        "edge_dropped": not any(absent in (e.source, e.target) for e in graph.edges),
+        "agent_published": any(n.id == truth.toxic["agent"] for n in graph.nodes),
+        "new_revision": after != revision,
+    }
+    checks(
+        "a reference no source defines publishes with its edge dropped and an unresolved_references warning",
+        job["status"] == "completed" and missing["edge_dropped"] and missing["agent_published"] and missing["new_revision"]
+        and len(warning) == 1 and "1 referenced node(s) are not defined by any source" in warning[0]
+        and "1 edge(s) ending at them were dropped" in warning[0] and f"snapshot: {absent}" in warning[0]
+        and job.get("warnings") == warning,
+        missing,
+    )
+    # Restore the real inventory for the rest of the run.
+    run_job(client, tasks, {"source": "snapshot", "payload": agent_inventory(role)}, checks, "agent inventory restored")
+    return {"tags_after": changed.tags if changed else None, "restated": stale, "missing_reference": missing}
+
+
 def run_pipeline(world: dict, truth: Truth, work: Path, checks: Checks, phases: Phases, args, result: dict) -> None:  # noqa: C901
     app_environment(world, work, args.database_url)
     from fastapi.testclient import TestClient
@@ -1520,7 +1609,7 @@ def run_pipeline(world: dict, truth: Truth, work: Path, checks: Checks, phases: 
     nodes = {node.id: node for node in published.nodes}
 
     # 2. The agent inventory (a second source): an exposed, unauthenticated chatbot that may
-    # assume the support runtime role. Cross-source edges need the role's node restated exactly.
+    # assume the support runtime role. It references the AWS-collected role by ID (never restates it).
     role_node = nodes.get(truth.toxic["role"])
     checks("toxic-path role collected", role_node is not None)
     agent = {
@@ -1531,23 +1620,31 @@ def run_pipeline(world: dict, truth: Truth, work: Path, checks: Checks, phases: 
         "internet_exposed": True,
         "authenticated": False,
     }
-    payload = {
-        "nodes": [agent, role_node.model_dump(mode="json")] if role_node else [agent],
-        "edges": [
-            {
-                "source": truth.toxic["agent"],
-                "target": truth.toxic["role"],
-                "type": "ASSUMES_ROLE",
-                "certainty": "declared",
-                "evidence": ["agent runtime configuration: bedrock agent execution role"],
-            }
-        ]
-        if role_node
-        else [],
-        "source": "agents",
-    }
+
+    def agent_inventory(role: str, restated=None) -> dict:
+        return {
+            "nodes": [agent, restated] if restated else [agent],
+            "references": [] if restated else [role],
+            "edges": [
+                {
+                    "source": truth.toxic["agent"],
+                    "target": role,
+                    "type": "ASSUMES_ROLE",
+                    "certainty": "declared",
+                    "evidence": ["agent runtime configuration: bedrock agent execution role"],
+                }
+            ],
+            "source": "agents",
+        }
+
     with phases("agent_inventory_publish"):
-        result["agent_job"] = run_job(client, tasks, {"source": "snapshot", "payload": payload}, checks, "agent inventory")
+        result["agent_job"] = run_job(
+            client, tasks, {"source": "snapshot", "payload": agent_inventory(truth.toxic["role"])}, checks, "agent inventory"
+        )
+    with phases("agent_reference_metadata_change"):
+        result["agent_references"] = agent_reference_flow(
+            client, tasks, world, truth, role_node, agent_inventory, checks
+        )
 
     # 3. 95 days of CloudTrail through the usage upload API, then the worker sweeps.
     end = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=1)
@@ -1903,6 +2000,44 @@ def check_truth(client, world, truth: Truth, published, simulated, revision, che
     )
     cross = [p for p in proposals if kind_of(p["subject_id"]) == "cross-account-unused"]
     result["cross_account_unused"] = [(p["type"], p["tier"], p["reasons"]) for p in cross][:6]
+    # A dormant role a partner account may assume is the partner's dependency: disabling it is manual.
+    partner_roles = {a for a, r in truth.roles.items() if r["kind"] in ("cross-account", "cross-account-unused")}
+    partner_unused = {a for a, r in truth.roles.items() if r["kind"] == "cross-account-unused"}
+    partner_disable = [p for p in by_type["disable_role"] if p["subject_id"] in partner_unused]
+    same_account_disable = [
+        p for p in by_type["disable_role"] if kind_of(p["subject_id"]) in ("dormant", "out-of-window")
+    ]
+    labelled = [p for p in proposals if "cross_account" in p["reasons"]]
+    result["partner_trust"] = {
+        "partner_unused_roles": len(partner_unused),
+        "disable_role": len(partner_disable),
+        "manual_cross_account": sum(p["tier"] == "manual" and "cross_account" in p["reasons"] for p in partner_disable),
+        "base_tiers": dict(Counter(p["base_tier"] for p in partner_disable)),
+        "same_account_disable_tiers": dict(Counter(p["tier"] for p in same_account_disable)),
+        "cross_account_labelled": dict(Counter(p["type"] for p in labelled)),
+        "labelled_outside_partner_roles": [
+            (p["type"], p["subject_name"], p["target_name"]) for p in labelled
+            if not {p["subject_id"], p["target_id"]} & partner_roles
+        ][:5],
+    }
+    checks(
+        "partner-trusted dormant roles: disable_role is manual (cross_account)",
+        {p["subject_id"] for p in partner_disable} == partner_unused - guarded
+        and all(p["tier"] == "manual" and "cross_account" in p["reasons"] and p["evidence"].get("external_trust") for p in partner_disable),
+        result["partner_trust"],
+    )
+    checks(
+        "same-account dormant roles: disable_role unchanged (no cross_account, automatic tiers remain)",
+        same_account_disable
+        and not any("cross_account" in p["reasons"] for p in same_account_disable)
+        and any(p["tier"] == "high" for p in same_account_disable),
+        result["partner_trust"],
+    )
+    checks(
+        "cross_account is labelled only on proposals involving a role another account trusts",
+        not result["partner_trust"]["labelled_outside_partner_roles"],
+        result["partner_trust"],
+    )
 
     # Collector excluded; no proposal removes observed use (against the ground truth).
     collector_rows = [p for p in proposals if collector in (p["subject_id"], p["target_id"])]
@@ -1941,6 +2076,17 @@ def check_truth(client, world, truth: Truth, published, simulated, revision, che
     checks(
         "the toxic path's unused restricted grant is proposed for removal",
         bool(unused_toxic) or bool(breaks),
+        result["toxic"],
+    )
+    hops = [p for p in breaks if (p["subject_id"], p["target_id"]) == (truth.toxic["agent"], truth.toxic["role"])]
+    result["toxic"]["agent_hop"] = [(p["tier"], p["reasons"], p["evidence"].get("trust_scope")) for p in hops]
+    checks(
+        "toxic-path agent -> role hop is manual trust, labelled non-AWS (not cross_account)",
+        hops and all(
+            p["tier"] == "manual" and "trust" in p["reasons"] and "cross_account" not in p["reasons"]
+            and p["evidence"].get("trust_scope") == "non_aws"
+            for p in hops
+        ),
         result["toxic"],
     )
     duplicates = {tuple(sorted((p["subject_id"], p["target_id"]))) for p in by_type["merge_roles"]}

@@ -45,6 +45,13 @@ class IngestionJob(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
+    @property
+    def warnings(self) -> list[str]:
+        """Publication warnings of a completed job (its payload is cleared on completion)."""
+        if self.status != "completed" or not isinstance(self.payload, dict):
+            return []
+        return [str(item) for item in self.payload.get("warnings", [])][:20]
+
 
 class AuditEvent(Base):
     __tablename__ = "audit_events"

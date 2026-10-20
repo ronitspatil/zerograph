@@ -337,19 +337,28 @@ partner-account roles), 400 users in 40 Identity-Center-style groups, 300 bucket
 (tag/name topics, bucket policies, an Object Ownership and encryption mix), 7 Glue
 databases / 29 tables (one Lake Formation governed with named and column grants, hybrid
 others, LF-Tags), 5 Athena workgroups and a toxic path (an exposed, unauthenticated agent
-that may assume a role reading restricted HR data, submitted as a second source). 95 days
+that may assume a role reading restricted HR data, submitted as a second source that
+references the AWS role by ID). 95 days
 of activity become 451,603 CloudTrail records in 91 export files (user, AWS service,
 SAML with `onBehalfOf`, web identity and partner sessions, mixed-case Glue names, 315
 denied attempts, sessions issued before the window and activity entirely outside it).
 The run collects through `ZG_AWS_ROLE_ARN`/`ZG_AWS_COLLECTION_LIMITS` and the worker job,
 uploads the trail through `/usage/uploads`, runs the topic and proposal sweeps, accepts a
-sample, simulates it and rolls it out as draft PRs against `tests/fake_git.py`. On SQLite
-and on PostgreSQL 16 (memory graph) all 89 checks pass in 117-140 s, peak RSS about
-1 GB: inventory complete (6.2 million evaluations, 20,553 edges, 47 s), topics 100%
+sample, simulates it and rolls it out as draft PRs against `tests/fake_git.py`. Between
+the agent inventory and the trail it tags the agent's role and collects again: the change
+publishes without a conflict (restating the role, the former approach, conflicts; a
+reference no source defines publishes with its edge dropped and an
+`unresolved_references` warning on the revision and the job). On SQLite and on PostgreSQL 16
+(memory graph) all 103 checks pass in 164-182 s (the re-collection and three agent
+inventory publications add about 45 s to the 117-140 s of the 89 checks below), peak RSS
+about 1 GB: inventory complete (6.2 million evaluations, 20,553 edges, 47 s), topics 100%
 (tagged, name-only and role primary topics), EPI equal to the brute force for 1,872
 members and 9 topics, dormant recall 1.0 (98 roles, 56 users), never-assumed recall 1.0
 (204), high-tier `remove_grant` precision and recall 1.0 (193 proposed; 152 role and
-40 group over-grants planted), every never-auto category manual, nothing proposed for
+40 group over-grants planted), every never-auto category manual (including `disable_role`
+of the 10 dormant roles partner accounts trust: `cross_account`, base tier high; the 80
+same-account dormant roles keep their tiers), the toxic path's agent-to-role hop manual
+`trust` with `trust_scope: non_aws` (not `cross_account`), nothing proposed for
 the collector or against observed use, canary gating, a byte-exact revert and the
 AccessDenied auto-revert (draft, never merged). It found the collection limits fixed in
 `ZG_AWS_COLLECTION_LIMITS` and wildcard statements (`AdministratorAccess`, `s3:*`,

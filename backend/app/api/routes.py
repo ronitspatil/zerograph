@@ -1818,6 +1818,7 @@ class JobResponse(BaseModel):
     node_count: int
     created_at: datetime
     updated_at: datetime
+    warnings: list[str] = []  # Publication warnings (``unresolved_references``...).
 
 
 def ensure_tenant_state(db: Session, tenant: str) -> None:
@@ -1998,7 +1999,8 @@ def upload_chunk(
     db: DB,
     actor: Admin,
 ):
-    """Stage one NDJSON chunk (``{"node":…}``/``{"edge":…}``/``{"policy":…}``/``{"warning":…}`` lines).
+    """Stage one NDJSON chunk (``{"node":…}``/``{"edge":…}``/``{"policy":…}``/``{"reference":…}``/
+    ``{"warning":…}`` lines; a reference is the ID of a node another source defines).
 
     Re-sending a chunk number replaces that chunk, so a client may retry safely.
     """
@@ -2021,9 +2023,10 @@ def upload_chunk(
         or totals["edge"] > settings.max_edges
         or totals["warning"] > staging.MAX_WARNINGS
         or totals["policy"] > staging.MAX_POLICIES
+        or totals["reference"] > staging.MAX_REFERENCES
     ):
         db.rollback()
-        raise HTTPException(413, "Upload exceeds the configured node, edge, policy or warning limit")
+        raise HTTPException(413, "Upload exceeds the configured node, edge, policy, reference or warning limit")
     upload.node_count, upload.edge_count, upload.warning_count = (
         totals["node"],
         totals["edge"],
@@ -2041,7 +2044,9 @@ def commit_upload(upload_id: UploadId, db: DB, actor: Admin):
     upload = open_upload(db, actor, upload_id)
     if staging.missing_endpoints(db, upload.id):
         db.rollback()
-        raise HTTPException(422, "Every edge endpoint and policy principal must exist in this snapshot")
+        raise HTTPException(
+            422, "Every edge endpoint must be a node or reference, and every policy principal a node, of this snapshot"
+        )
     upload.status = "committed"
     upload.updated_at = now()
     job_id = str(uuid4())

@@ -2,22 +2,25 @@
 
 Semantics match the former in-memory merge (sources in name order, entities in
 submission order, first position wins, identical duplicates collapse, differing
-duplicates are a conflict) followed by ``classification_edges``. Nothing here
+duplicates are a conflict) followed by ``classification_edges``. A node *reference*
+(an edge endpoint another source defines) is not a definition: it never conflicts. A
+reference no active set defines does not block publication: the edges ending at it are
+dropped and the revision carries an ``unresolved_references`` warning. Nothing here
 materializes a whole-graph Pydantic snapshot: rows are streamed from SQL, written
 to the graph in bounded batches, and folded into a ``CompactGraph`` for analysis.
 """
 
 import json
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from app.collectors.data_classifier import RULES
-from app.collectors.staging import canonical_json
+from app.collectors.staging import REFERENCE, canonical_json
 from app.core.config import get_settings
-from app.db.models import StagedEntity
+from app.db.models import StagedEntity, UploadSession
 from app.graph.compact import DATA, CompactGraph
 from app.graph.policies import PolicyBudgetExceeded, store_policies
 from app.graph.repository import EdgeRow, GraphStore, NodeRow
@@ -29,7 +32,9 @@ STREAM_BATCH = 5000
 
 
 class PublicationConflict(ValueError):
-    pass
+    """Sources disagree or do not fit together; the message names no payload values."""
+
+
 
 
 class RevisionTooLarge(ValueError):
@@ -48,6 +53,7 @@ class PublishedRevision:
     analysis: object  # app.graph.analysis.ComputedAnalysis
     graph: CompactGraph  # For publish-time clustering; dropped by the caller after use.
     policies: int = 0  # Policy attachments stored for the revision.
+    warnings: list[str] = field(default_factory=list)  # Publication warnings for the job result.
 
 
 def check_conflicts(db: Session, set_ids: list[str]) -> None:
@@ -65,6 +71,50 @@ def check_conflicts(db: Session, set_ids: list[str]) -> None:
         raise PublicationConflict(
             f"Conflicting {conflict} definitions across sources; reconcile IDs before publishing"
         )
+
+
+UNRESOLVED_WARNING = "unresolved_references"
+MAX_UNRESOLVED_EXAMPLES = 5
+
+
+@dataclass
+class UnresolvedReferences:
+    ids: set[str]  # Referenced IDs no active set defines.
+    examples: list[tuple[str, str]]  # (source, reference ID), bounded.
+    edges_dropped: int = 0
+
+    def warning(self) -> str:
+        shown = ", ".join(f"{source}: {node_id[:200]}" for source, node_id in self.examples)
+        more = len(self.ids) - len(self.examples)
+        return (
+            f"{UNRESOLVED_WARNING}: {len(self.ids)} referenced node(s) are not defined by any source of "
+            f"this tenant; {self.edges_dropped} edge(s) ending at them were dropped. Publish the source "
+            f"that defines them, or restate or remove the references ({shown}"
+            + (f", and {more} more" if more > 0 else "")
+            + ")"
+        )
+
+
+def unresolved_references(db: Session, set_ids: list[str]) -> UnresolvedReferences:
+    """Node references (``GraphSnapshot.references``) that no active set of the tenant defines.
+    A reference is never a definition, so it never conflicts; an unresolved one only loses its edges."""
+    reference, node = aliased(StagedEntity), aliased(StagedEntity)
+    rows = db.execute(
+        select(reference.entity_id, UploadSession.source)
+        .join(UploadSession, UploadSession.id == reference.session_id)
+        .where(
+            reference.session_id.in_(set_ids),
+            reference.kind == REFERENCE,
+            ~select(node.entity_id)
+            .where(node.session_id.in_(set_ids), node.kind == "node", node.entity_id == reference.entity_id)
+            .exists(),
+        )
+        .order_by(UploadSession.source, reference.entity_id)
+    ).all()
+    found = UnresolvedReferences({node_id for node_id, _ in rows}, [])
+    for node_id, source in rows[:MAX_UNRESOLVED_EXAMPLES]:
+        found.examples.append((source, node_id))
+    return found
 
 
 def check_caps(db: Session, set_ids: list[str], max_nodes: int, max_edges: int) -> None:
@@ -121,9 +171,19 @@ def publish_sets(
     settings = get_settings()
     check_conflicts(db, set_ids)
     check_caps(db, set_ids, settings.max_nodes, settings.max_edges)
+    unresolved = unresolved_references(db, set_ids)
+    if unresolved.ids:
+        unresolved.edges_dropped = sum(
+            1
+            for _, _, source, target, _ in _stream(db, set_ids, "edge")
+            if source in unresolved.ids or target in unresolved.ids
+        )
     size = settings.graph_batch_size
     compact = CompactGraph()
-    graph.begin_revision(tenant, revision, "combined", combined_warnings(db, set_ids))
+    warnings = combined_warnings(db, set_ids)
+    if unresolved.ids:
+        warnings = [*warnings[: MAX_COMBINED_WARNINGS - 1], unresolved.warning()]
+    graph.begin_revision(tenant, revision, "combined", warnings)
 
     # Nodes: first appearance wins; IDs in the classification namespace are written
     # last because classification may redefine them (as classification_edges does).
@@ -194,9 +254,11 @@ def publish_sets(
             edges.clear()
 
     seen_edges: set[str] = set()
-    for entity_id, _, _, _, payload in _stream(db, set_ids, "edge"):
+    for entity_id, _, source, target, payload in _stream(db, set_ids, "edge"):
         if entity_id in seen_edges:
             continue
+        if unresolved.ids and (source in unresolved.ids or target in unresolved.ids):
+            continue  # Ends at a reference no source defines (counted in the warning).
         seen_edges.add(entity_id)
         if entity_id in generated:
             edge = generated.pop(entity_id)
@@ -221,4 +283,6 @@ def publish_sets(
     except PolicyBudgetExceeded as exc:
         raise RevisionTooLarge(str(exc)) from None
     graph.finish_revision(tenant, revision)
-    return PublishedRevision(nodes, edge_count, analysis, compact, policies)
+    return PublishedRevision(
+        nodes, edge_count, analysis, compact, policies, [unresolved.warning()] if unresolved.ids else []
+    )

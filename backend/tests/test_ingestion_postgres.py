@@ -1016,3 +1016,46 @@ def test_usage_commit_aggregates_and_policies_copy_on_postgres(postgres_environm
         assert db.scalar(select(func.count()).select_from(RevisionPolicy)) == 1
         assert db.scalar(select(RevisionPolicyDocument.size_bytes)) > 0
         assert principal_policies(db, "tenant", "initial", "role:a").policies[0].document == {"Statement": []}
+
+
+def test_node_references_resolve_in_sql_on_postgres(postgres_environment):
+    """References never conflict, resolve against the tenant's sets only, and drop their edges with a warning when unresolved."""
+    factory, graph = postgres_environment
+    role = "arn:aws:iam::123456789012:role/runtime"
+
+    def submit(source, snapshot, tenant="tenant"):
+        job_id = str(uuid4())
+        with factory() as db:
+            db.add(IngestionJob(id=job_id, tenant_id=tenant, actor="a", source=source,
+                                payload=snapshot.model_dump(mode="json")))  # fmt: skip
+            db.commit()
+        with patch.object(tasks, "collect", return_value=snapshot):
+            tasks.process_job(job_id)
+
+    def aws(metadata):
+        return GraphSnapshot(nodes=[Node(id=role, name="runtime", type=NodeType.ROLE, metadata=metadata)])
+
+    agents = GraphSnapshot.model_validate(
+        {
+            "nodes": [{"id": "agent", "name": "agent", "type": "AIAgent"}],
+            "edges": [{"source": "agent", "target": role, "type": "ASSUMES_ROLE"}],
+            "references": [role],
+        }
+    )
+    with factory() as db:
+        db.add(TenantState(tenant_id="other", revision="initial"))
+        db.commit()
+    submit("aws", aws({"v": 1}), tenant="other")
+    submit("agents", agents)  # Unresolved in this tenant: published without the edge, with a warning.
+    with factory() as db:
+        revision = db.get(TenantState, "tenant").revision
+    published = graph.snapshot("tenant", revision)
+    assert published.edges == [] and any(w.startswith("unresolved_references: 1") for w in published.warnings)
+    submit("aws", aws({"v": 1}))
+    submit("agents", agents)
+    submit("aws", aws({"v": 2}))
+    with factory() as db:
+        revision = db.get(TenantState, "tenant").revision
+    published = graph.snapshot("tenant", revision)
+    assert [n.metadata for n in published.nodes if n.id == role] == [{"v": 2}]
+    assert [(e.source, e.target) for e in published.edges] == [("agent", role)]
