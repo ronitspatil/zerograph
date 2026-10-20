@@ -99,14 +99,19 @@ print(json.dumps({"seconds": time.perf_counter() - started, "results": results,
 # (remove_assumption and usage-aware tiers). Graph writes, analysis and clusters do not
 # depend on usage and run identically in both arms.
 ANALYSIS_PHASES = ("usage_load", "topics_compute", "topics_store", "proposals_compute", "proposals_store")
-# Usage overhead budgets (seconds). The analysis overhead is the per-phase floor over
-# the paired publishes (scripts/timing.py: the fastest run of each phase per arm), so
-# contention, which only adds time, rarely reaches it while a regression, present in
-# every run, does. Measured 3.1-4.5 s on a quiet Apple M5 at 100k and up to 5.8 s
-# under heavy contention, most of it storing the usage-driven proposals; a 2 s
-# regression measured 7.0 s. The end-to-end publish (fastest with minus fastest
-# without) adds the graph writes, which drift by seconds, and keeps a looser bound.
-ANALYSIS_OVERHEAD_BUDGET_S = 6
+# The analysis phases split into computation in the worker and storing rows in
+# PostgreSQL. The computation floor is steady (2.3-3.2 s at 100k on an Apple M5, also
+# under heavy contention); a 2 s regression measured 4.4-4.5 s. Storing is I/O and its
+# floor varies by about 2 s between runs (0.8-3.1 s), so it keeps a looser budget.
+COMPUTE_PHASES = ("usage_load", "topics_compute", "proposals_compute")
+STORE_PHASES = ("topics_store", "proposals_store")
+# Usage overhead budgets (seconds), on per-phase floors over the paired publishes
+# (scripts/timing.py: the fastest run of each phase per arm): contention only adds
+# time and rarely reaches every run of a phase, a regression is in every run. The
+# end-to-end publish (fastest with usage minus fastest without) adds the graph writes,
+# which drift by seconds, and keeps the loosest bound.
+COMPUTE_OVERHEAD_BUDGET_S = 3.75
+STORE_OVERHEAD_BUDGET_S = 4
 PUBLISH_OVERHEAD_BUDGET_S = 10
 
 DATA = {"Database", "VectorStore", "S3Bucket", "DataTable"}
@@ -665,15 +670,25 @@ def main() -> None:  # noqa: C901 - one linear qualification run
                 pairs.append((pair["without"], pair["with"]))
             without = [a for a, _ in pairs]
             enabled = [b for _, b in pairs]
-            floor = phase_floor(
-                [a["phases_s"] for a in without], [b["phases_s"] for b in enabled], ANALYSIS_PHASES
+            compute = phase_floor(
+                [a["phases_s"] for a in without], [b["phases_s"] for b in enabled], COMPUTE_PHASES
             )
+            store = phase_floor([a["phases_s"] for a in without], [b["phases_s"] for b in enabled], STORE_PHASES)
             publish_floor = round(min(b["seconds"] for b in enabled) - min(a["seconds"] for a in without), 2)
             windows.append(
-                {"pairs": len(pairs), "analysis_floor_seconds": floor["total"], "publish_floor_seconds": publish_floor}
+                {
+                    "pairs": len(pairs),
+                    "compute_floor_seconds": compute["total"],
+                    "store_floor_seconds": store["total"],
+                    "publish_floor_seconds": publish_floor,
+                }
             )
             print(json.dumps(windows[-1]), flush=True)
-            if floor["total"] <= ANALYSIS_OVERHEAD_BUDGET_S and publish_floor <= PUBLISH_OVERHEAD_BUDGET_S:
+            if (
+                compute["total"] <= COMPUTE_OVERHEAD_BUDGET_S
+                and store["total"] <= STORE_OVERHEAD_BUDGET_S
+                and publish_floor <= PUBLISH_OVERHEAD_BUDGET_S
+            ):
                 break
         analysis_median = paired([a["analysis_seconds"] for a in without], [b["analysis_seconds"] for b in enabled])
         publish_median = paired([a["seconds"] for a in without], [b["seconds"] for b in enabled])
@@ -682,9 +697,15 @@ def main() -> None:  # noqa: C901 - one linear qualification run
             "order": [list(order) for order in arm_order(args.publish_runs)],
             "windows": windows,
             "analysis_phases": list(ANALYSIS_PHASES),
-            "budgets_seconds": {"analysis": ANALYSIS_OVERHEAD_BUDGET_S, "publish": PUBLISH_OVERHEAD_BUDGET_S},
-            "analysis_floor_seconds": floor["total"],
-            "analysis_floor_by_phase_seconds": floor["phases"],
+            "budgets_seconds": {
+                "compute": COMPUTE_OVERHEAD_BUDGET_S,
+                "store": STORE_OVERHEAD_BUDGET_S,
+                "publish": PUBLISH_OVERHEAD_BUDGET_S,
+            },
+            "compute_floor_seconds": compute["total"],
+            "store_floor_seconds": store["total"],
+            "analysis_floor_seconds": round(compute["total"] + store["total"], 3),
+            "analysis_floor_by_phase_seconds": {**compute["phases"], **store["phases"]},
             "publish_floor_seconds": publish_floor,
             # Paired differences (each with-run against the without-run beside it), for context.
             "analysis_deltas_seconds": analysis_median["deltas"],
@@ -939,8 +960,10 @@ def main() -> None:  # noqa: C901 - one linear qualification run
         "epi_used_matches_reference_1e-6": report["epi_used"]["match"],
         "epi_inferred_matches_reference_1e-6": report["epi_inferred"]["match"],
         "role_epi_at_most_3s": report["role_epi_seconds"] <= 3,
-        f"usage_analysis_overhead_at_most_{ANALYSIS_OVERHEAD_BUDGET_S}s": overhead["analysis_floor_seconds"]
-        <= ANALYSIS_OVERHEAD_BUDGET_S,
+        f"usage_compute_overhead_at_most_{COMPUTE_OVERHEAD_BUDGET_S}s": overhead["compute_floor_seconds"]
+        <= COMPUTE_OVERHEAD_BUDGET_S,
+        f"usage_store_overhead_at_most_{STORE_OVERHEAD_BUDGET_S}s": overhead["store_floor_seconds"]
+        <= STORE_OVERHEAD_BUDGET_S,
         f"publish_overhead_at_most_{PUBLISH_OVERHEAD_BUDGET_S}s": overhead["publish_floor_seconds"]
         <= PUBLISH_OVERHEAD_BUDGET_S,
         "dormant_recall_at_least_0.9": (report["dormant"]["recall"] or 0) >= 0.9,
