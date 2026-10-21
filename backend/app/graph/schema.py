@@ -2,7 +2,7 @@ import hashlib
 import json
 import re
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -85,6 +85,8 @@ MAX_AWS_MANAGED_POLICY_BYTES = 2**20
 AWS_MANAGED_POLICY_ARN = re.compile(r"arn:(?:aws|aws-us-gov|aws-cn):iam::aws:policy/.+")
 MANAGED_POLICY_KINDS = ("managed", "boundary", "group-managed")
 MAX_SNAPSHOT_POLICIES = 50_000
+MAX_SNAPSHOT_REFERENCES = 50_000
+NodeId = Annotated[str, Field(min_length=1, max_length=512)]
 POLICY_KINDS = ("inline", "managed", "boundary", "trust", "group-inline", "group-managed")
 
 
@@ -145,6 +147,12 @@ class GraphSnapshot(BaseModel):
     source: str = Field(default="snapshot", min_length=1, max_length=128)
     # Policy documents of the snapshot's principals (stored per revision in SQL).
     policies: list[PolicyAttachment] = Field(default_factory=list, max_length=MAX_SNAPSHOT_POLICIES)
+    # IDs of nodes another source of the tenant defines (the AWS role an agent assumes): edges
+    # may end at them without restating the node, so a later change to that node's metadata is
+    # not a conflict. If no active source of the tenant defines one, publication drops the
+    # edges ending at it and warns (``unresolved_references``). A reference to a node this
+    # snapshot also defines is allowed (it resolves to that node).
+    references: list[NodeId] = Field(default_factory=list, max_length=MAX_SNAPSHOT_REFERENCES)
 
     @model_validator(mode="after")
     def validate_graph(self) -> "GraphSnapshot":
@@ -153,8 +161,11 @@ class GraphSnapshot(BaseModel):
             raise ValueError("Node IDs must be unique within a snapshot")
         if len({e.id for e in self.edges}) != len(self.edges):
             raise ValueError("Duplicate graph edges")
-        if any(e.source not in ids or e.target not in ids for e in self.edges):
-            raise ValueError("Every edge endpoint must exist in this snapshot")
+        if len(set(self.references)) != len(self.references):
+            raise ValueError("Duplicate node references")
+        known = ids.union(self.references)
+        if any(e.source not in known or e.target not in known for e in self.edges):
+            raise ValueError("Every edge endpoint must be a node or a reference of this snapshot")
         if any(p.principal not in ids for p in self.policies):
             raise ValueError("Every policy principal must exist in this snapshot")
         if len({p.id for p in self.policies}) != len(self.policies):

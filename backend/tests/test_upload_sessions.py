@@ -130,7 +130,7 @@ def test_chunk_retry_replaces_the_chunk(client, environment):
     [
         (b"not json\n", "Line 1: invalid JSON"),
         (b'{"node": {"id": "a"}}\n', "Line 1: invalid node"),
-        (b'{"vertex": {}}\n', "Line 1: expected exactly one of node, edge, policy or warning"),
+        (b'{"vertex": {}}\n', "Line 1: expected exactly one of node, edge, policy, reference or warning"),
         (b'{"node": {}, "edge": {}}\n', "Line 1: expected exactly one"),
         (b'\n{"warning": 5}\n', "Line 2: invalid warning"),
         (
@@ -177,7 +177,9 @@ def test_cross_chunk_duplicates_and_dangling_edges_are_refused(client, environme
     with patch(DELAY) as delay:
         refused = client.post(f"/api/v1/ingestions/uploads/{upload_id}/commit")
     assert refused.status_code == 422
-    assert refused.json()["detail"] == "Every edge endpoint and policy principal must exist in this snapshot"
+    assert refused.json()["detail"] == (
+        "Every edge endpoint must be a node or reference, and every policy principal a node, of this snapshot"
+    )
     delay.assert_not_called()
     # The session stays open: the client can replace the bad chunk and commit.
     assert put(client, upload_id, 1, ndjson(snapshot, nodes=False)).status_code == 200
@@ -251,13 +253,13 @@ def test_upload_sessions_are_tenant_scoped_bounded_and_expire(client, environmen
     assert client.post("/api/v1/ingestions/uploads", json={}).status_code == 403
 
 
-def enqueue(factory, source, snapshot, created_at=None):
+def enqueue(factory, source, snapshot, created_at=None, tenant="tenant-a"):
     job_id = str(uuid4())
     with factory() as db:
         db.add(
             IngestionJob(
                 id=job_id,
-                tenant_id="tenant-a",
+                tenant_id=tenant,
                 actor="alice",
                 source=source,
                 payload=snapshot.model_dump(mode="json"),
@@ -384,3 +386,162 @@ def test_worker_refuses_an_upload_not_committed_for_its_job(client, environment)
         db.commit()
     with pytest.raises(ValueError, match="not committed"):
         tasks.process_job(job_id)
+
+
+ROLE = "arn:aws:iam::123456789012:role/support-runtime"
+
+
+def aws_source(metadata: dict) -> GraphSnapshot:
+    return GraphSnapshot(
+        nodes=[
+            Node(id=ROLE, name="support-runtime", type=NodeType.ROLE, account_id="123456789012",
+                 provider="aws", metadata=metadata),
+            Node(id="arn:aws:s3:::hr", name="hr", type=NodeType.BUCKET, sensitivity="restricted"),
+        ],
+        edges=[Edge(source=ROLE, target="arn:aws:s3:::hr", type=EdgeType.READ, actions=["s3:GetObject"])],
+    )  # fmt: skip
+
+
+AGENT = Node(id="agent:bot", name="bot", type=NodeType.AGENT, internet_exposed=True, authenticated=False)
+ASSUMES = Edge(source="agent:bot", target=ROLE, type=EdgeType.ASSUMES, certainty="declared")
+
+
+def test_references_link_to_another_sources_node_across_metadata_changes(environment):
+    """An agent inventory links to the AWS role by reference: when a later collection changes
+    the role's metadata, publication still succeeds (restating the role would conflict)."""
+    factory, graph = environment
+    publish(factory, "aws", aws_source({"role_last_used": "2026-09-01"}))
+    agents = GraphSnapshot(nodes=[AGENT], edges=[ASSUMES], references=[ROLE], source="agents")
+    publish(factory, "agents", agents)
+    publish(factory, "aws", aws_source({"role_last_used": "2026-10-01"}))
+    published = graph.snapshot("tenant-a", current(factory))
+    role = next(n for n in published.nodes if n.id == ROLE)
+    assert role.metadata == {"role_last_used": "2026-10-01"}  # The defining source's metadata.
+    assert [n.id for n in published.nodes].count(ROLE) == 1
+    assert any(e.source == "agent:bot" and e.target == ROLE for e in published.edges)
+    with factory() as db:
+        assert db.get(RevisionAnalysis, ("tenant-a", current(factory))).total_findings >= 1  # bot -> hr
+    # Restating the role instead is a genuine duplicate definition: it conflicts once AWS changes it.
+    stale = aws_source({"role_last_used": "2026-09-01"}).nodes[0]
+    restated = GraphSnapshot(nodes=[AGENT, stale], edges=[ASSUMES], source="agents")
+    with pytest.raises(ValueError, match="Conflicting node definitions"):
+        run(enqueue(factory, "agents", restated), restated)
+
+
+def dangling(graph, factory, node_id=ROLE) -> bool:
+    return any(node_id in (e.source, e.target) for e in graph.snapshot("tenant-a", current(factory)).edges)
+
+
+def test_unresolved_references_drop_their_edges_and_warn(client, environment):
+    """A stale inventory never blocks publication: edges ending at a reference no source defines
+    are dropped, everything else publishes, and the revision and job carry a bounded warning."""
+    factory, graph = environment
+    agents = GraphSnapshot(
+        nodes=[AGENT, Node(id="mcp:files", name="files", type=NodeType.MCP)],
+        edges=[ASSUMES, Edge(source="agent:bot", target="mcp:files", type=EdgeType.INVOKES)],
+        references=[ROLE, *(f"arn:aws:iam::123456789012:role/gone-{i}" for i in range(7))],
+        source="agents",
+    )
+    job_id = publish(factory, "agents", agents)
+    published = graph.snapshot("tenant-a", current(factory))
+    assert {n.id for n in published.nodes} >= {"agent:bot", "mcp:files"}
+    assert [(e.source, e.target) for e in published.edges] == [("agent:bot", "mcp:files")]
+    [warning] = [w for w in published.warnings if w.startswith("unresolved_references:")]
+    assert "8 referenced node(s) are not defined by any source of this tenant" in warning
+    assert "1 edge(s) ending at them were dropped" in warning
+    assert "Publish the source that defines them, or restate or remove the references" in warning
+    assert "agents: arn:aws:iam::123456789012:role/gone-0" in warning and "and 3 more" in warning  # 5 examples
+    with factory() as db:
+        assert db.get(IngestionJob, job_id).status == "completed"
+    job = client.get(f"/api/v1/ingestions/{job_id}").json()
+    assert job["error"] is None and job["warnings"] == [warning]
+    # Once the defining source is published, that reference resolves (the 7 others still warn).
+    aws_job = publish(factory, "aws", aws_source({}))
+    assert dangling(graph, factory)
+    [warning] = [w for w in graph.snapshot("tenant-a", current(factory)).warnings if "unresolved" in w]
+    assert warning.startswith("unresolved_references: 7 ") and "0 edge(s)" in warning
+    assert client.get(f"/api/v1/ingestions/{aws_job}").json()["warnings"] == [warning]
+    # A later collection that drops the role still publishes fresh AWS data; only the edge goes.
+    dropped = GraphSnapshot(nodes=aws_source({}).nodes[1:])
+    publish(factory, "aws", dropped)
+    assert not dangling(graph, factory)
+    [warning] = [w for w in graph.snapshot("tenant-a", current(factory)).warnings if "unresolved" in w]
+    assert warning.startswith("unresolved_references: 8 ") and "1 edge(s)" in warning
+    # With every reference resolvable, no warning remains.
+    publish(factory, "agents", agents.model_copy(update={"references": [ROLE]}))
+    publish(factory, "aws", aws_source({}))
+    assert not [w for w in graph.snapshot("tenant-a", current(factory)).warnings if "unresolved" in w]
+    # Genuine conflicting definitions still fail.
+    renamed = GraphSnapshot(nodes=[Node(id="mcp:files", name="other", type=NodeType.MCP)])
+    with pytest.raises(ValueError, match="Conflicting node definitions"):
+        run(enqueue(factory, "other", renamed), renamed)
+
+
+def test_references_resolve_only_within_the_tenant(environment):
+    factory, graph = environment
+    with factory() as db:
+        db.add(TenantState(tenant_id="tenant-b", revision=None))
+        db.commit()
+    defining = aws_source({})
+    run(enqueue(factory, "aws", defining, tenant="tenant-b"), defining)
+    agents = GraphSnapshot(nodes=[AGENT], edges=[ASSUMES], references=[ROLE], source="agents")
+    run(enqueue(factory, "agents", agents), agents)
+    assert not dangling(graph, factory)  # Tenant-b's role does not resolve tenant-a's reference.
+    run(enqueue(factory, "agents", agents, tenant="tenant-b"), agents)
+    with factory() as db:
+        revision = db.get(TenantState, "tenant-b").revision
+    assert any(e.target == ROLE for e in graph.snapshot("tenant-b", revision).edges)
+
+
+def test_snapshot_reference_validation():
+    with pytest.raises(ValueError, match="must be a node or a reference"):
+        GraphSnapshot(nodes=[AGENT], edges=[ASSUMES])
+    with pytest.raises(ValueError, match="Duplicate node references"):
+        GraphSnapshot(nodes=[AGENT], edges=[ASSUMES], references=[ROLE, ROLE])
+    with pytest.raises(ValueError):
+        GraphSnapshot(references=[""])
+    # A reference to a node the snapshot defines itself resolves to that node.
+    GraphSnapshot(nodes=[AGENT, *aws_source({}).nodes], edges=[ASSUMES], references=[ROLE])
+
+
+def test_ndjson_reference_lines(client, environment):
+    factory, graph = environment
+    defining = aws_source({})
+    run(enqueue(factory, "aws", defining), defining)
+    lines = [{"node": AGENT.model_dump(mode="json")}, {"edge": ASSUMES.model_dump(mode="json")}]
+    upload_id = start(client)
+    body = ("\n".join(json.dumps(line) for line in lines) + "\n").encode()
+    assert put(client, upload_id, 0, body).status_code == 200
+    with patch(DELAY):
+        assert client.post(f"/api/v1/ingestions/uploads/{upload_id}/commit").status_code == 422
+    duplicate = body + ((json.dumps({"reference": ROLE}) + "\n") * 2).encode()
+    assert put(client, upload_id, 0, duplicate).status_code == 422
+    assert put(client, upload_id, 1, (json.dumps({"reference": ROLE}) + "\n").encode()).status_code == 200
+    with patch(DELAY):
+        committed = client.post(f"/api/v1/ingestions/uploads/{upload_id}/commit")
+    assert committed.status_code == 202, committed.text
+    tasks.process_job(committed.json()["id"])
+    published = graph.snapshot("tenant-a", current(factory))
+    assert any(e.source == "agent:bot" and e.target == ROLE for e in published.edges)
+    with factory() as db:
+        assert db.scalar(select(func.count()).select_from(StagedEntity).where(StagedEntity.kind == "ref")) == 1
+
+
+def test_mcp_inventory_references_roles_and_tool_targets():
+    from app.collectors.mcp_agent_collector import MCPInventory, collect_mcp
+
+    inventory = MCPInventory.model_validate(
+        {
+            "mcpServers": {"files": {"command": "x"}},
+            "bindings": {"files": [{"name": "read", "target_id": "arn:aws:s3:::hr"}]},
+            "agents": [{"id": "bot", "name": "bot", "servers": ["files"], "roles": [ROLE]}],
+        }
+    )
+    snapshot = collect_mcp(inventory)
+    assert snapshot.references == sorted([ROLE, "arn:aws:s3:::hr"])
+    assert {(e.source, e.target, e.type) for e in snapshot.edges} >= {
+        ("agent:bot", ROLE, EdgeType.ASSUMES),
+        ("mcp:files", "arn:aws:s3:::hr", EdgeType.READ),
+    }
+    with pytest.raises(ValueError, match="exactly one of target or target_id"):
+        MCPInventory.model_validate({"bindings": {"files": [{"name": "read"}]}})

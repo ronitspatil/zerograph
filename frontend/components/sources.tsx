@@ -171,6 +171,11 @@ export function Sources({
                       {j.error && (
                         <small className="job-error">{j.error}</small>
                       )}
+                      {j.warnings?.map((w, i) => (
+                        <small key={i} className="job-warning">
+                          {w}
+                        </small>
+                      ))}
                     </td>
                     <td>
                       <span

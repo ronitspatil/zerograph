@@ -87,7 +87,7 @@ from app.graph.compact import (
     UNEVALUATED,
     CompactGraph,
 )
-from app.graph.policies import PolicyIndex, policy_index
+from app.graph.policies import PolicyIndex, account_of, policy_index
 from app.graph.privilege import data_service
 from app.graph.schema import EdgeType
 from app.graph.sweep import SWEEP_TENANTS, run_sweep
@@ -96,7 +96,13 @@ from app.graph.whatif import BASIS_CODES, IDENTITY_RECORD, ROLE_RECORD, WhatIfMo
 # Bump when proposal types, tiers, evidence or stored fields change: other versions read as missing.
 # 2: remove_assumption; identity use includes attributed role-session use.
 # 3: nothing is proposed for (or merged into) the collector's own identity.
-PROPOSAL_VERSION = 3
+# 4: removing a grant of a wildcard identity statement (expanded to concrete actions by the
+#    collector) is never-auto ``wildcard``.
+# 5: trust-affecting proposals on a role another account can assume (its trust policy names a
+#    principal of another account, or any principal) are never-auto ``cross_account``; a hop
+#    from a node with no AWS account (an agent, MCP server...) is ``non_aws``, not cross-account
+#    (``trust_scope`` evidence).
+PROPOSAL_VERSION = 5
 TIERS = ("high", "medium", "low", "inferred", "manual")
 TYPES = (
     "remove_grant",
@@ -126,7 +132,7 @@ NEVER_AUTO = {
     "deny": "A Deny statement applies to it",
     "resource_policy": "Granted outside the principal's identity policies (resource policy)",
     "trust": "Changes a role trust policy (who can assume which role)",
-    "cross_account": "Changes a trust relationship across accounts",
+    "cross_account": "Changes a trust relationship across accounts, or a role another account can assume",
     "service_linked": "Service-linked role (managed by the AWS service)",
     "break_glass": "Break-glass, emergency or disaster-recovery identity",
     "kms": "KMS key access (governed by key policies)",
@@ -330,6 +336,25 @@ def compute_proposals(
             found.append("unevaluated_policy")
         return found
 
+    def account(node: int) -> str:
+        """The node's AWS account (``account_id``, else its ARN); ``""`` for non-AWS nodes."""
+        return graph.account[node] or account_of(ids[node])
+
+    def trust_reasons(*roles: int) -> list[str]:
+        """``cross_account`` when another account (or anyone) may assume one of ``roles``."""
+        if any(policies.external_trust(ids[role], account(role)) for role in roles):
+            return ["cross_account"]
+        return []
+
+    def hop_scope(source: int, role: int) -> str:
+        """Scope of the trust hop ``source`` -> ``role``: ``cross_account`` when both ends are in
+        known, different accounts or the role's trust policy names another account;
+        ``same_account``; else ``non_aws`` (an end with no AWS account: an agent, MCP server...)."""
+        first, second = account(source), account(role)
+        if (first and second and first != second) or policies.external_trust(ids[role], second):
+            return "cross_account"
+        return "same_account" if first and second else "non_aws"
+
     def classify(holder: int, item: int) -> tuple[int, list[str], dict] | None:
         """(tier, never-auto reasons, evidence) for removing ``holder``'s grant on ``item``."""
         service = data_service(graph, item)
@@ -483,6 +508,8 @@ def compute_proposals(
                     guards["skipped_observed"] += 1
                     continue
             reasons = node_reasons(node)
+            if kind == DISABLE_ROLE:
+                reasons += trust_reasons(node)
             base = LOW if row["hint_conflict"] else HIGH
             evidence = {
                 "basis": row["basis"],
@@ -491,6 +518,8 @@ def compute_proposals(
                 "granted_weight": row["reach_weight"],
                 "type": types[node],
             }
+            if kind == DISABLE_ROLE:
+                evidence["external_trust"] = "cross_account" in reasons
             if kind == DISABLE_IDENTITY and present:
                 roles = [r for r in context.hops.get(node, ()) if r in role_rows]
                 evidence["attribution"] = "attributed" if usage.attribution_ready else "role_level"
@@ -550,7 +579,8 @@ def compute_proposals(
                 else:
                     base = MEDIUM
                 reasons = ["trust", *node_reasons(node), *node_reasons(role)]
-                if graph.account[node] != graph.account[role]:
+                scope = hop_scope(node, role)
+                if scope == "cross_account":
                     reasons.append("cross_account")
                 attributed_events, session_events = usage.role_sessions.get(role, (0, 0))
                 proposals.append(
@@ -573,6 +603,7 @@ def compute_proposals(
                             "role_used_by_others": role in session_roles,
                             "role_granted_weight": role_rows[role]["reach_weight"],
                             "identity_roles_used": len(used_roles),
+                            "trust_scope": scope,
                         },
                     )
                 )
@@ -622,8 +653,9 @@ def compute_proposals(
             (item for item in direct[retire] - direct[keep] if item in data_used.get(retire, ())),
             key=ids.__getitem__,
         )
-        reasons = ["trust", *node_reasons(keep), *node_reasons(retire)]
-        if graph.account[keep] != graph.account[retire]:
+        reasons = ["trust", *node_reasons(keep), *node_reasons(retire), *trust_reasons(keep, retire)]
+        first, second = account(keep), account(retire)
+        if first and second and first != second:
             reasons.append("cross_account")
         proposals.append(
             Proposal(
@@ -671,7 +703,7 @@ def compute_proposals(
         groups: dict[int, list[str]] = {t: [] for t in parts}
         for item in sorted(used, key=ids.__getitem__):
             groups[resource_topic[item] if resource_topic[item] in groups else main].append(ids[item])
-        reasons = ["trust", *node_reasons(role)]
+        reasons = ["trust", *node_reasons(role), *trust_reasons(role)]
         proposals.append(
             Proposal(
                 SPLIT,
@@ -763,8 +795,10 @@ def compute_proposals(
         else:
             trust = (a, b) in assumes_pairs
             reasons = ["trust" if trust else "structure", *node_reasons(a), *node_reasons(b)]
-            if trust and graph.account[a] != graph.account[b]:
-                reasons.append("cross_account")
+            if trust:
+                evidence["trust_scope"] = hop_scope(a, b)
+                if evidence["trust_scope"] == "cross_account":
+                    reasons.append("cross_account")
             proposals.append(
                 Proposal(
                     TOXIC,

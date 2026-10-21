@@ -327,6 +327,46 @@ one bucket) collect 81 principals x 100 buckets with the default limits (55,080
 evaluations, 80 edges, 0.6 s) and 300 x 300 with `max_evaluations` raised to 1,000,000
 (629,700 evaluations, 299 edges, 2.7 s), the edges exactly the planted grants.
 
+**Enterprise simulation** (`backend/scripts/qualify_enterprise_sim.py --output DIR
+[--database-url postgresql+psycopg://...]`). The whole pipeline against an emulated
+enterprise member account (moto, no AWS account), with a planted ground truth: 1,469 IAM
+roles (application roles in 8 topics, near-duplicates, dormant and out-of-window roles,
+developer/operator roles assumed through group policies, 10 Identity Center permission-set
+roles, AWS-managed admin hubs, 22 service-linked roles, break-glass, GitHub OIDC and
+partner-account roles), 400 users in 40 Identity-Center-style groups, 300 buckets
+(tag/name topics, bucket policies, an Object Ownership and encryption mix), 7 Glue
+databases / 29 tables (one Lake Formation governed with named and column grants, hybrid
+others, LF-Tags), 5 Athena workgroups and a toxic path (an exposed, unauthenticated agent
+that may assume a role reading restricted HR data, submitted as a second source that
+references the AWS role by ID). 95 days
+of activity become 451,603 CloudTrail records in 91 export files (user, AWS service,
+SAML with `onBehalfOf`, web identity and partner sessions, mixed-case Glue names, 315
+denied attempts, sessions issued before the window and activity entirely outside it).
+The run collects through `ZG_AWS_ROLE_ARN`/`ZG_AWS_COLLECTION_LIMITS` and the worker job,
+uploads the trail through `/usage/uploads`, runs the topic and proposal sweeps, accepts a
+sample, simulates it and rolls it out as draft PRs against `tests/fake_git.py`. Between
+the agent inventory and the trail it tags the agent's role and collects again: the change
+publishes without a conflict (restating the role, the former approach, conflicts; a
+reference no source defines publishes with its edge dropped and an
+`unresolved_references` warning on the revision and the job). On SQLite and on PostgreSQL 16
+(memory graph) all 103 checks pass in 164-182 s (the re-collection and three agent
+inventory publications add about 45 s to the 117-140 s of the 89 checks below), peak RSS
+about 1 GB: inventory complete (6.2 million evaluations, 20,553 edges, 47 s), topics 100%
+(tagged, name-only and role primary topics), EPI equal to the brute force for 1,872
+members and 9 topics, dormant recall 1.0 (98 roles, 56 users), never-assumed recall 1.0
+(204), high-tier `remove_grant` precision and recall 1.0 (193 proposed; 152 role and
+40 group over-grants planted), every never-auto category manual (including `disable_role`
+of the 10 dormant roles partner accounts trust: `cross_account`, base tier high; the 80
+same-account dormant roles keep their tiers), the toxic path's agent-to-role hop manual
+`trust` with `trust_scope: non_aws` (not `cross_account`), nothing proposed for
+the collector or against observed use, canary gating, a byte-exact revert and the
+AccessDenied auto-revert (draft, never merged). It found the collection limits fixed in
+`ZG_AWS_COLLECTION_LIMITS` and wildcard statements (`AdministratorAccess`, `s3:*`,
+`database/*` patterns), which the collector expands to concrete actions, giving
+high-tier removals instead of never-auto `wildcard`. Every moto gap is listed in the
+report's `moto_gaps` (ListBuckets pagination, Access Advisor, Organizations from a member,
+LF-Tag search, implicit `IAM_ALLOWED_PRINCIPALS`, no IAM authorization or CloudTrail).
+
 ## Provision a sandbox read role
 
 `deploy/aws/collector-role-policy.example.json` is a narrow example for sandbox
@@ -462,9 +502,13 @@ The evaluation preflight is `principals × buckets × 6 + principals × roles �
 where principals are roles plus users. The default 500-role and 500-bucket bounds
 are **individual ceilings**, not simultaneous capacity: 500 of each exceeds 100,000
 evaluations and fails before enrichment. A 100-role/100-bucket inventory without
-users needs 69,900 evaluations. Operators may construct
-`CollectionLimits` within hard caps for an approved larger sandbox; no unbounded
-CLI override is exposed. Account inventory is not an AWS transaction and may
+users needs 69,900 evaluations. For larger accounts the in-app job takes
+`ZG_AWS_COLLECTION_LIMITS`, a JSON object of `CollectionLimits` fields (for example
+`{"max_roles": 2500, "max_users": 1000, "max_evaluations": 12000000, "max_edges": 100000}`
+for a 1,500-role, 400-user, 300-bucket account), validated against the hard ceilings
+(10,000 roles, users and buckets; 100,000,000 evaluations; 500,000 edges; the 600-second
+wall-time budget is not raisable) before AssumeRole; unknown names fail the job. No
+unbounded CLI override is exposed. Account inventory is not an AWS transaction and may
 change during scanning; conflicting duplicates are rejected rather than guessed.
 
 `sdk_requests` counts collector SDK invocations, excluding the single bootstrap

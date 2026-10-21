@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     # Glue Data Catalog, Lake Formation and Athena inventory (needs the data lake read
     # permissions; denials are warnings, never failures).
     aws_data_lake: bool = True
+    # Collection budgets above the defaults for large accounts, e.g.
+    # ``{"max_roles": 2500, "max_evaluations": 12000000}`` (``CollectionLimits`` fields,
+    # each within its hard ceiling; validated before AssumeRole).
+    aws_collection_limits: dict[str, int] = Field(default_factory=dict)
     # Peer baseline for inferred need: a grant is needed when at least this share of
     # same-topic, same-role peers were observed using it.
     peer_baseline_share: float = Field(default=0.5, gt=0, le=1)
@@ -60,6 +64,10 @@ class Settings(BaseSettings):
     git_base_branch: str = "main"
     git_token: SecretStr = SecretStr("")
     git_policy_prefix: str = "security/zerograph"
+    # GitLab instance (self-managed GitLab: its external URL, optionally with a relative
+    # root). HTTPS; plain HTTP only on a loopback host outside production (local
+    # qualification). GitHub always uses api.github.com.
+    git_gitlab_url: str = "https://gitlab.com"
     # Optimizer rollout: canary watch window after a change is marked merged, and the
     # AccessDenied events (per change, inside the window) that flag it for revert.
     rollout_watch_days: int = Field(default=7, ge=1, le=90)

@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -8,9 +8,9 @@ from loguru import logger
 from sqlalchemy import or_, select, update
 
 from app.collectors import staging
-from app.collectors.aws_collector import AWSCollector, expected_target
+from app.collectors.aws_collector import AWSCollector, CollectionLimits, expected_target
 from app.collectors.mcp_agent_collector import MCPInventory, collect_mcp
-from app.collectors.publication import publish_sets
+from app.collectors.publication import PublicationConflict, publish_sets
 from app.core.auth import Actor
 from app.core.config import get_settings
 from app.db.locks import acquire_pointer_gate, acquire_publication_lock
@@ -54,6 +54,15 @@ class StagedUpload:
     session_id: str
 
 
+def collection_limits(configured: dict[str, int]) -> CollectionLimits:
+    """``ZG_AWS_COLLECTION_LIMITS`` over the defaults; unknown names or values beyond a hard
+    ceiling fail the job before any AWS call."""
+    unknown = sorted(set(configured) - {item.name for item in fields(CollectionLimits)})
+    if unknown:
+        raise ValueError(f"Unknown AWS collection limit: {', '.join(unknown)}")
+    return CollectionLimits(**configured)
+
+
 def collect(source: str, payload: dict, tenant: str) -> GraphSnapshot | StagedUpload:
     if source == "snapshot":
         if set(payload) == {"upload_session"}:
@@ -68,6 +77,7 @@ def collect(source: str, payload: dict, tenant: str) -> GraphSnapshot | StagedUp
             raise ValueError("No AWS collector is configured for this tenant")
         # Fail closed before AssumeRole on a malformed target; STS identity is checked before inventory.
         account, role_arn = expected_target(settings.aws_role_arn, settings.aws_account_id)
+        limits = collection_limits(settings.aws_collection_limits)
         session = boto3.Session(region_name=settings.aws_region)
         kwargs = {"RoleArn": settings.aws_role_arn, "RoleSessionName": "ZeroGraphReadOnly"}
         if settings.aws_external_id.get_secret_value():
@@ -81,6 +91,7 @@ def collect(source: str, payload: dict, tenant: str) -> GraphSnapshot | StagedUp
         )
         return AWSCollector(
             session,
+            limits=limits,
             expected_account=account,
             expected_role_arn=role_arn,
             access_advisor=settings.aws_access_advisor,
@@ -131,7 +142,7 @@ def _claim_job(job_id: str) -> tuple[str, str, dict, str] | None:
         return result
 
 
-def _record_failure(job_id: str, token: str) -> None:
+def _record_failure(job_id: str, token: str, error: str = FAILURE_MESSAGE) -> None:
     with session_factory()() as db:
         job = db.execute(
             select(IngestionJob)
@@ -145,7 +156,7 @@ def _record_failure(job_id: str, token: str) -> None:
         if job is None:
             return  # A stale worker must not change the new owner's state.
         job.status = "failed" if job.attempt_count >= MAX_ATTEMPTS else "retrying"
-        job.error = FAILURE_MESSAGE
+        job.error = error
         job.available_at = now() + timedelta(seconds=10 * 2 ** (job.attempt_count - 1))
         job.lease_token = None
         job.lease_expires_at = None
@@ -162,8 +173,9 @@ def process_job(job_id: str) -> None:
     try:
         snapshot = collect(source, payload, tenant)
         _publish_job(job_id, token, tenant, snapshot)
-    except Exception:
-        _record_failure(job_id, token)
+    except Exception as exc:
+        # Conflicts between sources are client-correctable and their messages name no payload values.
+        _record_failure(job_id, token, str(exc) if isinstance(exc, PublicationConflict) else FAILURE_MESSAGE)
         raise
 
 
@@ -294,6 +306,8 @@ def _publish_job(job_id: str, token: str, tenant: str, collected: GraphSnapshot 
         state.revision = revision
         state.updated_at = now()
         _complete(db, job)
+        if published.warnings:
+            job.payload = {"warnings": published.warnings}  # Shown with the job (never credentials).
         job.node_count = published.nodes
         audit(
             db,

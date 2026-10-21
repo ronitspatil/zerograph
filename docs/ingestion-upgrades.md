@@ -73,8 +73,8 @@ publication lock, so the upgrade itself needs no graph access and stays fast.
 
 Large snapshots use upload sessions: `POST /api/v1/ingestions/uploads` (admin)
 returns a session; `PUT /api/v1/ingestions/uploads/{id}/chunks/{n}` stages one
-NDJSON chunk (at most the 4 MB body limit; lines `{"node": …}`, `{"edge": …}` or
-`{"warning": "…"}`), validating each line with the same models as the single-body
+NDJSON chunk (at most the 4 MB body limit; lines `{"node": …}`, `{"edge": …}`,
+`{"policy": …}`, `{"reference": "<node ID>"}` or `{"warning": "…"}`), validating each line with the same models as the single-body
 endpoint and refusing duplicates within the chunk or across chunks; resending a
 chunk number replaces it. `POST …/commit` checks edge endpoints in SQL and queues
 the ingestion job (`payload = {"upload_session": id}`). Sessions expire after
@@ -99,6 +99,50 @@ staged rows (no whole-graph Pydantic snapshot). Publishers serialize per tenant 
 swap and the commit of the analysis rows, so dashboard readers are not blocked
 while a revision builds. An abandoned build stays `building` and is removed by
 retention once stale ([graph-retention.md](graph-retention.md)).
+
+### Node references across sources
+
+A source may link to a node another source of the tenant defines without restating
+it: list its ID in the snapshot's `references` (or send `{"reference": "<node ID>"}`
+NDJSON lines), and edges may then end at it. The typical case is an agent or MCP
+inventory naming the AWS role an agent runs as: the role is defined (and its metadata
+owned) by the AWS collector, so a later collection that changes the role's metadata is
+not a conflict. Restating the node instead is a second definition, and differing
+definitions still fail publication.
+
+```json
+{
+  "source": "agents",
+  "nodes": [{"id": "agent:support-chatbot", "type": "AIAgent", "name": "support-chatbot"}],
+  "references": ["arn:aws:iam::123456789012:role/ml-support-agent-runtime"],
+  "edges": [{"source": "agent:support-chatbot", "type": "ASSUMES_ROLE", "certainty": "declared",
+             "target": "arn:aws:iam::123456789012:role/ml-support-agent-runtime"}]
+}
+```
+
+The MCP inventory (`source: "mcp"`) accepts the same by ID: an agent's `roles` (role
+IDs it assumes, as declared `ASSUMES_ROLE` edges) and a tool binding's `target_id`
+instead of a restated `target` node.
+
+Rules: references are unique within a snapshot and at most 50,000; an edge endpoint
+must be a node or a reference of the same snapshot (checked on validation and on
+upload commit); policy principals must still be nodes of the snapshot; a reference to
+a node the snapshot defines itself simply resolves to it. At publication a reference
+resolves only to a node defined by some active source **of the same tenant**. An
+unresolved reference never blocks publication (a stale inventory must not freeze fresh
+AWS data): the edges ending at it are dropped, everything else publishes, and the
+revision carries one bounded warning, also returned in the job's `warnings` and shown
+under the job in Data sources and in the console's coverage notice:
+
+    unresolved_references: N referenced node(s) are not defined by any source of this
+    tenant; M edge(s) ending at them were dropped. Publish the source that defines them,
+    or restate or remove the references (<source>: <id>, ... up to 5, and K more)
+
+This includes a later collection that drops a referenced node: the AWS data publishes,
+and the agent's edge to the dropped role disappears until the inventory is fixed.
+Differing definitions of one node or edge ID still fail publication as before.
+References are stored as `staged_entities` rows of kind `ref`, are never counted as
+nodes, and never take part in conflict detection.
 
 Run the Cypher schema migration (`python -m app.db.migrate`) to add the
 `(tenant_id, revision, id)` entity index (`003_entity_scope_id.cypher`, Memgraph
