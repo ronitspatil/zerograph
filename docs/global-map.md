@@ -90,10 +90,10 @@ On Memgraph 3.2.0 and PostgreSQL 16 (the same 100k revision published through th
 
 | 5,000 / 20,000 on Memgraph | First frame (median) | API (browser) | Worker reply after click |
 |---|---|---|---|
-| Before | 1.12 s | 480 ms | 607 ms |
-| Now | 0.94 s | 357 ms | 504 ms |
+| Before | 1.15 s (1.05-1.36) | 476 ms | 621 ms |
+| Now | 0.96 s (0.93-1.00) | 368 ms | 508 ms |
 
-Two changes: the expansion query reads each relationship among the new members once, from its source, and reads incoming relationships only from members of clusters already on screen (the undirected match sent every payload twice; 351 to 249 ms in process); and member relationships are haystack edges with a rule of their own, so adding 20,000 of them skips the per-edge endpoint and control-point geometry (the main thread from the worker's reply to the drawn frame went from about 515 to 430 ms). Frame rate is unchanged (59 fps, p95 16.7 ms).
+Two changes: the expansion query reads each relationship among the new members once, from its source, and reads incoming relationships only from members of clusters already on screen (the undirected match sent every payload twice; 351 to 249 ms in process); and member relationships are haystack edges with a rule of their own, so adding 20,000 of them skips the per-edge endpoint and control-point geometry (the main thread from the worker's reply to the drawn frame went from about 530 to 450 ms). Frame rate is unchanged (59 fps, p95 16.7 ms).
 
 The canvas fallback's frame rate comes from panning a cached texture (`textureOnViewport`): the view is not redrawn while it moves. Drawn every frame, as on the Phase 4 benchmark page, the canvas renderer manages 10.7 fps at 5,000 nodes and WebGL 60 fps; at 20,000 nodes (above the console's 5,000 cap, informational) WebGL draws 17.3 fps (p95 62 ms, first frame 2.0 s) and canvas 2 fps.
 
