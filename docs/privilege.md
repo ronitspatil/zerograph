@@ -104,3 +104,30 @@ the real API, then the worker sweep, then alternating publications with usage di
 | Graph-wide identity EPI (without hubs) | 0.983 (0.633); roles 0.479 |
 | Dormant identities | 6,097 detected, recall 1.0 of 2,839 planted, 0 with observed use |
 | `GET /graph/topics` / topic page / `/overview` p95 | 7.0 / 5.3 / 1.8 ms |
+
+### How the publish overhead is checked
+
+Whole publications drift by several seconds between runs on a shared machine (graph
+writes, Docker I/O, other work), so the fastest publish with usage minus the fastest
+without measured anywhere from 3.3 to 9.7 s on unchanged code. The script now:
+
+- publishes in pairs without and with usage, in ABBA order, so drift reaches both arms;
+- times the usage-dependent phases in the worker and gates on their **floor**: per
+  phase, the fastest run with usage minus the fastest without, summed. Contention only
+  adds time and rarely reaches every run of a phase; a regression is in every run.
+  Computation (usage load, topics and EPI, proposals) and storing (topic and proposal
+  rows in PostgreSQL) are gated separately, because storing is I/O and its floor
+  varies by about 2 s between runs;
+- re-measures one more window of pairs when a budget is missed, with the floors taken
+  over every pair so far (a third window, 19 publications of 100k, exceeded a 5.2 GiB
+  Memgraph);
+- keeps the loosest bound end to end (fastest publication with usage minus fastest
+  without, at most 10 s) and reports the per-pair differences and the load average.
+
+Budgets: computation overhead at most 3.75 s, storing at most 4 s. Measured at 100k on
+an Apple M5 shared with other work: computation 2.3 to 3.2 s and storing 0.8 to 3.1 s;
+with a 2 s sleep injected into topic computation with usage, computation measured 4.3
+to 4.5 s in every window and the check fails. A regression in storing must exceed about 1 s beyond the
+noisiest measured run to fail it. Helpers live in `backend/scripts/timing.py`;
+`qualify_scale.py` (publish growth beyond the measured analysis, median over ABBA pairs)
+and `qualify_proposals.py` (metrics p95, best of up to three windows) use them too.

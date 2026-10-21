@@ -1124,6 +1124,7 @@ def qualify(
     size: int, requests: int, publish_runs: int, database_url: str | None, exposed_rate: float
 ) -> dict:
     from fastapi.testclient import TestClient
+    from timing import arm_order, paired
 
     from app.collectors import tasks
     from app.core.auth import Actor, current_actor
@@ -1176,7 +1177,8 @@ def qualify(
 
         # Alternate a baseline publish of the same graph with publish-time analysis
         # disabled (a legacy-style revision readers compute on read) and a normal
-        # publish; each run uses a fresh tenant, and the fastest run of each counts.
+        # publish; each run uses a fresh tenant. The fastest run of each is reported, and
+        # the check uses the per-pair growth beyond the measured analysis.
         # Publish-time clustering (Phase 4) and topics (optimizer Phase 1) run in both
         # arms; their measured time is subtracted so the comparison isolates the
         # analysis cost, and reported.
@@ -1202,12 +1204,14 @@ def qualify(
             runs["topics"].append(sum(topics.values()))
             return elapsed - sum(spent.values()) - sum(topics.values())
 
-        for run in range(publish_runs):
+        def without_analysis(run: int) -> None:
             with (
                 patch.object(CompactGraph, "analyze", lambda self: None),
                 patch.object(tasks, "store_analysis", lambda *args: None),
             ):
                 runs["without"].append(clustered(f"legacy-{run}"))
+
+        def with_analysis(run: int) -> None:
             spent: dict[str, float] = {}
             with (
                 patch.object(CompactGraph, "analyze", measured(spent, "compute", CompactGraph.analyze)),
@@ -1215,19 +1219,32 @@ def qualify(
             ):
                 runs["with"].append(clustered(f"stored-{run}"))
             runs["analysis"].append(spent)
-        baseline, with_analysis = min(runs["without"]), min(runs["with"])
+
+        # ABBA order, so drift during the runs reaches both arms (scripts/timing.py).
+        for run, order in enumerate(arm_order(publish_runs)):
+            for arm in order:
+                (with_analysis if arm == "with" else without_analysis)(run)
+        baseline, with_analysis_s = min(runs["without"]), min(runs["with"])
         analysis_seconds = min(sum(spent.values()) for spent in runs["analysis"])
+        # Per pair: how much more the publish grew than the analysis it performed.
+        growth = paired(
+            [without + sum(spent.values()) for without, spent in zip(runs["without"], runs["analysis"], strict=True)],
+            runs["with"],
+        )
         result["publish"] = {
-            "with_analysis_s": round(with_analysis, 4),
+            "with_analysis_s": round(with_analysis_s, 4),
             "without_analysis_s": round(baseline, 4),
-            "delta_s": round(with_analysis - baseline, 4),
+            "delta_s": round(with_analysis_s - baseline, 4),
             "analysis_s": round(analysis_seconds, 4),
+            "unexplained_growth_median_s": growth["median"],
+            "unexplained_growth_s": growth["deltas"],
             "analysis_compute_s": round(min(spent["compute"] for spent in runs["analysis"]), 4),
             "analysis_store_s": round(min(spent["store"] for spent in runs["analysis"]), 4),
             # Excluded from the publish times above (they run in both arms).
             "clustering_s": round(min(runs["clustering"]), 4),
             "topics_s": round(min(runs["topics"]), 4),
             "runs": {
+                "order": [list(order) for order in arm_order(publish_runs)],
                 "with_analysis_s": [round(value, 4) for value in runs["with"]],
                 "without_analysis_s": [round(value, 4) for value in runs["without"]],
             },
@@ -1279,11 +1296,12 @@ def evaluate(results: list[dict], latency_budget_ms: float, ratio_budget: float)
     for r in results:
         size = r["target_nodes"]
         checks[f"stored_matches_compute_on_read_{size}"] = r["stored_matches_compute_on_read"]
-        # Publish grows by no more than the analysis it now performs (5% + 50 ms run-to-run tolerance).
+        # Publish grows by no more than the analysis it now performs: the median over ABBA
+        # pairs of (with - without - analysis), within 5% (at least 50 ms) run-to-run drift.
         publish = r["publish"]
         tolerance = max(0.05, 0.05 * publish["without_analysis_s"])
         checks[f"publish_growth_within_analysis_cost_{size}"] = (
-            publish["delta_s"] <= publish["analysis_s"] + tolerance
+            publish["unexplained_growth_median_s"] <= tolerance
         )
         if size >= 5000:
             for endpoint in ("overview", "findings_first_page"):
@@ -1310,7 +1328,7 @@ def main():
     )
     parser.add_argument("--sizes", type=int, nargs="+", default=[1000, 5000, 20000])
     parser.add_argument("--requests", type=int, default=50)
-    parser.add_argument("--publish-runs", type=int, default=2)
+    parser.add_argument("--publish-runs", type=int, default=3, help="Publication pairs (ABBA order)")
     parser.add_argument(
         "--exposed-rate",
         type=float,

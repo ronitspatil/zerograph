@@ -247,7 +247,9 @@ export function ClusterCanvas({
         css: { "border-width": 0.8 },
       },
       {
-        selector: "edge",
+        // Relationships between clusters. Member edges match only the rule below:
+        // each rule an element matches is applied per element when it is added.
+        selector: "edge.link",
         css: {
           width: "data(width)",
           opacity: 0.32,
@@ -257,8 +259,17 @@ export function ClusterCanvas({
         },
       },
       {
+        // Up to 20,000 relationships between members: haystack edges run from centre
+        // to centre and skip the per-edge endpoint and control-point geometry, which
+        // dominated the first frame of a 5,000-member expansion. Without arrows and
+        // beneath opaque member dots they draw the same as straight edges.
         selector: "edge.member-edge",
-        css: { width: 0.35, opacity: 0.22 },
+        css: {
+          width: 0.35,
+          opacity: 0.22,
+          "line-color": "#637b91",
+          "curve-style": "haystack",
+        },
       },
       {
         selector: "edge.hovered",
@@ -288,6 +299,7 @@ export function ClusterCanvas({
             position: { x: positions[i].x, y: positions[i].y },
           })),
           ...input.links.map((l) => ({
+            classes: "link",
             data: {
               id: `${l.source}~${l.target}`,
               source: l.source,
@@ -586,7 +598,6 @@ export function ClusterCanvas({
                 id: `m:${edge.id}`,
                 source: edge.source,
                 target: edge.target,
-                width: 0.35,
               },
             });
       if (add.length) instance.add(add);
