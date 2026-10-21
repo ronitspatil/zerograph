@@ -443,15 +443,20 @@ def main() -> None:  # noqa: C901 - one linear qualification run
         "--publish-runs", type=int, default=3, help="Publication pairs (one per arm, ABBA order)"
     )
     parser.add_argument(
-        "--overhead-windows", type=int, default=3, help="Windows of pairs measured at most (floors over all)"
+        "--overhead-windows",
+        type=int,
+        default=2,
+        # Every publication keeps a 100k revision in Memgraph until the run ends; a third
+        # window (19 publications) exceeded a 5.2 GiB Memgraph.
+        help="Windows of pairs measured at most (floors over all)",
     )
     parser.add_argument("--requests", type=int, default=100)
     parser.add_argument("--chunk-bytes", type=int, default=3_900_000)
     parser.add_argument("--records-per-file", type=int, default=25_000)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    if not 1000 <= args.size <= 100_000 or not 1 <= args.publish_runs <= 6 or not 1 <= args.overhead_windows <= 3:
-        parser.error("Size 1000..100000, 1..6 publish runs and 1..3 overhead windows are required")
+    if not 1000 <= args.size <= 100_000 or not 1 <= args.publish_runs <= 6 or not 1 <= args.overhead_windows <= 2:
+        parser.error("Size 1000..100000, 1..6 publish runs and 1..2 overhead windows are required")
 
     from alembic import command
     from alembic.config import Config

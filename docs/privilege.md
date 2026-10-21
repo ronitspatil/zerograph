@@ -118,15 +118,16 @@ without measured anywhere from 3.3 to 9.7 s on unchanged code. The script now:
   Computation (usage load, topics and EPI, proposals) and storing (topic and proposal
   rows in PostgreSQL) are gated separately, because storing is I/O and its floor
   varies by about 2 s between runs;
-- re-measures another window of pairs (up to three) when a budget is missed, with the
-  floors taken over every pair so far;
+- re-measures one more window of pairs when a budget is missed, with the floors taken
+  over every pair so far (a third window, 19 publications of 100k, exceeded a 5.2 GiB
+  Memgraph);
 - keeps the loosest bound end to end (fastest publication with usage minus fastest
   without, at most 10 s) and reports the per-pair differences and the load average.
 
 Budgets: computation overhead at most 3.75 s, storing at most 4 s. Measured at 100k on
 an Apple M5 shared with other work: computation 2.3 to 3.2 s and storing 0.8 to 3.1 s;
-with a 2 s sleep injected into topic computation with usage, computation measured 4.4
-to 4.5 s and the check fails. A regression in storing must exceed about 1 s beyond the
+with a 2 s sleep injected into topic computation with usage, computation measured 4.3
+to 4.5 s in every window and the check fails. A regression in storing must exceed about 1 s beyond the
 noisiest measured run to fail it. Helpers live in `backend/scripts/timing.py`;
 `qualify_scale.py` (publish growth beyond the measured analysis, median over ABBA pairs)
 and `qualify_proposals.py` (metrics p95, best of up to three windows) use them too.
