@@ -297,7 +297,15 @@ def test_real_role_map_label_counts_keyset_pages_and_scoped_structural_summaries
 
     from app.graph.exploration import RevisionUnavailable
     from app.graph.repository import MemoryGraphStore
-    from app.graph.schema import Edge, EdgeType, GraphSnapshot, Node, NodeType
+    from app.graph.schema import (
+        DATA_TYPES,
+        IDENTITY_TYPES,
+        Edge,
+        EdgeType,
+        GraphSnapshot,
+        Node,
+        NodeType,
+    )
 
     monkeypatch.setenv("ZG_GRAPH_VENDOR", os.environ["ZG_INTEGRATION_GRAPH"])
     get_settings.cache_clear()
@@ -386,12 +394,17 @@ def test_real_role_map_label_counts_keyset_pages_and_scoped_structural_summaries
                 ids = {node.id for node in actual.nodes}
                 assert all(node.type == NodeType.ROLE for node in actual.nodes)
                 assert all(edge.source in ids and edge.target in ids for edge in actual.edges)
+            # role:00 is linked by traversal edges to one neighbor of every non-role type
+            # plus role:01 and role:02. PII edges, self-loops and the malformed cross-scope
+            # relationships above never count. Derived from NodeType so adding a node type
+            # keeps this exact instead of going stale.
             summary = store.roles(tenant, revision, 1, 10, None).role_summaries[0]
             assert (summary.direct_neighbors, summary.linked_identities, summary.linked_data_assets) == (
-                10,
-                6,
-                3,
+                len(neighbors) + 2,
+                sum(node.type in IDENTITY_TYPES for node in neighbors) + 2,
+                sum(node.type in DATA_TYPES for node in neighbors),
             )
+            assert summary == memory.roles(tenant, revision, 1, 10, None).role_summaries[0]
             assert store.roles(other, revision, 2, 10, None) == memory.roles(tenant, revision, 2, 10, None)
             with pytest.raises(RevisionUnavailable):
                 store.roles(tenant, "missing", 2, 10, None)
