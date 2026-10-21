@@ -23,6 +23,11 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U zerograph_test -d zerograph_ingestion_test"
           --health-interval 5s --health-timeout 3s --health-retries 20
+      # Real Memgraph (the default graph engine) for tests/test_graph_integration.py,
+      # which otherwise skips and so cannot catch Cypher drifting from the memory store.
+      memgraph:
+        image: memgraph/memgraph:3.2.0
+        ports: ["7687:7687"]
     env:
       ZG_INGESTION_POSTGRES_URL: postgresql+psycopg://zerograph_test:disposable-ci-only@localhost:5432/zerograph_ingestion_test
     steps:
@@ -34,6 +39,12 @@ jobs:
       - run: ruff check --config backend/pyproject.toml deploy
       - run: pytest --cov-fail-under=75
         working-directory: backend
+      - name: Real-graph integration tests on Memgraph
+        run: pytest --no-cov -rA tests/test_graph_integration.py
+        working-directory: backend
+        env:
+          ZG_INTEGRATION_GRAPH: memgraph
+          ZG_GRAPH_URI: bolt://localhost:7687
       - name: Qualify bounded analysis locally
         run: python scripts/qualify_analysis.py --output analysis-qualification.json
         working-directory: backend
