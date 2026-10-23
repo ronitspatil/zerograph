@@ -905,6 +905,11 @@
   }
 
   /* ---- Login ----------------------------------------------------------- */
+  /* The login page never switches views, so it needs no reserved scrollbar
+     gutter (which would show as an unpainted strip beside the backdrop). */
+  html:has(.login-shell) {
+    scrollbar-gutter: auto;
+  }
   .login-card {
     background: #0c1211f2;
     box-shadow:
