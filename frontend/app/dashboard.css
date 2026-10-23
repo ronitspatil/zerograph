@@ -984,6 +984,12 @@
     .kpi-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
+    /* Two narrow columns: captions wrap instead of truncating. */
+    .kpi-label,
+    .kpi-caption {
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
     .dashboard-charts > :last-child {
       grid-column: auto;
     }
