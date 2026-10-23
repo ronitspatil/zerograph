@@ -1080,6 +1080,33 @@
     width: 100%;
     position: relative;
   }
+  /* Hidden (still sized, so the first fit is right) until the first layout lands. */
+  .graph-canvas.laying-out {
+    visibility: hidden;
+  }
+  .graph-canvas:not(.laying-out) {
+    animation: canvas-in 0.2s ease-out;
+  }
+  @keyframes canvas-in {
+    from {
+      opacity: 0;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .graph-canvas:not(.laying-out) {
+      animation: none;
+    }
+  }
+  .canvas-layout-pending {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--subtle);
+    font-size: var(--fs-sm);
+    pointer-events: none;
+  }
   .graph-controls {
     display: flex;
     flex-direction: column;
