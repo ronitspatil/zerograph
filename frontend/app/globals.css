@@ -896,7 +896,8 @@
     align-items: center;
     gap: 8px;
     flex-shrink: 0;
-    height: 24px;
+    /* 4px inset on every side of the 30px inner control height. */
+    height: 22px;
     padding: 0 12px;
     border-radius: 4px;
     background: var(--surface-raised);
