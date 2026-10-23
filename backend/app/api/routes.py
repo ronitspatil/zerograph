@@ -22,6 +22,7 @@ from app.db.locks import acquire_rollout_lock, pin_pointer_gate
 from app.db.models import (
     AuditEvent,
     IngestionJob,
+    ObservedAccess,
     Remediation,
     RevisionAnalysis,
     RevisionProposal,
@@ -606,6 +607,67 @@ def overview(db: DB, graph: Graph, actor: Viewer):
     # Legacy revision (published before stored analysis) or empty tenant.
     snapshot = graph.snapshot(actor.tenant_id, revision) if revision else GraphSnapshot()
     return {"revision": revision, **compute_analysis(snapshot).overview}
+
+
+class ActivityDay(BaseModel):
+    day: str
+    # Identities whose most recent observed use falls on this day.
+    identities_last_used: int = 0
+    # Observed access pairs (identity, resource, action class, service) first seen this day.
+    pairs_first_seen: int = 0
+
+
+class ActivityResponse(BaseModel):
+    window_start: datetime | None
+    window_end: datetime | None
+    identities: int
+    pairs: int
+    days: list[ActivityDay]
+    notice: str = "Observed use from committed usage uploads, by day. Read-only; nothing is applied."
+
+
+def _day(value) -> str:
+    return value if isinstance(value, str) else value.isoformat()
+
+
+@router.get("/overview/activity", response_model=ActivityResponse)
+def overview_activity(db: DB, actor: Viewer):
+    """Daily series of observed use for the overview: identities by their last observed
+    use and access pairs by first observation. Tenant-scoped, read-only, bounded by the
+    number of days in the committed usage window."""
+    tenant = ObservedAccess.tenant_id == actor.tenant_id
+    window = db.execute(
+        select(func.min(UsageUpload.window_start), func.max(UsageUpload.window_end)).where(
+            UsageUpload.tenant_id == actor.tenant_id, UsageUpload.status == "committed"
+        )
+    ).one()
+    last_used = (
+        select(ObservedAccess.principal_id, func.max(ObservedAccess.last_seen).label("seen"))
+        .where(tenant)
+        .group_by(ObservedAccess.principal_id)
+        .subquery()
+    )
+    days: dict[str, ActivityDay] = {}
+    identities = 0
+    for day, n in db.execute(select(func.date(last_used.c.seen), func.count()).group_by(func.date(last_used.c.seen))):
+        if day is None:
+            continue
+        days.setdefault(_day(day), ActivityDay(day=_day(day))).identities_last_used = n
+        identities += n
+    first_seen = func.date(ObservedAccess.first_seen)
+    pairs = 0
+    for day, n in db.execute(select(first_seen, func.count()).where(tenant).group_by(first_seen)):
+        if day is None:
+            continue
+        days.setdefault(_day(day), ActivityDay(day=_day(day))).pairs_first_seen = n
+        pairs += n
+    return ActivityResponse(
+        window_start=window[0],
+        window_end=window[1],
+        identities=identities,
+        pairs=pairs,
+        days=[days[key] for key in sorted(days)],
+    )
 
 
 @router.get("/findings", response_model=list[Finding])
