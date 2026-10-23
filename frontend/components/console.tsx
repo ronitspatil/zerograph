@@ -854,8 +854,9 @@ export function Console({
                 ))}
               </div>
               <div className="skeleton-panels" aria-hidden="true">
-                <span className="skeleton-block" />
-                <span className="skeleton-block" />
+                {[0, 1, 2].map((i) => (
+                  <span key={i} className="skeleton-block" />
+                ))}
               </div>
             </div>
           ) : (

@@ -42,7 +42,7 @@ export function RingGauge({
   const length = share === null ? 0 : share * RING_C;
   return (
     <figure
-      className="ring"
+      className="gauge-ring"
       style={{ width: size, height: size }}
       role="img"
       aria-label={`${label}: ${center}${caption ? ` ${caption}` : ""}`}
@@ -90,7 +90,7 @@ export function Donut({
   let offset = 0;
   return (
     <figure
-      className="ring"
+      className="gauge-ring"
       style={{ width: size, height: size }}
       role="img"
       aria-label={`${label}: ${center}${caption ? ` ${caption}` : ""}. ${segments

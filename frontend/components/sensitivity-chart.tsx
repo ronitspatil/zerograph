@@ -17,13 +17,15 @@ const LEVELS: Sensitivity[] = [
   "confidential",
   "restricted",
 ];
+/* A calm-to-hot ramp on the console palette: muted green-grey, accent green,
+   then the warning and danger hues (SVG fill attributes cannot read CSS vars). */
 const LEVEL_COLORS: Record<Sensitivity, string> = {
-  public: "#5d6b7e",
-  internal: "#7f9bbd",
-  confidential: "#d9a85b",
-  restricted: "#e0707c",
+  public: "#3d5048",
+  internal: "#4fae86",
+  confidential: "#e1b268",
+  restricted: "#ef7f8a",
 };
-const AXIS_TICK = { fill: "#8a96a8", fontSize: 11 };
+const AXIS_TICK = { fill: "#84958c", fontSize: 11 };
 
 export const SENSITIVITY_CHART_HEIGHT = 250;
 
@@ -75,12 +77,15 @@ export function SensitivityChart({
           <Tooltip
             formatter={(value) => formatCount(Number(value))}
             contentStyle={{
-              background: "#131b27",
-              border: "1px solid #263142",
+              background: "#111a18",
+              border: "1px solid #26342e",
               borderRadius: 6,
               fontSize: 12,
+              color: "#e2ebe6",
             }}
-            cursor={{ fill: "#182230" }}
+            labelStyle={{ color: "#b1c0b8" }}
+            itemStyle={{ color: "#e2ebe6" }}
+            cursor={{ fill: "#142019" }}
           />
           <Bar
             dataKey="value"

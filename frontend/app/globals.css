@@ -1539,13 +1539,13 @@
     --dot: var(--accent);
   }
   .tier-medium {
-    --dot: #7aa2e0;
+    --dot: var(--info);
   }
   .tier-low {
     --dot: var(--warning);
   }
   .tier-inferred {
-    --dot: #b38ad9;
+    --dot: var(--violet);
   }
   .tier-manual {
     --dot: var(--danger);

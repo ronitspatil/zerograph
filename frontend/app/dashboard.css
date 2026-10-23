@@ -62,7 +62,7 @@
   .metric-card strong,
   .kpi-value,
   .summary-number b,
-  .ring figcaption b,
+  .gauge-ring figcaption b,
   .activity-figures b {
     font-family: var(--font-display);
     font-weight: var(--fw-semibold);
@@ -326,9 +326,10 @@
   }
 
   /* ---- Overview dashboard band ----------------------------------------- */
+  /* Exposure KPIs span the first row; the three visual groups share the second. */
   .dashboard-band {
     display: grid;
-    grid-template-columns: minmax(0, 1.35fr) repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     background:
@@ -348,8 +349,15 @@
     flex-direction: column;
     gap: 16px;
   }
-  .band-group:first-child {
+  .band-group:first-child,
+  .band-group:nth-child(2) {
     border-left: 0;
+  }
+  .band-exposure {
+    grid-column: 1 / -1;
+  }
+  .band-group:not(.band-exposure) {
+    border-top: 1px solid var(--border);
   }
   .band-title {
     display: flex;
@@ -367,7 +375,7 @@
   }
   .kpi-grid {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 8px;
   }
   .kpi {
@@ -442,18 +450,18 @@
   }
 
   /* ---- Rings (gauge and donut) ----------------------------------------- */
-  .ring {
+  .gauge-ring {
     position: relative;
     flex-shrink: 0;
     margin: 0;
   }
-  .ring svg {
+  .gauge-ring svg {
     width: 100%;
     height: 100%;
     transform: rotate(-90deg);
     overflow: visible;
   }
-  .ring circle {
+  .gauge-ring circle {
     fill: none;
     stroke-width: 9;
   }
@@ -469,7 +477,7 @@
       stroke-dasharray: 0 var(--ring-c);
     }
   }
-  .ring figcaption {
+  .gauge-ring figcaption {
     position: absolute;
     inset: 0;
     display: flex;
@@ -479,12 +487,12 @@
     text-align: center;
     pointer-events: none;
   }
-  .ring figcaption b {
+  .gauge-ring figcaption b {
     font-size: var(--fs-xl);
     line-height: 1.1;
     color: var(--text);
   }
-  .ring figcaption small {
+  .gauge-ring figcaption small {
     margin-top: 4px;
     font-size: var(--fs-caption);
     color: var(--muted);
@@ -762,15 +770,19 @@
   }
   .skeleton-band {
     display: grid;
-    grid-template-columns: minmax(0, 1.35fr) repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 16px;
   }
   .skeleton-band .skeleton-block {
-    height: 200px;
+    height: 176px;
+  }
+  .skeleton-band .skeleton-block:first-child {
+    grid-column: 1 / -1;
+    height: 128px;
   }
   .skeleton-panels {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 16px;
   }
   .skeleton-panels .skeleton-block {
@@ -919,18 +931,13 @@
   }
 
   /* ---- Responsive ------------------------------------------------------ */
-  @media (max-width: 1280px) {
-    .dashboard-band {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-    .band-group:nth-child(3) {
-      border-left: 0;
-    }
-    .band-group:nth-child(n + 3) {
-      border-top: 1px solid var(--border);
-    }
+  @media (max-width: 1100px) {
+    .dashboard-band,
     .skeleton-band {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .band-group {
+      border-left: 0;
     }
   }
   @media (max-width: 1100px) {
@@ -973,6 +980,9 @@
     }
     .band-group {
       padding: 16px;
+    }
+    .kpi-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
     }
     .dashboard-charts > :last-child {
       grid-column: auto;

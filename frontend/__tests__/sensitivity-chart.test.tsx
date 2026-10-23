@@ -65,8 +65,8 @@ describe("SensitivityChart", () => {
       <SensitivityChart sensitivity={{ restricted: 3, public: 1 }} />,
     );
     expect(bars(container)).toEqual([
-      expect.objectContaining({ name: "public", fill: "#5d6b7e" }),
-      expect.objectContaining({ name: "restricted", fill: "#e0707c" }),
+      expect.objectContaining({ name: "public", fill: "#3d5048" }),
+      expect.objectContaining({ name: "restricted", fill: "#ef7f8a" }),
     ]);
   });
 
