@@ -260,6 +260,28 @@ def test_planted_fixture_recovers_topics():
     assert computed.summary["anchored_topics"] == 12
 
 
+def test_overprivileged_demo_profile_is_still_a_recognizable_company():
+    """The demo profile adds cross-team sprawl, not noise: topics are still recovered, and a
+    much larger share of grants are planted over-grants (what the optimizer may remove)."""
+    base, base_truth, _ = generate_topics(20000, seed=11)
+    snapshot, truth, usage = generate_topics(20000, seed=11, overprivileged=True)
+    grants = lambda s: sum(1 for e in s.edges if e.type != EdgeType.ASSUMES)  # noqa: E731
+    share = len(truth["over_grants"]) / grants(snapshot)
+    assert share > 1.5 * len(base_truth["over_grants"]) / grants(base)
+    assert len(truth["dormant_identities"]) > len(base_truth["dormant_identities"])
+    used = sum(len(v) for v in usage["role_data_used"].values())
+    assert used > 0.2 * (grants(snapshot) - len(truth["over_grants"]))
+    computed = compute_topics(CompactGraph.from_snapshot(snapshot))
+    index = computed.graph.index
+    groups: dict[str, dict[str, int]] = {}
+    for entity, planted in truth["resource_topic"].items():
+        predicted = computed.topics[computed.resource_topic[index[entity]]].name
+        groups.setdefault(predicted, {}).setdefault(planted, 0)
+        groups[predicted][planted] += 1
+    purity = sum(max(g.values()) for g in groups.values()) / len(truth["resource_topic"])
+    assert purity >= 0.9 and computed.summary["hub_roles"] == 3
+
+
 def test_existing_fixture_without_tags_falls_back_to_type_groups():
     computed = compute_topics(CompactGraph.from_snapshot(generate(2000)))
     assert {t.kind for t in computed.topics} == {"fallback"}
