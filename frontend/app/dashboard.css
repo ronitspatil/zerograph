@@ -764,6 +764,10 @@
   .loading-state {
     display: flex;
     flex-direction: column;
+    /* Full-width rows: the base rule centres a spinner, which shrank these
+       empty grids to slivers in the middle of the page. */
+    align-items: stretch;
+    justify-content: flex-start;
     gap: 16px;
     padding: 0;
     min-height: 0;
