@@ -19,7 +19,7 @@
     "cytoscape": "^3.30.4",
     "jose": "^5.9.6",
     "lucide-react": "^0.468.0",
-    "next": "15.5.24",
+    "next": "15.5.28",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "recharts": "^3.0.0",
@@ -37,7 +37,7 @@
     "postcss": "^8.5.23",
     "tailwindcss": "4.3.3",
     "typescript": "^5.7.2",
-    "vitest": "4.1.11",
+    "vitest": "4.1.12",
     "prettier": "^3.0.0",
     "@testing-library/dom": "^10.4.0",
     "@tailwindcss/postcss": "4.3.3"

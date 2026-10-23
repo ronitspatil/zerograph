@@ -37,7 +37,7 @@ MarkupSafe==3.0.3
 moto==5.2.4
 neo4j==5.28.6
 networkx==3.7
-opentelemetry-api==1.45.0
+opentelemetry-api==1.45.1
 packaging==26.3
 pluggy==1.6.0
 prometheus-client==0.26.0
