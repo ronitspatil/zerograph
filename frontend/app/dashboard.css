@@ -925,12 +925,6 @@
   html:has(.login-shell) {
     scrollbar-gutter: auto;
   }
-  .login-card {
-    background: #0c1211f2;
-    box-shadow:
-      inset 0 1px 0 #ffffff08,
-      0 24px 64px -32px #000000;
-  }
   .login-lead {
     font-family: var(--font-display);
     font-size: var(--fs-lg);

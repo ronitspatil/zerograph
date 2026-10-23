@@ -95,7 +95,45 @@ export function Login({
           </p>
         </div>
       </div>
-      <div className="login-orbit" aria-hidden="true" />
+      <LoginRing />
     </main>
+  );
+}
+
+const RING_R = 466;
+const RING_C = 2 * Math.PI * RING_R;
+const TICK_R = 498;
+const TICK_GAP = (2 * Math.PI * TICK_R) / 72;
+
+/**
+ * The backdrop ring, drawn like the console's gauges: a hairline outer edge, a tick
+ * ring, a track band with an accent arc, and an inner hairline. It sits behind the
+ * card, a little left of and below the card's centre, wide enough that the card never
+ * touches it.
+ */
+function LoginRing() {
+  return (
+    <svg
+      className="login-ring"
+      viewBox="-550 -550 1100 1100"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <circle className="login-ring-glow" r="456" />
+      <circle className="login-ring-edge" r="524" />
+      <circle
+        className="login-ring-ticks"
+        r={TICK_R}
+        strokeDasharray={`1 ${TICK_GAP - 1}`}
+      />
+      <circle className="login-ring-track" r={RING_R} />
+      <circle
+        className="login-ring-arc"
+        r={RING_R}
+        strokeDasharray={`${RING_C * 0.28} ${RING_C}`}
+        style={{ ["--ring-c" as string]: RING_C }}
+      />
+      <circle className="login-ring-inner" r="432" />
+    </svg>
   );
 }
