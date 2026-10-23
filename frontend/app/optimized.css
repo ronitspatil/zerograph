@@ -22,7 +22,7 @@
   white-space: nowrap;
   align-items: center;
   gap: var(--space-2);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--muted);
   min-width: 0;
 }
@@ -47,7 +47,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 20px;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
@@ -88,7 +88,7 @@
   -webkit-line-clamp: 3;
   overflow: hidden;
   height: 54px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 18px;
   color: var(--muted);
   overflow-wrap: anywhere;
@@ -133,7 +133,7 @@
 }
 .topic-page-head .topic-reason {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--fs-base);
   line-height: 1.5;
   color: var(--text-secondary);
   overflow-wrap: anywhere;
@@ -142,7 +142,7 @@
   margin-bottom: 0;
 }
 .topic-page .metric-card strong {
-  font-size: 20px;
+  font-size: var(--fs-xl);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -152,7 +152,7 @@
   overflow-wrap: anywhere;
 }
 .topic-graph-sidebar p {
-  font-size: 13px;
+  font-size: var(--fs-base);
   line-height: 1.5;
   color: var(--text-secondary);
 }
@@ -187,7 +187,7 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: var(--space-1) var(--space-3);
-  font-size: 13px;
+  font-size: var(--fs-base);
 }
 .topic-section-body dt {
   color: var(--muted);
@@ -203,7 +203,7 @@
   color: var(--text);
 }
 .topic-section-body small {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--subtle);
 }
 .topic-section-body .topic-tabs {
@@ -218,7 +218,7 @@
   border-radius: var(--radius);
   background: transparent;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 .topic-section-body .topic-tabs button:hover {
   color: var(--text);
@@ -261,7 +261,7 @@
 }
 .contributors li span,
 .topic-members li span {
-  font-size: 13px;
+  font-size: var(--fs-base);
   color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -294,7 +294,7 @@
   display: flex;
   justify-content: space-between;
   gap: var(--space-2);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   min-width: 0;
 }
 .role-bar-label span {
@@ -347,7 +347,7 @@
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--muted);
 }
 .role-bar-key i {
@@ -364,7 +364,7 @@
   margin-bottom: var(--space-6);
 }
 .optimizer-tiles .metric-card strong {
-  font-size: 20px;
+  font-size: var(--fs-xl);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -378,7 +378,7 @@
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 0 var(--space-2);
   margin: var(--space-2) 0;
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 .optimizer-rollout dt {
   color: var(--muted);
@@ -411,7 +411,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13px;
+  font-size: var(--fs-base);
   color: var(--text-secondary);
 }
 .bulk-bar .button,

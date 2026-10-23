@@ -11,7 +11,16 @@ const capabilities = [
   { icon: Route, text: "Traces toxic paths from exposed entry points" },
   { icon: GitPullRequest, text: "Proposes least-privilege fixes for review" },
 ];
-export function Login({ demo, error }: { demo: boolean; error?: string }) {
+export function Login({
+  demo,
+  sso = true,
+  error,
+}: {
+  demo: boolean;
+  /** An OIDC issuer and client are configured; otherwise the SSO button is hidden. */
+  sso?: boolean;
+  error?: string;
+}) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState(
     error ? "Sign-in failed. Check your identity provider configuration." : "",
@@ -45,10 +54,13 @@ export function Login({ demo, error }: { demo: boolean; error?: string }) {
           </ul>
         </div>
         <div className="login-body">
-          <h1>Sign in</h1>
+          <h1>{sso || !demo ? "Sign in" : "Explore ZeroGraph"}</h1>
           <p>
-            Single sign-on through your organization&rsquo;s identity provider
-            (OIDC).
+            {sso
+              ? "Single sign-on through your organization\u2019s identity provider (OIDC)."
+              : demo
+                ? "A demo workspace with a sample environment. No sign-in needed."
+                : "Single sign-on through your organization\u2019s identity provider (OIDC)."}
           </p>
           {message && (
             <p className="error-banner" role="alert">
@@ -56,17 +68,30 @@ export function Login({ demo, error }: { demo: boolean; error?: string }) {
             </p>
           )}
           <div className="login-actions">
-            <Button asChild>
-              <a href="/api/auth/login">Sign in with your organization</a>
-            </Button>
+            {sso && (
+              <Button asChild>
+                <a href="/api/auth/login">Sign in with your organization</a>
+              </Button>
+            )}
             {demo && (
-              <Button variant="outline" onClick={enter} disabled={busy}>
+              <Button
+                variant={sso ? "outline" : "default"}
+                onClick={enter}
+                disabled={busy}
+              >
                 {busy ? "Opening console…" : "Explore the demo workspace"}
               </Button>
             )}
+            {!sso && !demo && (
+              <p className="login-unconfigured" role="status">
+                Single sign-on isn&rsquo;t configured — ask your administrator.
+              </p>
+            )}
           </div>
           <p className="login-help">
-            Need access? Contact your workspace administrator.
+            {sso || !demo
+              ? "Need access? Contact your workspace administrator."
+              : "Single sign-on appears here once your administrator configures it."}
           </p>
         </div>
       </div>

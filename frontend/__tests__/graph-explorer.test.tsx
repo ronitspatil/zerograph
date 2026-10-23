@@ -65,7 +65,7 @@ beforeEach(() => {
   );
 });
 async function ready() {
-  render(<Console demo={false} />);
+  render(<Console demo={false} initialView="graph" />);
   await screen.findByRole("button", { name: "Visible agent" });
 }
 describe("bounded graph exploration", () => {
