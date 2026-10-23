@@ -93,6 +93,10 @@
   color: var(--muted);
   overflow-wrap: anywhere;
 }
+/* Labels wrap, numbers stay whole: the values never run past the panel edge. */
+.node-sidebar dl.topic-before-after {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
 .topic-before-after dd {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
