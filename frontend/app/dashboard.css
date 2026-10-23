@@ -903,6 +903,22 @@
   .breadcrumb {
     overflow: hidden;
   }
+  /* View switches never push the page wider than a 320px phone. */
+  .graph-view-switch {
+    max-width: 100%;
+  }
+  .graph-view-switch button {
+    min-width: 0;
+    flex-shrink: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  @media (max-width: 360px) {
+    .graph-view-switch button {
+      padding: 0 8px;
+    }
+  }
 
   /* ---- Login ----------------------------------------------------------- */
   /* The login page never switches views, so it needs no reserved scrollbar
