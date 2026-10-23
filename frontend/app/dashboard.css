@@ -695,9 +695,12 @@
     gap: 4px;
     color: var(--muted);
     font-size: var(--fs-sm);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    line-height: 16px;
+    min-height: 32px;
+    align-items: flex-start;
+  }
+  .activity-figures .swatch {
+    margin-top: 4px;
   }
   .activity-plot {
     height: 112px;
