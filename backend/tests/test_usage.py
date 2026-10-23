@@ -433,3 +433,35 @@ def test_planted_cloudtrail_export_round_trips_the_usage_sidecar():
     assert roles == {role: set(items) for role, items in planted["role_data_used"].items()}
     assert identities == {i: set(r) for i, r in planted["identity_role_used"].items()}
     assert totals["denied"] > 0 and totals["unmapped"] > 0
+
+
+def test_overview_activity_is_a_tenant_scoped_daily_series(client, environment):
+    factory, _ = environment
+    day = datetime(2026, 9, 1, 12, tzinfo=UTC)
+    with factory() as db:
+        for tenant, principal, resource, first, last in [
+            ("tenant-a", "role:a", "bucket:1", day, day + timedelta(days=2)),
+            ("tenant-a", "role:a", "bucket:2", day, day + timedelta(days=1)),
+            ("tenant-a", "role:b", "bucket:1", day + timedelta(days=1), day + timedelta(days=1)),
+            ("tenant-b", "role:z", "bucket:9", day, day + timedelta(days=5)),
+        ]:
+            db.add(
+                ObservedAccess(
+                    tenant_id=tenant, upload_id="u1", principal_id=principal, resource_id=resource,
+                    action_class="read", service="s3", first_seen=first, last_seen=last, count=1,
+                    source="cloudtrail-export",
+                )
+            )
+        db.commit()
+    body = client.get("/api/v1/overview/activity").json()
+    assert body["identities"] == 2 and body["pairs"] == 3
+    assert body["days"] == [
+        {"day": "2026-09-01", "identities_last_used": 0, "pairs_first_seen": 2},
+        {"day": "2026-09-02", "identities_last_used": 1, "pairs_first_seen": 1},
+        {"day": "2026-09-03", "identities_last_used": 1, "pairs_first_seen": 0},
+    ]
+    assert body["window_start"] is None
+    other = client_for(roles=("viewer",), tenant="tenant-b").get("/api/v1/overview/activity").json()
+    assert other["identities"] == 1 and other["days"][-1]["day"] == "2026-09-06"
+    empty = client_for(roles=("viewer",), tenant="tenant-c").get("/api/v1/overview/activity").json()
+    assert empty == {**empty, "identities": 0, "pairs": 0, "days": []}

@@ -1,7 +1,33 @@
 import type { Metadata, Viewport } from "next";
+import { Chakra_Petch, Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
+import "./dashboard.css";
 import "./global-map.css";
 import "./optimized.css";
+/*
+ * Type system (rationale in app/globals.css, "Type system"): self-hosted at build time by
+ * next/font (latin subset, only the weights used, font-display swap and a size-adjusted
+ * fallback so text never shifts when the face arrives).
+ */
+const display = Chakra_Petch({
+  subsets: ["latin"],
+  weight: ["500", "600"],
+  display: "swap",
+  variable: "--font-display-face",
+  adjustFontFallback: true,
+});
+const text = Inter({
+  subsets: ["latin"],
+  weight: ["400", "500", "600"],
+  display: "swap",
+  variable: "--font-text-face",
+});
+const mono = JetBrains_Mono({
+  subsets: ["latin"],
+  weight: ["400", "500"],
+  display: "swap",
+  variable: "--font-mono-face",
+});
 /** Bump when the icon artwork changes so browsers drop cached tab icons. */
 const ICON_VERSION = "5";
 export const metadata: Metadata = {
@@ -32,7 +58,10 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
+    <html
+      lang="en"
+      className={`${display.variable} ${text.variable} ${mono.variable}`}
+    >
       <body>{children}</body>
     </html>
   );

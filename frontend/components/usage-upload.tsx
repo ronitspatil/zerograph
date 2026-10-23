@@ -5,6 +5,7 @@ import { formatCount } from "@/lib/format";
 import type { UsageStatus } from "@/lib/types";
 import { type UsageCommit, uploadUsage } from "@/lib/usage";
 import { Button } from "@/components/ui/button";
+import { FilePicker } from "@/components/ui/file-picker";
 import { EVIDENCE_LABELS, windowText } from "@/components/privilege";
 
 /** Services a customer can attest complete CloudTrail coverage for. */
@@ -127,20 +128,13 @@ export function UsageUpload({
           </label>
         ))}
       </fieldset>
-      <label>
-        CloudTrail export files
-        <input
-          type="file"
-          multiple
-          accept=".json,.gz,application/json,application/gzip"
-          onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
-        />
-        <small className="muted">
-          Up to 3.9 MB per file. Use counts as evidence with 90 days of attested
-          coverage ending in the last 7 days; otherwise need is inferred from
-          peers.
-        </small>
-      </label>
+      <FilePicker
+        label="CloudTrail export files"
+        multiple
+        accept=".json,.gz,application/json,application/gzip"
+        hint="Up to 3.9 MB per file. Use counts as evidence with 90 days of attested coverage ending in the last 7 days; otherwise need is inferred from peers."
+        onFiles={setFiles}
+      />
       {progress && <p className="muted">{progress}</p>}
       {error && (
         <p role="alert" className="error-banner">

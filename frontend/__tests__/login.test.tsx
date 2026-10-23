@@ -29,4 +29,25 @@ describe("Login", () => {
     ).not.toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("Sign-in failed");
   });
+
+  it("hides SSO when it is not configured and makes the demo the main action", () => {
+    render(<Login demo sso={false} />);
+    expect(
+      screen.queryByRole("link", { name: "Sign in with your organization" }),
+    ).not.toBeInTheDocument();
+    const demo = screen.getByRole("button", {
+      name: "Explore the demo workspace",
+    });
+    expect(demo).toHaveClass("button-primary");
+    expect(screen.queryByText(/isn.t configured/)).not.toBeInTheDocument();
+  });
+
+  it("tells a real deployment without OIDC settings to ask an administrator", () => {
+    render(<Login demo={false} sso={false} />);
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Single sign-on isn\u2019t configured — ask your administrator.",
+    );
+  });
 });

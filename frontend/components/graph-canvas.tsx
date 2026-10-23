@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Core, StylesheetCSS } from "cytoscape";
 import { Maximize2, Minus, Plus } from "lucide-react";
 import {
@@ -9,6 +9,7 @@ import {
   labelCandidates,
   labelFontSize,
   layoutInput,
+  layoutLimits,
   OVERVIEW_LABELS,
   startLayout,
   overviewAnchors,
@@ -68,11 +69,15 @@ export function GraphCanvas({
   const fitView = useRef<() => void>(() => {});
   const callback = useRef(onSelect);
   callback.current = onSelect;
+  // The graph stays hidden until the worker's first layout lands: the provisional ring
+  // positions (only there so the canvas has a size to fit) never paint as a flash.
+  const [laidOut, setLaidOut] = useState(false);
   useEffect(() => {
     if (!container.current) return;
     const element = container.current;
     const input = layoutInput(graph);
     if (!input) return;
+    setLaidOut(false);
     const positions = circlePositions(input.nodes);
     const anchors = overviewAnchors(graph);
     const style: StylesheetCSS[] = [
@@ -123,7 +128,7 @@ export function GraphCanvas({
         // Overview labels over a dense core: a backdrop, drawn above the dots.
         selector: "node.label-backed",
         css: {
-          "text-background-color": "#0d1522",
+          "text-background-color": "#0c1211",
           "text-background-opacity": 0.85,
           "z-index": 1,
         },
@@ -132,7 +137,7 @@ export function GraphCanvas({
         selector: "node.focus-neighbor",
         css: {
           opacity: 1,
-          "text-background-color": "#0d1522",
+          "text-background-color": "#0c1211",
           "text-background-opacity": 0.85,
           "text-background-padding": "3px",
         },
@@ -144,7 +149,7 @@ export function GraphCanvas({
           color: "#f5faff",
           "border-width": 2,
           "border-color": "#f5faff",
-          "text-background-color": "#0d1522",
+          "text-background-color": "#0c1211",
           "text-background-opacity": 0.85,
           "text-background-padding": "3px",
         },
@@ -162,7 +167,7 @@ export function GraphCanvas({
           color: "#cbd5e1",
           "font-size": 9,
           "text-rotation": "autorotate",
-          "text-background-color": "#0d1522",
+          "text-background-color": "#0c1211",
           "text-background-opacity": 0.95,
           "text-background-padding": "3px",
         },
@@ -177,7 +182,7 @@ export function GraphCanvas({
           "target-arrow-color": "#cbd5e1",
           color: "#cbd5e1",
           "font-size": 10,
-          "text-background-color": "#0d1522",
+          "text-background-color": "#0c1211",
           "text-background-opacity": 1,
           "text-background-padding": "3px",
         },
@@ -283,15 +288,29 @@ export function GraphCanvas({
     instance.on("pan zoom", () => {
       if (!programmatic) userMoved = true;
     });
-    const stopLayout = startLayout(input, (positions) => {
-      if (cy.current !== instance || instance.destroyed()) return;
-      instance.batch(() => {
-        for (const p of positions)
-          instance.getElementById(p.id).position({ x: p.x, y: p.y });
-      });
-      if (!userMoved) fitGraph();
-      labelSizing();
-    });
+    const reveal = () => {
+      if (cy.current === instance && !instance.destroyed()) setLaidOut(true);
+    };
+    const limits = layoutLimits(input);
+    // Beyond the worker's bounds there is no layout to wait for; show the ring as is.
+    if (input.nodes.length > limits.nodes || input.edges.length > limits.edges)
+      reveal();
+    const stopLayout = startLayout(
+      input,
+      (positions) => {
+        if (cy.current !== instance || instance.destroyed()) return;
+        instance.batch(() => {
+          for (const p of positions)
+            instance.getElementById(p.id).position({ x: p.x, y: p.y });
+        });
+        if (!userMoved) fitGraph();
+        labelSizing();
+        reveal();
+      },
+      undefined,
+      // A failed or timed-out layout falls back to the ring rather than a blank canvas.
+      reveal,
+    );
     let hovered: string | null = null;
     function labelSizing() {
       if (instance.destroyed()) return;
@@ -493,9 +512,15 @@ export function GraphCanvas({
   const hint = relationshipHint(graph);
   return (
     <div className="canvas-wrap">
+      {!laidOut && (
+        <div className="canvas-layout-pending" role="status">
+          Laying out {formatCount(graph.nodes.length)} nodes…
+        </div>
+      )}
       <div
         ref={container}
-        className="graph-canvas"
+        className={laidOut ? "graph-canvas" : "graph-canvas laying-out"}
+        aria-busy={!laidOut}
         role="img"
         aria-label={`Identity and data graph with ${formatCount(graph.nodes.length)} nodes. Use the identity list to select a node with the keyboard.`}
       />

@@ -354,7 +354,7 @@ describe("global map", () => {
           : p === "overview"
             ? { accounts: [], sensitivity: {} }
             : fallback(p);
-    render(<Console demo={true} />);
+    render(<Console demo={true} initialView="graph" />);
     await screen.findByRole("button", { name: "Initial agent" });
     expect(
       vi.mocked(api).mock.calls.some(([p]) => p.startsWith("graph/clusters")),
