@@ -5,6 +5,7 @@ import type { Job } from "@/lib/types";
 import { api } from "@/lib/api";
 import { formatCount, formatDateTime } from "@/lib/format";
 import { Button } from "@/components/ui/button";
+import { FilePicker } from "@/components/ui/file-picker";
 import { byteLength, INLINE_LIMIT_BYTES, uploadSnapshot } from "@/lib/upload";
 import { UsageUpload } from "@/components/usage-upload";
 function readText(file: Blob): Promise<string> {
@@ -112,17 +113,12 @@ export function Sources({
           </label>
         )}
         {source === "snapshot" && (
-          <label>
-            Snapshot file
-            <input
-              type="file"
-              accept=".json,application/json"
-              onChange={(e) => void loadFile(e.target.files?.[0])}
-            />
-            <small className="muted">
-              Files over 3 MB upload in chunks, up to the configured limits.
-            </small>
-          </label>
+          <FilePicker
+            label="Snapshot file"
+            accept=".json,application/json"
+            hint="Files over 3 MB upload in chunks, up to the configured limits."
+            onFiles={(files) => void loadFile(files[0])}
+          />
         )}
         {progress && <p className="muted">{progress}</p>}
         {error && (

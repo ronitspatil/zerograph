@@ -845,29 +845,85 @@
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
   }
-  /* File inputs: the picker button fitted inside the control like a small button. */
-  input[type="file"] {
-    padding: 0 12px 0 4px;
-    line-height: calc(var(--control-h) - 2px);
-    color: var(--muted);
-    cursor: pointer;
+  /* File fields (components/ui/file-picker.tsx): one control-height row with a
+     "Choose file" button and the chosen name; the native input is visually hidden. */
+  .form-panel > .file-field {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 12px 0;
   }
-  input[type="file"]::file-selector-button {
-    height: 24px;
-    margin: 0 12px 0 0;
-    padding: 0 12px;
+  .file-picker {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    height: var(--control-h);
+    min-width: 0;
+    padding: 0 12px 0 4px;
     border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    background: var(--control);
+    cursor: pointer;
+    transition: border-color 0.12s;
+  }
+  .file-picker:hover {
+    border-color: var(--border-hover);
+  }
+  .file-picker:focus-within {
+    outline: 2px solid var(--accent);
+    outline-offset: 0;
+    border-color: var(--accent);
+  }
+  .file-picker.disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .file-picker-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+    opacity: 0;
+  }
+  .file-picker-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+    height: 24px;
+    padding: 0 12px;
     border-radius: 4px;
     background: var(--surface-raised);
+    border: 1px solid var(--border);
     color: var(--text);
-    font: inherit;
     font-size: var(--fs-sm);
     font-weight: 500;
-    cursor: pointer;
     transition: background-color 0.12s;
   }
-  input[type="file"]:hover::file-selector-button {
+  .file-picker-button svg {
+    color: var(--accent);
+  }
+  .file-picker:hover .file-picker-button {
     background: var(--hover);
+  }
+  .file-picker-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    font-size: var(--fs-sm);
+    color: var(--text);
+  }
+  .file-picker-name.empty {
+    font-family: inherit;
+    color: var(--subtle);
   }
 
   /* Graph */
