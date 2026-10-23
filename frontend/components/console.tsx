@@ -7,7 +7,6 @@ import {
   ArrowRight,
   ChevronDown,
   ChevronRight,
-  CircleHelp,
   LayoutDashboard,
   ListChecks,
   LoaderCircle,
@@ -225,7 +224,6 @@ export function Console({
   const [account, setAccount] = useState("");
   const [type, setType] = useState("");
   const [risk, setRisk] = useState("");
-  const [showHelp, setShowHelp] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
   const [optimized, setOptimized] = useState(false);
   const [topicPage, setTopicPage] = useState<{
@@ -321,20 +319,17 @@ export function Console({
       if (!controller.signal.aborted) setLoading(false);
     }
   }, []);
-  // Escape closes the open overlay (simulator drawer or platform guide).
+  // Escape closes the simulator drawer.
   useEffect(() => {
-    if (!simulating && !showHelp) return;
+    if (!simulating) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (showHelp) setShowHelp(false);
-      else {
-        setSimulating(false);
-        setSimulation(null);
-      }
+      setSimulating(false);
+      setSimulation(null);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [simulating, showHelp]);
+  }, [simulating]);
   useEffect(() => {
     void refresh();
     return () => {
@@ -746,10 +741,6 @@ export function Console({
             <span className="nav-text">
               {rail ? "Expand sidebar" : "Collapse sidebar"}
             </span>
-          </button>
-          <button className="nav-item" onClick={() => setShowHelp(true)}>
-            <CircleHelp size={16} aria-hidden="true" />
-            <span className="nav-text">Platform guide</span>
           </button>
           <button className="nav-item" onClick={logout}>
             <LogOut size={16} aria-hidden="true" />
@@ -1551,45 +1542,6 @@ export function Console({
             }}
           />
         </>
-      )}
-      {showHelp && (
-        <div className="modal-backdrop">
-          <section
-            className="guide-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Platform guide"
-          >
-            <div className="panel-heading">
-              <h2>Understand your access graph</h2>
-              <button
-                className="icon-button"
-                onClick={() => setShowHelp(false)}
-                aria-label="Close guide"
-              >
-                <X size={16} />
-              </button>
-            </div>
-            <p>1. Add a source to collect identities and data relationships.</p>
-            <p>
-              2. Inspect findings and their evidence. Dashed graph edges are
-              conditional or declared access.
-            </p>
-            <p>
-              3. Select an identity and simulate compromise to explore its
-              reachable data assets.
-            </p>
-            <p>
-              4. Review least-privilege proposals in Remediation and accept
-              them. Administrators turn accepted proposals into draft pull
-              requests; nothing is applied by ZeroGraph.
-            </p>
-            <p>
-              Metadata classifications are hypotheses until you validate them.
-            </p>
-            <Button onClick={() => setShowHelp(false)}>Got it</Button>
-          </section>
-        </div>
       )}
     </div>
   );

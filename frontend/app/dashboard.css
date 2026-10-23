@@ -22,8 +22,7 @@
   .panel-heading h3,
   .chart-card-head h3,
   .node-sidebar h3,
-  .proposal-detail h3,
-  .guide-modal h2 {
+  .proposal-detail h3 {
     font-family: var(--font-display);
     font-weight: var(--fw-semibold);
     letter-spacing: var(--tracking-display);
