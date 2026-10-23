@@ -87,7 +87,7 @@ describe("console loading", () => {
           : path === "me"
             ? { subject: "test", tenant_id: "tenant", roles: ["viewer"] }
             : [];
-    render(<Console demo={false} />);
+    render(<Console demo={false} initialView="graph" />);
     await screen.findByRole("button", { name: "Visible agent" });
     expect(screen.queryByText(/Connecting your workspace/)).toBeNull();
     expect(screen.getByText(/1 \/ 20,000 nodes/)).toBeInTheDocument();
@@ -105,7 +105,7 @@ describe("console loading", () => {
       path === "overview"
         ? { ...overview, total_nhis: 47845, ai_agents: 9764 }
         : fallback(path);
-    render(<Console demo={false} />);
+    render(<Console demo={false} initialView="graph" />);
     expect(await screen.findByText("47,845")).toBeInTheDocument();
     expect(screen.getByText("9,764")).toBeInTheDocument();
     expect(screen.getByText("250")).toBeInTheDocument();
@@ -119,7 +119,7 @@ describe("console loading", () => {
         return { subject: "test", tenant_id: "tenant", roles: ["viewer"] };
       return [];
     };
-    render(<Console demo={false} />);
+    render(<Console demo={false} initialView="graph" />);
     await screen.findByRole("button", { name: "Visible agent" });
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Overview failed",
@@ -138,7 +138,7 @@ describe("console loading", () => {
         : path === "findings?limit=200&revision=r1&cursor=f0199"
           ? second
           : fallback(path);
-    render(<Console demo={false} />);
+    render(<Console demo={false} initialView="graph" />);
     await screen.findByRole("button", { name: "Visible agent" });
     const more = await screen.findByRole("button", {
       name: "Load more findings",
@@ -156,7 +156,7 @@ describe("console loading", () => {
     ]);
   });
   it("does not refetch immutable findings when a refresh returns the same revision", async () => {
-    render(<Console demo={false} />);
+    render(<Console demo={false} initialView="graph" />);
     await screen.findByRole("button", { name: "Visible agent" });
     await waitFor(() =>
       expect(calls()).toContain("findings?limit=200&revision=r1"),
@@ -176,7 +176,7 @@ describe("console loading", () => {
         throw new ApiError("Graph revision changed", 409);
       return fallback(path);
     };
-    render(<Console demo={false} />);
+    render(<Console demo={false} initialView="graph" />);
     await screen.findByRole("button", { name: "Visible agent" });
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "The graph revision changed",

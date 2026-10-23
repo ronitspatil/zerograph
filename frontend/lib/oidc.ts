@@ -1,3 +1,10 @@
+/** Single sign-on is offered only when an OIDC issuer and client are configured. */
+export function ssoConfigured(): boolean {
+  return (
+    !!process.env.ZG_OIDC_ISSUER?.trim() &&
+    !!process.env.ZG_OIDC_CLIENT_ID?.trim()
+  );
+}
 interface Discovery {
   issuer: string;
   authorization_endpoint: string;

@@ -750,3 +750,17 @@ export interface OptimizerOverview {
   rollout: Record<RolloutState | "canary_watching", number>;
   notice: string;
 }
+
+/** GET /overview/activity: observed use by day (identities by last use, pairs by first sight). */
+export interface OverviewActivity {
+  window_start: string | null;
+  window_end: string | null;
+  identities: number;
+  pairs: number;
+  days: {
+    day: string;
+    identities_last_used: number;
+    pairs_first_seen: number;
+  }[];
+  notice: string;
+}

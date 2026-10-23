@@ -764,14 +764,19 @@ function ProposalEvidence({
   const whatif = simulation?.whatif;
   return (
     <>
-      <span className="section-label">Proposed · not applied</span>
-      <h3>{TYPE_LABELS[p.type]}</h3>
-      <span className={`tier-badge tier-${p.tier}`} title={TIER_HINTS[p.tier]}>
-        {TIER_LABELS[p.tier]}
-        {p.base_tier !== p.tier
-          ? ` (evidence: ${TIER_LABELS[p.base_tier]})`
-          : ""}
-      </span>
+      <div className="proposal-detail-head">
+        <span className="section-label">Proposed · not applied</span>
+        <h3 title={TYPE_LABELS[p.type]}>{TYPE_LABELS[p.type]}</h3>
+        <span
+          className={`tier-badge tier-${p.tier}`}
+          title={TIER_HINTS[p.tier]}
+        >
+          {TIER_LABELS[p.tier]}
+          {p.base_tier !== p.tier
+            ? ` (evidence: ${TIER_LABELS[p.base_tier]})`
+            : ""}
+        </span>
+      </div>
       {p.reasons.length > 0 && (
         <ul className="proposal-reasons">
           {p.reasons.map((reason) => (

@@ -182,7 +182,7 @@ export function ClusterCanvas({
           "background-color": "data(color)",
           "background-opacity": 0.82,
           "border-width": 1,
-          "border-color": "#0a101b",
+          "border-color": "#070b0a",
           label: "",
           color: "#cbd5e1",
           "font-family": FONT,
@@ -220,7 +220,7 @@ export function ClusterCanvas({
         selector: "node.label-on",
         css: {
           label: "data(label)",
-          "text-background-color": "#0d1522",
+          "text-background-color": "#0c1211",
           "text-background-opacity": 0.92,
           "text-background-shape": "roundrectangle",
         },

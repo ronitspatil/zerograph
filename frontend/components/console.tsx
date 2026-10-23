@@ -5,16 +5,21 @@ import {
   Activity,
   ArrowDownToLine,
   ArrowRight,
+  ChevronDown,
   ChevronRight,
-  CircleHelp,
   LayoutDashboard,
   ListChecks,
   LoaderCircle,
   LogOut,
   Network,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plus,
+  Radar,
   RefreshCw,
   Search,
+  ShieldAlert,
+  SlidersHorizontal,
   Unplug,
   X,
 } from "lucide-react";
@@ -45,6 +50,7 @@ import { Sources } from "@/components/sources";
 import { ExcessPrivilegePanel } from "@/components/privilege";
 import { SensitivityChart } from "@/components/sensitivity-chart";
 import { Wordmark } from "@/components/ui/logo";
+import { Dashboard, SectionHeader } from "@/components/dashboard";
 import { GlobalMap } from "@/components/global-map";
 import {
   OptimizedBar,
@@ -94,13 +100,30 @@ const titles: Record<View, { title: string; description: string }> = {
     description: "Collection, simulations and remediation decisions.",
   },
 };
-const nav = [
-  { id: "overview", label: "Overview", icon: LayoutDashboard },
-  { id: "graph", label: "Knowledge graph", icon: Network },
-  { id: "remediation", label: "Remediation", icon: ListChecks },
-  { id: "sources", label: "Data sources", icon: Unplug },
-  { id: "activity", label: "Audit activity", icon: Activity },
+const navSections = [
+  {
+    id: "analyze",
+    label: "Analyze",
+    items: [
+      { id: "overview", label: "Overview", icon: LayoutDashboard },
+      { id: "graph", label: "Knowledge graph", icon: Network },
+    ],
+  },
+  {
+    id: "remediate",
+    label: "Remediate",
+    items: [{ id: "remediation", label: "Remediation", icon: ListChecks }],
+  },
+  {
+    id: "manage",
+    label: "Manage",
+    items: [
+      { id: "sources", label: "Data sources", icon: Unplug },
+      { id: "activity", label: "Audit activity", icon: Activity },
+    ],
+  },
 ] as const;
+const RAIL_KEY = "zg.sidebar.rail";
 const typeLabels: Record<string, string> = {
   AIAgent: "AI agent",
   MCPServer: "MCP server",
@@ -130,8 +153,43 @@ const emptyGraph: GraphView = {
     total_edges: 0,
   },
 };
-export function Console({ demo }: { demo: boolean }) {
-  const [view, setView] = useState<View>("graph");
+export function Console({
+  demo,
+  initialView = "overview",
+}: {
+  demo: boolean;
+  /** The view the console opens on (the overview dashboard by default). */
+  initialView?: View;
+}) {
+  const [view, setView] = useState<View>(initialView);
+  // Icon-only sidebar rail (desktop), remembered per browser; collapsed nav sections.
+  const [rail, setRail] = useState(false);
+  const [closedSections, setClosedSections] = useState<Set<string>>(
+    () => new Set(),
+  );
+  useEffect(() => {
+    try {
+      setRail(window.localStorage.getItem(RAIL_KEY) === "1");
+    } catch {
+      /* storage unavailable: default layout */
+    }
+  }, []);
+  const toggleRail = () =>
+    setRail((current) => {
+      try {
+        window.localStorage.setItem(RAIL_KEY, current ? "0" : "1");
+      } catch {
+        /* storage unavailable */
+      }
+      return !current;
+    });
+  const toggleSection = (id: string) =>
+    setClosedSections((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   const [graph, setGraph] = useState<GraphView | RoleMap>(emptyGraph);
   const [graphMode, setGraphMode] = useState<"identities" | "roles" | "map">(
     "identities",
@@ -166,7 +224,6 @@ export function Console({ demo }: { demo: boolean }) {
   const [account, setAccount] = useState("");
   const [type, setType] = useState("");
   const [risk, setRisk] = useState("");
-  const [showHelp, setShowHelp] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
   const [optimized, setOptimized] = useState(false);
   const [topicPage, setTopicPage] = useState<{
@@ -262,20 +319,17 @@ export function Console({ demo }: { demo: boolean }) {
       if (!controller.signal.aborted) setLoading(false);
     }
   }, []);
-  // Escape closes the open overlay (simulator drawer or platform guide).
+  // Escape closes the simulator drawer.
   useEffect(() => {
-    if (!simulating && !showHelp) return;
+    if (!simulating) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (showHelp) setShowHelp(false);
-      else {
-        setSimulating(false);
-        setSimulation(null);
-      }
+      setSimulating(false);
+      setSimulation(null);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [simulating, showHelp]);
+  }, [simulating]);
   useEffect(() => {
     void refresh();
     return () => {
@@ -622,7 +676,7 @@ export function Console({ demo }: { demo: boolean }) {
     },
   ];
   return (
-    <div className="app-shell">
+    <div className={rail ? "app-shell rail" : "app-shell"}>
       <aside className="sidebar">
         <a className="brand" href="/" aria-label="ZeroGraph home">
           <Wordmark />
@@ -634,30 +688,59 @@ export function Console({ demo }: { demo: boolean }) {
           </span>
         </div>
         <nav aria-label="Primary">
-          {nav.map((n) => (
-            <button
-              key={n.id}
-              className={
-                (view === "topic" ? "graph" : view) === n.id
-                  ? "nav-item active"
-                  : "nav-item"
-              }
-              aria-current={
-                (view === "topic" ? "graph" : view) === n.id
-                  ? "page"
-                  : undefined
-              }
-              onClick={() => setView(n.id)}
-            >
-              <n.icon size={16} aria-hidden="true" />
-              <span className="nav-text">{n.label}</span>
-            </button>
-          ))}
+          {navSections.map((section) => {
+            const open = !closedSections.has(section.id);
+            const current = view === "topic" ? "graph" : view;
+            return (
+              <div className="nav-section" key={section.id}>
+                <button
+                  type="button"
+                  className="nav-section-toggle"
+                  aria-expanded={open}
+                  aria-controls={`nav-${section.id}`}
+                  onClick={() => toggleSection(section.id)}
+                >
+                  <span className="nav-text">{section.label}</span>
+                  <ChevronDown size={12} aria-hidden="true" />
+                </button>
+                <div className="nav-section-items" id={`nav-${section.id}`}>
+                  {section.items
+                    // A collapsed section still shows the page you are on.
+                    .filter((n) => open || current === n.id)
+                    .map((n) => (
+                      <button
+                        key={n.id}
+                        className={
+                          current === n.id ? "nav-item active" : "nav-item"
+                        }
+                        aria-current={current === n.id ? "page" : undefined}
+                        title={rail ? n.label : undefined}
+                        onClick={() => setView(n.id)}
+                      >
+                        <n.icon size={16} aria-hidden="true" />
+                        <span className="nav-text">{n.label}</span>
+                      </button>
+                    ))}
+                </div>
+              </div>
+            );
+          })}
         </nav>
         <div className="sidebar-bottom">
-          <button className="nav-item" onClick={() => setShowHelp(true)}>
-            <CircleHelp size={16} aria-hidden="true" />
-            <span className="nav-text">Platform guide</span>
+          <button
+            className="nav-item rail-toggle"
+            onClick={toggleRail}
+            aria-pressed={rail}
+            title={rail ? "Expand sidebar" : undefined}
+          >
+            {rail ? (
+              <PanelLeftOpen size={16} aria-hidden="true" />
+            ) : (
+              <PanelLeftClose size={16} aria-hidden="true" />
+            )}
+            <span className="nav-text">
+              {rail ? "Expand sidebar" : "Collapse sidebar"}
+            </span>
           </button>
           <button className="nav-item" onClick={logout}>
             <LogOut size={16} aria-hidden="true" />
@@ -754,13 +837,22 @@ export function Console({ demo }: { demo: boolean }) {
             </div>
           )}
           {loading ? (
-            <div className="loading-state">
-              <LoaderCircle className="spin" />
-              Connecting your workspace…
+            <div className="loading-state" role="status">
+              <span className="sr-only">Connecting your workspace…</span>
+              <div className="skeleton-band" aria-hidden="true">
+                {[0, 1, 2, 3].map((i) => (
+                  <span key={i} className="skeleton-block" />
+                ))}
+              </div>
+              <div className="skeleton-panels" aria-hidden="true">
+                {[0, 1, 2].map((i) => (
+                  <span key={i} className="skeleton-block" />
+                ))}
+              </div>
             </div>
           ) : (
             <>
-              {(view === "graph" || view === "overview") && (
+              {view === "graph" && (
                 <div className="metric-grid">
                   {metrics.map((m) => (
                     <div
@@ -1259,10 +1351,26 @@ export function Console({ demo }: { demo: boolean }) {
               )}
               {view === "overview" && (
                 <>
+                  <Dashboard overview={overview} reloadKey={mapReload} />
+                  <SectionHeader
+                    icon={SlidersHorizontal}
+                    title="What-if and rollout"
+                    meta={
+                      <button
+                        type="button"
+                        className="text-link"
+                        onClick={() => setView("remediation")}
+                      >
+                        Open remediation
+                        <ArrowRight size={12} aria-hidden="true" />
+                      </button>
+                    }
+                  />
                   <OptimizerTiles
                     reloadKey={mapReload}
                     onOpenQueue={() => setView("remediation")}
                   />
+                  <SectionHeader icon={Radar} title="Data exposure" />
                   <div className="overview-grid">
                     <div className="panel chart-panel">
                       <div className="panel-heading">
@@ -1307,6 +1415,7 @@ export function Console({ demo }: { demo: boolean }) {
                       }
                     />
                   </div>
+                  <SectionHeader icon={ShieldAlert} title="Findings" />
                   <Findings
                     findings={findings}
                     graph={graph}
@@ -1433,45 +1542,6 @@ export function Console({ demo }: { demo: boolean }) {
             }}
           />
         </>
-      )}
-      {showHelp && (
-        <div className="modal-backdrop">
-          <section
-            className="guide-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Platform guide"
-          >
-            <div className="panel-heading">
-              <h2>Understand your access graph</h2>
-              <button
-                className="icon-button"
-                onClick={() => setShowHelp(false)}
-                aria-label="Close guide"
-              >
-                <X size={16} />
-              </button>
-            </div>
-            <p>1. Add a source to collect identities and data relationships.</p>
-            <p>
-              2. Inspect findings and their evidence. Dashed graph edges are
-              conditional or declared access.
-            </p>
-            <p>
-              3. Select an identity and simulate compromise to explore its
-              reachable data assets.
-            </p>
-            <p>
-              4. Review least-privilege proposals in Remediation and accept
-              them. Administrators turn accepted proposals into draft pull
-              requests; nothing is applied by ZeroGraph.
-            </p>
-            <p>
-              Metadata classifications are hypotheses until you validate them.
-            </p>
-            <Button onClick={() => setShowHelp(false)}>Got it</Button>
-          </section>
-        </div>
       )}
     </div>
   );

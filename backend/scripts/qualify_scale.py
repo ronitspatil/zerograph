@@ -385,8 +385,29 @@ def _plant_lf_tags(seed, nodes, added, roles_by_topic, hubs, grants, used, dupli
     return lf, truth
 
 
+# The demo and preview profile of ``generate_topics(overprivileged=True)``: a typical
+# over-permissioned company. More roles carry broad, wildcard-style data policies with dozens
+# of extra grants; cross-team grants are commoner and land on other teams' popular shared
+# assets; teams use most of their own data; more identities have gone stale; and only a few
+# administrators can assume the three org-admin roles. Nothing about the optimizer changes:
+# it is only given more of the access it already proposes to remove.
+OVER = {
+    "broad_share": 0.10,
+    "broad_cross": 0.75,
+    "broad_extra": (15, 45),
+    "cross": 0.25,
+    "own_used": 0.85,
+    "dormant": 0.12,
+    "hub_assumers": 0.015,
+}
+
+
 def generate_topics(
-    n: int = 100_000, seed: int = 11, glue: bool = False, glue_size: int | None = None
+    n: int = 100_000,
+    seed: int = 11,
+    glue: bool = False,
+    glue_size: int | None = None,
+    overprivileged: bool = False,
 ) -> tuple[GraphSnapshot, dict, dict]:
     """Planted-topic identity graph with a ground-truth sidecar and synthetic usage.
 
@@ -401,6 +422,10 @@ def generate_topics(
     sized from ``glue_size`` (default ``n``). The qualifications publish
     ``generate_topics(glue_base_size(size), glue=True, glue_size=size)``: at most ``size``
     nodes, within the 100,000-node publish cap.
+
+    ``overprivileged`` (demo and preview profile, ``OVERPRIVILEGED``) models a typical
+    over-permissioned company instead of the qualification baseline; with it off, every
+    node, edge and usage record is exactly the baseline's.
     """
     rng = random.Random(seed)
     names = [topic[0] for topic in PLANTED_TOPICS]
@@ -467,7 +492,7 @@ def generate_topics(
     for role in roles:
         roles_by_topic[topic_of[role]].append(role)
     hubs = roles[:3]
-    broad = set(roles[3 : 3 + int(len(roles) * 0.01)])
+    broad = set(roles[3 : 3 + int(len(roles) * (OVER["broad_share"] if overprivileged else 0.01))])
     grants: dict[str, dict[str, str]] = {role: {} for role in roles}  # role -> data -> "read"/"write"
     used: dict[str, set[str]] = {role: set() for role in roles}
     over: set[tuple[str, str]] = set()
@@ -482,15 +507,26 @@ def generate_topics(
                     over.add((role, item))
             continue
         pool = data_by_topic[topic]
-        for _ in range(1 + zipf_pick(rng, 60, 1.0)):
-            cross = rng.random() < (0.45 if role in broad else 0.15)
-            item = rng.choice(data) if cross else pool[zipf_pick(rng, len(pool), 1.02)]
+        cross_rate = (0.45, 0.15) if not overprivileged else (OVER["broad_cross"], OVER["cross"])
+        draws = 1 + zipf_pick(rng, 60, 1.0)
+        if overprivileged and role in broad:
+            draws += rng.randint(*OVER["broad_extra"])
+        for _ in range(draws):
+            cross = rng.random() < (cross_rate[0] if role in broad else cross_rate[1])
+            if not cross:
+                item = pool[zipf_pick(rng, len(pool), 1.02)]
+            elif overprivileged:
+                # Sprawl lands on other teams' popular shared assets (the lake, the warehouse).
+                other = data_by_topic[rng.choices(names, weights)[0]]
+                item = other[zipf_pick(rng, len(other), 1.02)]
+            else:
+                item = rng.choice(data)
             if item in grants[role]:
                 continue
             grants[role][item] = "read" if rng.random() < 0.7 else "write"
             legitimate_cross = cross and topic_of[item] != topic and rng.random() < 0.05
             if topic_of[item] == topic or legitimate_cross:
-                if rng.random() < 0.65:
+                if rng.random() < (OVER["own_used"] if overprivileged else 0.65):
                     used[role].add(item)
             else:
                 over.add((role, item))
@@ -527,7 +563,7 @@ def generate_topics(
     assume_used: dict[str, set[str]] = {}
     dormant: set[str] = set()
     for identity in identities:
-        if rng.random() < 0.07:
+        if rng.random() < (OVER["dormant"] if overprivileged else 0.07):
             dormant.add(identity)
         topic = topic_of[identity]
         chosen: list[str] = []
@@ -540,7 +576,7 @@ def generate_topics(
                 chosen.append(role)
             if same and identity not in dormant and rng.random() < 0.85:
                 used_roles.add(role)
-        if rng.random() < 0.05:
+        if rng.random() < (OVER["hub_assumers"] if overprivileged else 0.05):
             hub = rng.choice(hubs)
             if hub not in chosen:
                 chosen.append(hub)

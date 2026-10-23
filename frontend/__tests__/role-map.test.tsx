@@ -94,7 +94,7 @@ beforeEach(() => {
   vi.mocked(api).mockImplementation(async (p, o) => handler(p, o) as never);
 });
 async function ready() {
-  render(<Console demo={true} />);
+  render(<Console demo={true} initialView="graph" />);
   await screen.findByRole("button", { name: "Initial agent" });
 }
 async function roles() {
