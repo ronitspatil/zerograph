@@ -147,7 +147,12 @@ class GraphResponse(BaseModel):
 
 @router.get("/me")
 def me(actor: Viewer):
-    return {"subject": actor.subject, "tenant_id": actor.tenant_id, "roles": sorted(actor.roles)}
+    return {
+        "subject": actor.subject,
+        "name": actor.name,
+        "tenant_id": actor.tenant_id,
+        "roles": sorted(actor.roles),
+    }
 
 
 @router.get("/graph", response_model=GraphResponse)

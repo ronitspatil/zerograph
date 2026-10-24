@@ -45,6 +45,28 @@ def test_verified_oidc_token_binds_tenant_and_roles(oidc):
     actor = current_actor(token(oidc))
     assert actor.tenant_id == "tenant-a"
     assert actor.roles == frozenset({"analyst"})
+    assert actor.name == ""
+
+
+@pytest.mark.parametrize(
+    ("changes", "name"),
+    [
+        ({"preferred_username": "alice.admin", "name": "Alice", "email": "a@x.test"}, "alice.admin"),
+        ({"name": "Alice Admin", "email": "a@x.test"}, "Alice Admin"),
+        ({"email": "a@x.test"}, "a@x.test"),
+        ({"preferred_username": "  ", "name": "x" * 257, "email": "bad\nname"}, ""),
+        ({"preferred_username": ["alice"]}, ""),
+    ],
+)
+def test_display_name_is_cosmetic_and_bounded(oidc, changes, name):
+    actor = current_actor(token(oidc, **changes))
+    assert actor.name == name
+    assert actor.subject == "alice"
+
+
+def test_me_reports_display_name(client):
+    body = client.get("/api/v1/me").json()
+    assert set(body) == {"subject", "name", "tenant_id", "roles"}
 
 
 @pytest.mark.parametrize(
