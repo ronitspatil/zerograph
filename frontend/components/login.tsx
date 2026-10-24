@@ -11,20 +11,34 @@ const capabilities = [
   { icon: Route, text: "Traces toxic paths from exposed entry points" },
   { icon: GitPullRequest, text: "Proposes least-privilege fixes for review" },
 ];
+const ssoUnconfigured =
+  "Single sign-on isn\u2019t configured \u2014 ask your administrator.";
+const errors: Record<string, string> = {
+  configuration:
+    "Single sign-on couldn\u2019t start. Check the identity provider configuration.",
+  authentication:
+    "Sign-in failed. Your account may not have access to ZeroGraph \u2014 ask your administrator.",
+};
 export function Login({
   demo,
   sso = true,
   error,
 }: {
   demo: boolean;
-  /** An OIDC issuer and client are configured; otherwise the SSO button is hidden. */
+  /** An OIDC issuer and client are configured. Otherwise the SSO button explains why it can't start. */
   sso?: boolean;
   error?: string;
 }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState(
-    error ? "Sign-in failed. Check your identity provider configuration." : "",
+    error
+      ? (errors[error] ??
+          "Sign-in failed. Check your identity provider configuration.")
+      : "",
   );
+  // Without OIDC settings the SSO button never silently does nothing: it reveals why.
+  // Outside demo mode it is the only way in, so the explanation shows straight away.
+  const [ssoNotice, setSsoNotice] = useState(!sso && !demo);
   async function enter() {
     setBusy(true);
     try {
@@ -36,6 +50,21 @@ export function Login({
       setBusy(false);
     }
   }
+  // The demo stays the main action in demo mode; otherwise organization sign-in is.
+  const ssoVariant = demo ? "outline" : "default";
+  const organization = sso ? (
+    <Button asChild variant={ssoVariant}>
+      <a href="/api/auth/login">Sign in with your organization</a>
+    </Button>
+  ) : (
+    <Button
+      variant={ssoVariant}
+      onClick={() => setSsoNotice(true)}
+      aria-describedby={ssoNotice ? "login-sso-notice" : undefined}
+    >
+      Sign in with your organization
+    </Button>
+  );
   return (
     <main className="login-shell">
       <div className="login-card">
@@ -56,11 +85,9 @@ export function Login({
         <div className="login-body">
           <h1>{sso || !demo ? "Sign in" : "Explore ZeroGraph"}</h1>
           <p>
-            {sso
+            {sso || !demo
               ? "Single sign-on through your organization\u2019s identity provider (OIDC)."
-              : demo
-                ? "A demo workspace with a sample environment. No sign-in needed."
-                : "Single sign-on through your organization\u2019s identity provider (OIDC)."}
+              : "A demo workspace with a sample environment. No sign-in needed."}
           </p>
           {message && (
             <p className="error-banner" role="alert">
@@ -68,31 +95,34 @@ export function Login({
             </p>
           )}
           <div className="login-actions">
-            {sso && (
-              <Button asChild>
-                <a href="/api/auth/login">Sign in with your organization</a>
-              </Button>
-            )}
             {demo && (
-              <Button
-                variant={sso ? "outline" : "default"}
-                onClick={enter}
-                disabled={busy}
-              >
-                {busy ? "Opening console…" : "Explore the demo workspace"}
+              <Button variant="default" onClick={enter} disabled={busy}>
+                {busy ? "Opening console\u2026" : "Explore the demo workspace"}
               </Button>
             )}
-            {!sso && !demo && (
-              <p className="login-unconfigured" role="status">
-                Single sign-on isn&rsquo;t configured — ask your administrator.
+            {organization}
+            {ssoNotice && (
+              <p
+                id="login-sso-notice"
+                className="login-unconfigured"
+                role="status"
+              >
+                {ssoUnconfigured}
               </p>
             )}
           </div>
-          <p className="login-help">
-            {sso || !demo
-              ? "Need access? Contact your workspace administrator."
-              : "Single sign-on appears here once your administrator configures it."}
-          </p>
+          {sso || !demo ? (
+            <p className="login-help">
+              Need access? Contact your workspace administrator.
+            </p>
+          ) : (
+            !ssoNotice && (
+              <p className="login-help">
+                Organization sign-in works once your administrator configures
+                OIDC.
+              </p>
+            )
+          )}
         </div>
       </div>
       <LoginRing />

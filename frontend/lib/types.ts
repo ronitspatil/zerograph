@@ -251,6 +251,8 @@ export interface AuditEvent {
 }
 export interface Actor {
   subject: string;
+  /** Display name from the identity provider; empty for the demo and when not provided. */
+  name?: string;
   tenant_id: string;
   roles: string[];
 }

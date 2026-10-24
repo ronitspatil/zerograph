@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import { cookieOptions, seal, sessionCookie, unseal } from "@/lib/session";
 import { discover } from "@/lib/oidc";
 export const dynamic = "force-dynamic";
+const maxSessionCookie = 3800;
 export async function GET(request: Request) {
   try {
     const url = new URL(request.url);
@@ -49,11 +50,21 @@ export async function GET(request: Request) {
       Math.min(Number(tokens.expires_in) || 3600, 3600),
     );
     const response = NextResponse.redirect(`${process.env.ZG_PUBLIC_URL}/`);
-    response.cookies.set(
-      sessionCookie,
-      await seal({ access_token: tokens.access_token }, maxAge),
-      { ...cookieOptions, maxAge },
-    );
+    const session: Record<string, string> = {
+      access_token: tokens.access_token,
+      kind: "oidc",
+    };
+    let sealed = await seal(session, maxAge);
+    // The ID token is kept only as the sign-out hint for the provider, and only while the
+    // sealed cookie stays inside the browser's 4 KB cookie limit.
+    if (typeof tokens.id_token === "string") {
+      const withHint = await seal(
+        { ...session, id_token: tokens.id_token },
+        maxAge,
+      );
+      if (withHint.length <= maxSessionCookie) sealed = withHint;
+    }
+    response.cookies.set(sessionCookie, sealed, { ...cookieOptions, maxAge });
     response.cookies.delete("zg_oauth");
     return response;
   } catch {
