@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   accessToken: vi.fn(),
+  currentSession: vi.fn(),
   validOrigin: vi.fn(),
   seal: vi.fn(),
   unseal: vi.fn(),
@@ -17,6 +18,7 @@ vi.mock("next/headers", () => ({
 }));
 import { POST, GET } from "@/app/api/zg/[...path]/route";
 import { GET as callback } from "@/app/api/auth/callback/route";
+import { POST as logout } from "@/app/api/auth/logout/route";
 import { discover } from "@/lib/oidc";
 
 const fetchMock = vi.fn();
@@ -146,6 +148,8 @@ it("OIDC discovery rejects mismatched issuers and credential-bearing endpoints",
     { issuer: "https://other.example" },
     { token_endpoint: "https://secret@issuer.example/token" },
     { token_endpoint: "http://issuer.example/token" },
+    { end_session_endpoint: "http://issuer.example/logout" },
+    { end_session_endpoint: "https://issuer.example/logout#x" },
   ]) {
     fetchMock.mockResolvedValueOnce(
       Response.json({ ...discovery, ...changes }),
@@ -180,10 +184,97 @@ it("OAuth callback binds PKCE and disallows redirects during credential exchange
   expect(exchange.body.get("code_verifier")).toBe("pkce-verifier");
   expect(fetchMock.mock.calls[2][1].redirect).toBe("error");
   expect(mocks.seal).toHaveBeenCalledWith(
-    { access_token: "verified-token" },
+    { access_token: "verified-token", kind: "oidc" },
     900,
   );
   expect(response.headers.get("set-cookie")).toContain("HttpOnly");
+});
+it("OAuth callback keeps the ID token as a sign-out hint only while the cookie fits", async () => {
+  for (const [sealed, kept] of [
+    ["x".repeat(3000), true],
+    ["x".repeat(5000), false],
+  ] as const) {
+    mocks.seal.mockReset();
+    mocks.seal
+      .mockResolvedValueOnce("small-session")
+      .mockResolvedValueOnce(sealed);
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce(Response.json(discovery));
+    fetchMock.mockResolvedValueOnce(
+      Response.json({ access_token: "verified-token", id_token: "id-token" }),
+    );
+    fetchMock.mockResolvedValueOnce(Response.json({ tenant_id: "tenant-a" }));
+    const response = await callback(
+      new Request(
+        "https://console.example/api/auth/callback?state=expected&code=code",
+      ),
+    );
+    expect(mocks.seal).toHaveBeenLastCalledWith(
+      { access_token: "verified-token", kind: "oidc", id_token: "id-token" },
+      3600,
+    );
+    expect(response.headers.get("set-cookie")).toContain(
+      `zg_session=${kept ? sealed : "small-session"};`,
+    );
+  }
+});
+it("logout ends an organization session at the provider and returns to sign-in", async () => {
+  vi.stubEnv("ZG_OIDC_CLIENT_ID", "zerograph-web");
+  mocks.currentSession.mockResolvedValue({
+    accessToken: "credential",
+    kind: "oidc",
+    idToken: "id-token",
+  });
+  fetchMock.mockResolvedValueOnce(
+    Response.json({
+      ...discovery,
+      end_session_endpoint: "https://issuer.example/logout",
+    }),
+  );
+  const response = await logout(
+    new Request("https://console.example/api/auth/logout", { method: "POST" }),
+  );
+  const { redirect } = await response.json();
+  const url = new URL(redirect);
+  expect(url.origin + url.pathname).toBe("https://issuer.example/logout");
+  expect(url.searchParams.get("id_token_hint")).toBe("id-token");
+  expect(url.searchParams.get("client_id")).toBe("zerograph-web");
+  expect(url.searchParams.get("post_logout_redirect_uri")).toBe(
+    "https://console.example/login",
+  );
+  expect(response.headers.get("set-cookie")).toMatch(/zg_session=;/);
+});
+it("logout of a demo session or without a provider endpoint stays local", async () => {
+  mocks.currentSession.mockResolvedValue({
+    accessToken: "credential",
+    kind: "demo",
+  });
+  let response = await logout(
+    new Request("https://console.example/api/auth/logout", { method: "POST" }),
+  );
+  expect(await response.json()).toEqual({ ok: true });
+  expect(fetchMock).not.toHaveBeenCalled();
+  mocks.currentSession.mockResolvedValue({
+    accessToken: "credential",
+    kind: "oidc",
+    idToken: "id-token",
+  });
+  fetchMock.mockResolvedValueOnce(Response.json(discovery));
+  response = await logout(
+    new Request("https://console.example/api/auth/logout", { method: "POST" }),
+  );
+  expect(await response.json()).toEqual({ ok: true });
+  expect(response.headers.get("set-cookie")).toMatch(/zg_session=;/);
+  mocks.validOrigin.mockReturnValue(false);
+  expect(
+    (
+      await logout(
+        new Request("https://console.example/api/auth/logout", {
+          method: "POST",
+        }),
+      )
+    ).status,
+  ).toBe(403);
 });
 it("OAuth callback never creates a session for a backend-rejected token", async () => {
   fetchMock.mockResolvedValueOnce(Response.json(discovery));

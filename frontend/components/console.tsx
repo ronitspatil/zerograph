@@ -50,6 +50,7 @@ import { Sources } from "@/components/sources";
 import { ExcessPrivilegePanel } from "@/components/privilege";
 import { SensitivityChart } from "@/components/sensitivity-chart";
 import { Wordmark } from "@/components/ui/logo";
+import { SidebarSignIn } from "@/components/sign-in";
 import { Dashboard, SectionHeader } from "@/components/dashboard";
 import { GlobalMap } from "@/components/global-map";
 import {
@@ -124,6 +125,25 @@ const navSections = [
   },
 ] as const;
 const RAIL_KEY = "zg.sidebar.rail";
+const REENTRY_KEY = "zg.session.reentry";
+/**
+ * An expired session goes back through /login. A demo deployment hands out a fresh demo
+ * session there and returns to the dashboard; if the backend keeps rejecting even that,
+ * the demo stops and says so instead of reloading forever.
+ */
+function signInAgain(demo: boolean): string | null {
+  if (demo)
+    try {
+      const last = Number(window.sessionStorage.getItem(REENTRY_KEY));
+      if (Date.now() - last < 15_000)
+        return "The demo workspace couldn\u2019t open a session. Check the deployment\u2019s demo settings.";
+      window.sessionStorage.setItem(REENTRY_KEY, String(Date.now()));
+    } catch {
+      /* storage unavailable: re-enter as before */
+    }
+  window.location.assign("/login");
+  return null;
+}
 const typeLabels: Record<string, string> = {
   AIAgent: "AI agent",
   MCPServer: "MCP server",
@@ -155,9 +175,12 @@ const emptyGraph: GraphView = {
 };
 export function Console({
   demo,
+  sso = false,
   initialView = "overview",
 }: {
   demo: boolean;
+  /** Organization single sign-on is configured: the demo's Sign in starts it directly. */
+  sso?: boolean;
   /** The view the console opens on (the overview dashboard by default). */
   initialView?: View;
 }) {
@@ -264,7 +287,8 @@ export function Console({
     const workspaceError = (e: unknown) => {
       if (workspace.signal.aborted) return;
       if (e instanceof ApiError && e.status === 401) {
-        window.location.assign("/login");
+        const stuck = signInAgain(demo);
+        if (stuck) setError(stuck);
         return;
       }
       setError(e instanceof Error ? e.message : "Could not load workspace");
@@ -311,14 +335,15 @@ export function Console({
     } catch (e) {
       if (controller.signal.aborted) return;
       if (e instanceof ApiError && e.status === 401) {
-        window.location.assign("/login");
+        const stuck = signInAgain(demo);
+        if (stuck) setError(stuck);
         return;
       }
       setError(e instanceof Error ? e.message : "Could not load workspace");
     } finally {
       if (!controller.signal.aborted) setLoading(false);
     }
-  }, []);
+  }, [demo]);
   // Escape closes the simulator drawer.
   useEffect(() => {
     if (!simulating) return;
@@ -339,22 +364,27 @@ export function Console({
       findingsRequest.current?.abort();
     };
   }, [refresh]);
-  const explorationError = useCallback((e: unknown) => {
-    if (e instanceof ApiError && e.status === 401) {
-      window.location.assign("/login");
-      return;
-    }
-    if (e instanceof ApiError && e.status === 409) {
-      setRevisionStale(true);
-      setSelected(null);
-      setSimulation(null);
-      setSimulating(false);
-      setSearchResults(null);
-      setError(
-        "The graph revision changed. Refresh the workspace to reset this view.",
-      );
-    } else setError(e instanceof Error ? e.message : "Could not explore graph");
-  }, []);
+  const explorationError = useCallback(
+    (e: unknown) => {
+      if (e instanceof ApiError && e.status === 401) {
+        const stuck = signInAgain(demo);
+        if (stuck) setError(stuck);
+        return;
+      }
+      if (e instanceof ApiError && e.status === 409) {
+        setRevisionStale(true);
+        setSelected(null);
+        setSimulation(null);
+        setSimulating(false);
+        setSearchResults(null);
+        setError(
+          "The graph revision changed. Refresh the workspace to reset this view.",
+        );
+      } else
+        setError(e instanceof Error ? e.message : "Could not explore graph");
+    },
+    [demo],
+  );
   const loadFindings = useCallback(
     async (revision: string, after?: string) => {
       findingsRequest.current?.abort();
@@ -646,8 +676,16 @@ export function Console({
     URL.revokeObjectURL(url);
   }
   async function logout() {
-    await fetch("/api/auth/logout", { method: "POST" });
-    window.location.assign("/login");
+    let next = "/login";
+    try {
+      const r = await fetch("/api/auth/logout", { method: "POST" });
+      const body = (await r.json()) as { redirect?: unknown };
+      // An organization session also ends at the identity provider, which returns here.
+      if (typeof body.redirect === "string") next = body.redirect;
+    } catch {
+      // The session cookie is cleared server-side; fall back to the sign-in page.
+    }
+    window.location.assign(next);
   }
   const metrics = [
     {
@@ -742,20 +780,40 @@ export function Console({
               {rail ? "Expand sidebar" : "Collapse sidebar"}
             </span>
           </button>
-          <button className="nav-item" onClick={logout}>
-            <LogOut size={16} aria-hidden="true" />
-            <span className="nav-text">Sign out</span>
-          </button>
+          {demo ? (
+            <SidebarSignIn sso={sso} rail={rail} />
+          ) : (
+            <button
+              className="nav-item"
+              onClick={logout}
+              title={rail ? "Sign out" : undefined}
+            >
+              <LogOut size={16} aria-hidden="true" />
+              <span className="nav-text">Sign out</span>
+            </button>
+          )}
           <div className="user">
             <span className="user-avatar">
-              {actor?.subject.slice(0, 1).toUpperCase() || "U"}
+              {demo
+                ? "D"
+                : (actor?.name || actor?.subject)?.slice(0, 1).toUpperCase() ||
+                  "U"}
             </span>
             <div>
               <strong>
-                {demo ? "Demo operator" : actor?.subject || "Signed in"}
+                {demo
+                  ? "Demo operator"
+                  : actor?.name || actor?.subject || "Signed in"}
               </strong>
+              {/* No role guessed before the workspace says which one it is. */}
               <span>
-                {canAdmin ? "Administrator" : canWrite ? "Analyst" : "Viewer"}
+                {!actor
+                  ? "\u00a0"
+                  : canAdmin
+                    ? "Administrator"
+                    : canWrite
+                      ? "Analyst"
+                      : "Viewer"}
               </span>
             </div>
           </div>

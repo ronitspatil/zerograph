@@ -12,13 +12,13 @@ docker compose up --build -d
 docker compose logs -f backend worker
 ```
 
-Open `http://localhost:3100`, select **Explore the demo workspace**, then **Load sample environment**. An ingestion job goes through Redis and Celery; the completed snapshot appears in the graph. Select Support Copilot to simulate compromise. The remediation hub contains a synthetic sample policy and observation history. Complete audit coverage is unchecked by default.
+Open `http://localhost:3100`. The demo opens directly on the overview dashboard with a synthetic demo session; select **Load sample environment**. An ingestion job goes through Redis and Celery; the completed snapshot appears in the graph. Select Support Copilot to simulate compromise. The remediation hub contains a synthetic sample policy and observation history. Complete audit coverage is unchecked by default.
 
 Only the frontend is published, on the loopback interface. PostgreSQL, Redis, graph Bolt, and FastAPI are on the Compose network. `docker compose down` keeps named volumes. The scheduler recovers queued jobs if broker publication fails and resets workers stalled longer than 20 minutes. Every 60 s it also has the worker bring revisions published by an older release up to date: global-map clusters ([global-map.md](global-map.md)), relationship topics ([topics.md](topics.md)) and explore samples ([revision-analysis.md](revision-analysis.md#explore-samples-sample_version-migration-0006)), at most 3 tenants per run each, skipping tenants that are publishing, so none needs a manual backfill after an upgrade.
 
 ## Authentication and authorization
 
-Set `ZG_DEMO_MODE=false` and `ZG_ENVIRONMENT=production`. Configure the HTTPS OIDC issuer, JWKS URL, API audience, web client ID, client secret where required, and registered callback `${ZG_PUBLIC_URL}/api/auth/callback`. `ZG_OIDC_SCOPE` must request an access token for the API audience according to your provider's configuration.
+Set `ZG_DEMO_MODE=false` and `ZG_ENVIRONMENT=production`. Configure the HTTPS OIDC issuer, JWKS URL, API audience, web client ID, client secret where required, registered callback `${ZG_PUBLIC_URL}/api/auth/callback` and post-logout redirect `${ZG_PUBLIC_URL}/login` (sign-out also ends the provider session through its `end_session_endpoint` when discovery advertises one). Access tokens must carry the tenant and roles claims (`ZG_TENANT_CLAIM`, `ZG_ROLE_CLAIM`); `preferred_username`, `name` or `email` is shown as the signed-in user's name. `ZG_OIDC_SCOPE` must request an access token for the API audience according to your provider's configuration.
 
 Access tokens must be signed RS256 or ES256 JWTs containing `sub`, `iat`, `exp`, the configured tenant claim, and an array of roles. Roles are `viewer`, `analyst`, and `admin`; administrators can perform all actions. The tenant comes from the verified access token, never a request header. Analyst access permits simulations, audit normalization, and remediation previews. Ingestion, PR creation, and workspace audit inspection require administrator access.
 
@@ -77,4 +77,4 @@ CI also builds the Docker images and starts the complete Compose stack with disp
 
 To reproduce, generate a disposable `.env`, run `docker compose up --build --detach --wait --wait-timeout 240`, and run `ZG_E2E_URL=http://localhost:3100 backend/.venv/bin/pytest backend/tests/test_stack_e2e.py -v --no-cov`. Use a disposable Compose project; the test adds synthetic demo data. Run `docker compose down --volumes` only when its volumes are disposable. With Helm and PyYAML installed, run `helm lint deploy/helm/zerograph --strict` and `python3 -m unittest discover -s deploy/tests -v` to verify rendered resources and configuration rollouts without a cluster.
 
-The console uses Next.js 15.5.24 and React 19 rather than the originally proposed Next.js 14 and React 18. The change avoids advisories without fixes in the older Next.js major. Dependency lockfiles pin the backend and frontend installations; frontend overrides select a patched PostCSS version.
+The console uses Next.js 15.5.28 and React 19 rather than the originally proposed Next.js 14 and React 18. The change avoids advisories without fixes in the older Next.js major. Dependency lockfiles pin the backend and frontend installations; frontend overrides select a patched PostCSS version.

@@ -33,17 +33,32 @@ export async function unseal(token: string) {
     })
   ).payload;
 }
-export async function accessToken(): Promise<string | null> {
+/** The sealed session: its access token, how it was created and, for OIDC, the ID token for sign-out. */
+export async function currentSession(): Promise<{
+  accessToken: string;
+  kind?: "demo" | "oidc";
+  idToken?: string;
+} | null> {
   const cookie = (await cookies()).get(sessionCookie)?.value;
   if (!cookie) return null;
   try {
     const payload = await unseal(cookie);
-    return typeof payload.access_token === "string"
-      ? payload.access_token
-      : null;
+    if (typeof payload.access_token !== "string") return null;
+    return {
+      accessToken: payload.access_token,
+      kind:
+        payload.kind === "demo" || payload.kind === "oidc"
+          ? payload.kind
+          : undefined,
+      idToken:
+        typeof payload.id_token === "string" ? payload.id_token : undefined,
+    };
   } catch {
     return null;
   }
+}
+export async function accessToken(): Promise<string | null> {
+  return (await currentSession())?.accessToken ?? null;
 }
 export const cookieOptions = {
   httpOnly: true,
