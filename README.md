@@ -9,6 +9,8 @@ into draft pull requests (GitHub) or merge requests (GitLab) with a canary rollo
 revert plan. ZeroGraph never merges, deploys or changes cloud IAM itself; its AWS collector
 is read-only.
 
+![ZeroGraph knowledge graph of identities, roles and data stores](docs/images/knowledge-graph.png)
+
 ## Quick start
 
 Requires Docker Compose. From the repository root:
