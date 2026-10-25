@@ -3,6 +3,7 @@ import { useState } from "react";
 import { GitPullRequest, KeyRound, Route } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Wordmark } from "@/components/ui/logo";
+import { ssoUnconfigured } from "@/components/sign-in";
 const capabilities = [
   {
     icon: KeyRound,
@@ -11,8 +12,6 @@ const capabilities = [
   { icon: Route, text: "Traces toxic paths from exposed entry points" },
   { icon: GitPullRequest, text: "Proposes least-privilege fixes for review" },
 ];
-const ssoUnconfigured =
-  "Single sign-on isn\u2019t configured \u2014 ask your administrator.";
 const errors: Record<string, string> = {
   configuration:
     "Single sign-on couldn\u2019t start. Check the identity provider configuration.",
