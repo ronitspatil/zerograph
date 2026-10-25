@@ -18,7 +18,7 @@ Only the frontend is published, on the loopback interface. PostgreSQL, Redis, gr
 
 ## Authentication and authorization
 
-Set `ZG_DEMO_MODE=false` and `ZG_ENVIRONMENT=production`. Configure the HTTPS OIDC issuer, JWKS URL, API audience, web client ID, client secret where required, and registered callback `${ZG_PUBLIC_URL}/api/auth/callback`. `ZG_OIDC_SCOPE` must request an access token for the API audience according to your provider's configuration.
+Set `ZG_DEMO_MODE=false` and `ZG_ENVIRONMENT=production`. Configure the HTTPS OIDC issuer, JWKS URL, API audience, web client ID, client secret where required, registered callback `${ZG_PUBLIC_URL}/api/auth/callback` and post-logout redirect `${ZG_PUBLIC_URL}/login` (sign-out also ends the provider session through its `end_session_endpoint` when discovery advertises one). Access tokens must carry the tenant and roles claims (`ZG_TENANT_CLAIM`, `ZG_ROLE_CLAIM`); `preferred_username`, `name` or `email` is shown as the signed-in user's name. `ZG_OIDC_SCOPE` must request an access token for the API audience according to your provider's configuration.
 
 Access tokens must be signed RS256 or ES256 JWTs containing `sub`, `iat`, `exp`, the configured tenant claim, and an array of roles. Roles are `viewer`, `analyst`, and `admin`; administrators can perform all actions. The tenant comes from the verified access token, never a request header. Analyst access permits simulations, audit normalization, and remediation previews. Ingestion, PR creation, and workspace audit inspection require administrator access.
 

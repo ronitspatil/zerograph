@@ -2,7 +2,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { webcrypto } from "node:crypto";
 import { EncryptJWT } from "jose";
-import { seal, unseal, validOrigin } from "@/lib/session";
+const cookieGet = vi.hoisted(() => vi.fn());
+vi.mock("next/headers", () => ({
+  cookies: async () => ({ get: cookieGet }),
+}));
+import {
+  accessToken,
+  currentSession,
+  seal,
+  unseal,
+  validOrigin,
+} from "@/lib/session";
 
 beforeEach(() => {
   vi.stubGlobal("crypto", webcrypto);
@@ -49,6 +59,35 @@ describe("session encryption", () => {
     vi.stubEnv("ZG_ENVIRONMENT", "production");
     vi.stubEnv("ZG_PUBLIC_URL", "http://console.example");
     await expect(seal({})).rejects.toThrow();
+  });
+});
+describe("current session", () => {
+  it("reports how the session was created and never invents a kind", async () => {
+    cookieGet.mockReturnValue({
+      value: await seal({
+        access_token: "credential",
+        kind: "oidc",
+        id_token: "id",
+      }),
+    });
+    expect(await currentSession()).toEqual({
+      accessToken: "credential",
+      kind: "oidc",
+      idToken: "id",
+    });
+    cookieGet.mockReturnValue({
+      value: await seal({ access_token: "credential", kind: "admin" }),
+    });
+    expect(await currentSession()).toEqual({
+      accessToken: "credential",
+      kind: undefined,
+      idToken: undefined,
+    });
+    expect(await accessToken()).toBe("credential");
+    cookieGet.mockReturnValue({ value: "tampered" });
+    expect(await currentSession()).toBeNull();
+    cookieGet.mockReturnValue(undefined);
+    expect(await accessToken()).toBeNull();
   });
 });
 describe("origin validation", () => {

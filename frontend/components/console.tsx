@@ -646,8 +646,16 @@ export function Console({
     URL.revokeObjectURL(url);
   }
   async function logout() {
-    await fetch("/api/auth/logout", { method: "POST" });
-    window.location.assign("/login");
+    let next = "/login";
+    try {
+      const r = await fetch("/api/auth/logout", { method: "POST" });
+      const body = (await r.json()) as { redirect?: unknown };
+      // An organization session also ends at the identity provider, which returns here.
+      if (typeof body.redirect === "string") next = body.redirect;
+    } catch {
+      // The session cookie is cleared server-side; fall back to the sign-in page.
+    }
+    window.location.assign(next);
   }
   const metrics = [
     {
@@ -748,11 +756,14 @@ export function Console({
           </button>
           <div className="user">
             <span className="user-avatar">
-              {actor?.subject.slice(0, 1).toUpperCase() || "U"}
+              {(actor?.name || actor?.subject)?.slice(0, 1).toUpperCase() ||
+                "U"}
             </span>
             <div>
               <strong>
-                {demo ? "Demo operator" : actor?.subject || "Signed in"}
+                {demo
+                  ? "Demo operator"
+                  : actor?.name || actor?.subject || "Signed in"}
               </strong>
               <span>
                 {canAdmin ? "Administrator" : canWrite ? "Analyst" : "Viewer"}

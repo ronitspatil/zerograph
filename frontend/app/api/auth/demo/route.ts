@@ -8,7 +8,7 @@ export async function POST(request: Request) {
   const response = NextResponse.json({ ok: true });
   response.cookies.set(
     sessionCookie,
-    await seal({ access_token: process.env.ZG_DEMO_TOKEN }),
+    await seal({ access_token: process.env.ZG_DEMO_TOKEN, kind: "demo" }),
     { ...cookieOptions, maxAge: 3600 },
   );
   return response;

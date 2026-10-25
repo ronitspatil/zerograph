@@ -18,6 +18,9 @@ class Actor:
     subject: str
     tenant_id: str
     roles: frozenset[str]
+    # Display name from the identity provider (preferred_username, name or email); never
+    # used for authorization, tenancy or audit attribution, which stay on ``subject``.
+    name: str = ""
 
 
 @lru_cache
@@ -60,9 +63,17 @@ def current_actor(credentials: HTTPAuthorizationCredentials | None = Depends(bea
         ):
             raise ValueError("Invalid role claim")
         enforce_rate_limit(tenant, claims["sub"])
-        return Actor(claims["sub"], tenant, frozenset(roles))
+        return Actor(claims["sub"], tenant, frozenset(roles), display_name(claims))
     except (jwt.PyJWTError, jwt.PyJWKClientError, ValueError) as exc:
         raise HTTPException(401, "Invalid access token", headers={"WWW-Authenticate": "Bearer"}) from exc
+
+
+def display_name(claims: dict) -> str:
+    for claim in ("preferred_username", "name", "email"):
+        value = claims.get(claim)
+        if isinstance(value, str) and value.strip() and len(value) <= 256 and value.isprintable():
+            return value.strip()
+    return ""
 
 
 def require_role(role: str):
