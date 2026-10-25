@@ -12,7 +12,7 @@ docker compose up --build -d
 docker compose logs -f backend worker
 ```
 
-Open `http://localhost:3100`, select **Explore the demo workspace**, then **Load sample environment**. An ingestion job goes through Redis and Celery; the completed snapshot appears in the graph. Select Support Copilot to simulate compromise. The remediation hub contains a synthetic sample policy and observation history. Complete audit coverage is unchecked by default.
+Open `http://localhost:3100`. The demo opens directly on the overview dashboard with a synthetic demo session; select **Load sample environment**. An ingestion job goes through Redis and Celery; the completed snapshot appears in the graph. Select Support Copilot to simulate compromise. The remediation hub contains a synthetic sample policy and observation history. Complete audit coverage is unchecked by default.
 
 Only the frontend is published, on the loopback interface. PostgreSQL, Redis, graph Bolt, and FastAPI are on the Compose network. `docker compose down` keeps named volumes. The scheduler recovers queued jobs if broker publication fails and resets workers stalled longer than 20 minutes. Every 60 s it also has the worker bring revisions published by an older release up to date: global-map clusters ([global-map.md](global-map.md)), relationship topics ([topics.md](topics.md)) and explore samples ([revision-analysis.md](revision-analysis.md#explore-samples-sample_version-migration-0006)), at most 3 tenants per run each, skipping tenants that are publishing, so none needs a manual backfill after an upgrade.
 
@@ -77,4 +77,4 @@ CI also builds the Docker images and starts the complete Compose stack with disp
 
 To reproduce, generate a disposable `.env`, run `docker compose up --build --detach --wait --wait-timeout 240`, and run `ZG_E2E_URL=http://localhost:3100 backend/.venv/bin/pytest backend/tests/test_stack_e2e.py -v --no-cov`. Use a disposable Compose project; the test adds synthetic demo data. Run `docker compose down --volumes` only when its volumes are disposable. With Helm and PyYAML installed, run `helm lint deploy/helm/zerograph --strict` and `python3 -m unittest discover -s deploy/tests -v` to verify rendered resources and configuration rollouts without a cluster.
 
-The console uses Next.js 15.5.24 and React 19 rather than the originally proposed Next.js 14 and React 18. The change avoids advisories without fixes in the older Next.js major. Dependency lockfiles pin the backend and frontend installations; frontend overrides select a patched PostCSS version.
+The console uses Next.js 15.5.28 and React 19 rather than the originally proposed Next.js 14 and React 18. The change avoids advisories without fixes in the older Next.js major. Dependency lockfiles pin the backend and frontend installations; frontend overrides select a patched PostCSS version.
