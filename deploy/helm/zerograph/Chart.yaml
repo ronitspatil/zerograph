@@ -1,6 +1,0 @@
-apiVersion: v2
-name: zerograph
-description: ZeroGraph API, worker, scheduler and web console
-version: 0.1.0
-appVersion: "0.1.0"
-type: application
