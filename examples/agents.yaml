@@ -1,0 +1,10 @@
+# Tool registry for agents defined outside code.
+agents:
+  - name: triage-bot
+    runs_as: k8s:ai/triage-bot
+    tools:
+      - {mcp: github}
+      - {name: tickets, type: http, credentials: [JIRA_API_TOKEN]}
+      - kubectl
+tools:
+  - {name: kubectl, type: kubectl}
