@@ -261,6 +261,7 @@ details li { margin: 4px 0; }
   cy.on("mouseover", "edge", (e) => e.target.addClass("hover"));
   cy.on("mouseout", "edge", (e) => e.target.removeClass("hover"));
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => cy.style(style()));
+  window.zerograph = { cy, select };
   if (location.hash.length > 1) select(decodeURIComponent(location.hash.slice(1)));
 })();
 </script>
