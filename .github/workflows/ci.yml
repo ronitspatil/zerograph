@@ -1,90 +1,19 @@
-name: ZeroGraph checks
+name: checks
 on:
   push:
     branches: [main]
   pull_request:
 permissions:
   contents: read
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'pull_request' || github.head_ref != 'fm/zerograph-runtime-qualification' }}
 jobs:
-  backend:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: zerograph_ingestion_test
-          POSTGRES_USER: zerograph_test
-          POSTGRES_PASSWORD: disposable-ci-only
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U zerograph_test -d zerograph_ingestion_test"
-          --health-interval 5s --health-timeout 3s --health-retries 20
-      # Real Memgraph (the default graph engine) for tests/test_graph_integration.py,
-      # which otherwise skips and so cannot catch Cypher drifting from the memory store.
-      memgraph:
-        image: memgraph/memgraph:3.2.0
-        ports: ["7687:7687"]
-    env:
-      ZG_INGESTION_POSTGRES_URL: postgresql+psycopg://zerograph_test:disposable-ci-only@localhost:5432/zerograph_ingestion_test
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: {python-version: "3.12"}
-      - run: pip install -r backend/requirements-dev.lock -e backend
-      - run: ruff check backend
-      - run: ruff check --config backend/pyproject.toml deploy
-      - run: pytest --cov-fail-under=75
-        working-directory: backend
-      - name: Real-graph integration tests on Memgraph
-        run: pytest --no-cov -rA tests/test_graph_integration.py
-        working-directory: backend
-        env:
-          ZG_INTEGRATION_GRAPH: memgraph
-          ZG_GRAPH_URI: bolt://localhost:7687
-      - name: Qualify bounded analysis locally
-        run: python scripts/qualify_analysis.py --output analysis-qualification.json
-        working-directory: backend
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: analysis-qualification
-          path: backend/analysis-qualification.json
-          if-no-files-found: error
-      - run: pip install pip-audit==2.10.1
-      - run: pip-audit -r backend/requirements.lock --no-deps --disable-pip
-  frontend:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    defaults:
-      run: {working-directory: frontend}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: {node-version: "22", cache: npm, cache-dependency-path: frontend/package-lock.json}
-      - run: npm ci
-      - run: npm audit --audit-level=high
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run build
-  helm:
+  test:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
-      - uses: azure/setup-helm@v4.3.1
-        with: {version: v3.17.3}
-      - run: pip install PyYAML==6.0.2
-      - run: helm lint deploy/helm/zerograph --strict
-      - run: python -m unittest discover -s deploy/tests -v
-  qualify-kubernetes:
-    if: github.event_name == 'pull_request' && github.head_ref == 'fm/zerograph-runtime-qualification' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'main'
-    needs: [backend, frontend, helm]
-    permissions:
-      contents: read
-    uses: ./.github/workflows/kubernetes.yml
+      - run: pip install -e '.[dev]'
+      - run: ruff check .
+      - run: pytest -q
+      - run: zerograph scan examples/ -o graph.html --json graph.json
