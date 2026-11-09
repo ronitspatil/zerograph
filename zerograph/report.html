@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+:root {
+  --bg: #fafaf9; --panel: #ffffff; --line: #e7e5e4; --text: #1c1917; --muted: #78716c;
+  --edge: #d6d3d1; --accent: #e5484d; --accent-soft: rgba(229, 72, 77, 0.10);
+  --agent: #4f5d7e; --identity: #6a8f86; --tool: #8b7fa8; --secret: #b39a6c; --resource: #a39a93;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161514; --panel: #1c1b1a; --line: #2e2c2a; --text: #e7e5e4; --muted: #a8a29e;
+    --edge: #44403c; --accent: #f2555a; --accent-soft: rgba(242, 85, 90, 0.14);
+    --agent: #8d9cc0; --identity: #7fa59b; --tool: #a497c2; --secret: #c7ae80; --resource: #8a817a;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--text); overflow: hidden;
+  font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { display: flex; height: 100vh; }
+#graph { flex: 1; min-width: 0; position: relative; }
+#cy { position: absolute; inset: 0; }
+#offline { position: absolute; inset: 0; display: none; place-items: center; color: var(--muted);
+  padding: 32px; text-align: center; }
+aside { width: 340px; flex: none; display: flex; flex-direction: column; background: var(--panel);
+  border-left: 1px solid var(--line); min-height: 0; }
+header { padding: 20px 20px 12px; }
+h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+.sub { color: var(--muted); margin-top: 2px; font-size: 12px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 0 20px 14px; color: var(--muted);
+  font-size: 11.5px; border-bottom: 1px solid var(--line); }
+.legend span::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  margin-right: 6px; background: var(--c); vertical-align: 0; }
+.legend .hl::before { background: transparent; border: 2px solid var(--accent); width: 6px; height: 6px; }
+.scroll { overflow-y: auto; flex: 1; min-height: 0; padding: 6px 0 16px; }
+h2 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--muted); margin: 14px 20px 6px; }
+ol { list-style: none; margin: 0; padding: 0; }
+.agent { display: grid; grid-template-columns: 1fr auto; gap: 0 10px; padding: 7px 20px;
+  cursor: pointer; border-left: 2px solid transparent; }
+.agent:hover { background: var(--accent-soft); }
+.agent.on { border-left-color: var(--accent); background: var(--accent-soft); }
+.agent .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent .score { font-variant-numeric: tabular-nums; font-weight: 600; }
+.agent .meta { grid-column: 1 / -1; color: var(--muted); font-size: 11.5px; }
+.critical { color: var(--accent); }
+#detail { padding: 6px 20px 0; margin-top: 10px; border-top: 1px solid var(--line); }
+#detail:empty { display: none; }
+#detail .title { font-weight: 600; font-size: 14px; margin-top: 4px; word-break: break-word; }
+.finding { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.finding:last-child { border-bottom: 0; }
+.finding .row { display: flex; justify-content: space-between; gap: 10px; }
+.sev { color: var(--muted); font-variant-numeric: tabular-nums; flex: none; }
+.sev.top { color: var(--accent); }
+.via { color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+code { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted);
+  white-space: nowrap; margin-right: 8px; }
+.hint { color: var(--muted); padding: 0 20px; font-size: 12px; }
+details { margin: 12px 20px 0; color: var(--muted); font-size: 12px; }
+details li { margin: 4px 0; }
+</style>
+</head>
+<body>
+<main>
+  <section id="graph"><div id="cy"></div>
+    <div id="offline">The graph view needs cytoscape.js from cdnjs. The panel on the right still lists every agent's blast radius.</div>
+  </section>
+  <aside>
+    <header><h1>ZeroGraph</h1><div class="sub" id="counts"></div></header>
+    <div class="legend">
+      <span style="--c: var(--agent)">agent</span><span style="--c: var(--identity)">identity</span>
+      <span style="--c: var(--tool)">tool</span><span style="--c: var(--secret)">secret</span>
+      <span style="--c: var(--resource)">privilege</span><span class="hl">blast radius</span>
+    </div>
+    <div class="scroll">
+      <h2>Agents by blast radius</h2>
+      <ol id="agents"></ol>
+      <p class="hint" id="hint">Click an agent, or any node in the graph, to highlight what it can reach if compromised. Click the background to clear.</p>
+      <div id="detail"></div>
+      <div id="warnings"></div>
+    </div>
+  </aside>
+</main>
+<script id="data" type="application/json">__DATA__</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.2/cytoscape.min.js"
+  integrity="sha384-IWROdLKRsN1UuJywMlWl7/blXQ8GEooN2n7dzTxfEPd7ybYIKCUJ2Ol/1Gpf3YV4"
+  crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script>
+(function () {
+  "use strict";
+  const data = JSON.parse(document.getElementById("data").textContent);
+  const byId = Object.fromEntries(data.nodes.map((n) => [n.id, n]));
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  let cy = null, selected = null;
+
+  const kinds = {};
+  data.nodes.forEach((n) => { kinds[n.kind] = (kinds[n.kind] || 0) + 1; });
+  document.getElementById("counts").textContent =
+    `${kinds.agent || 0} agents · ${kinds.identity || 0} identities · ${kinds.tool || 0} tools · ` +
+    `${kinds.secret || 0} secrets · ${kinds.resource || 0} privileges`;
+
+  const list = document.getElementById("agents");
+  list.innerHTML = data.agents.length ? data.agents.map((a) => `
+    <li class="agent" data-id="${esc(a.id)}">
+      <span class="name" title="${esc(a.label)}">${esc(a.label)}</span>
+      <span class="score ${a.rating === "critical" ? "critical" : ""}">${a.score}</span>
+      <span class="meta">${esc(a.rating)} · ${a.findings.length} reachable privileges and secrets</span>
+    </li>`).join("") : `<p class="hint">No agents found.</p>`;
+  list.addEventListener("click", (e) => {
+    const li = e.target.closest(".agent");
+    if (li) select(li.dataset.id);
+  });
+
+  if (data.warnings.length) {
+    document.getElementById("warnings").innerHTML = `<details><summary>${data.warnings.length} warning(s)</summary>
+      <ul>${data.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></details>`;
+  }
+
+  function evidence(path) {
+    return path.map((s) => s.evidence).filter(Boolean)
+      .filter((v, i, a) => a.indexOf(v) === i).map((v) => `<code>${esc(v)}</code>`).join(" ");
+  }
+
+  function renderDetail(id) {
+    const el = document.getElementById("detail");
+    if (!id) { el.innerHTML = ""; return; }
+    const node = byId[id], r = data.radii[id];
+    const head = `<h2 style="margin-left:0">Selected ${esc(node.kind)}</h2><div class="title">${esc(node.label)}</div>
+      <div class="sub">${node.file ? `<code>${esc(node.file)}${node.line ? ":" + node.line : ""}</code> · ` : ""}` +
+      (r ? `score <b>${r.score}</b> · <span class="${r.rating === "critical" ? "critical" : ""}">${esc(r.rating)}</span>` : "reaches nothing") + `</div>`;
+    const top = r && r.findings.length ? r.findings[0].severity : 0;
+    const rows = r ? r.findings.map((f) => {
+      const hops = f.path.slice(0, -1).map((s) => esc(s.to));
+      return `<div class="finding"><div class="row"><span>${esc(f.label)}</span>
+        <span class="sev ${f.severity === top ? "top" : ""}">${f.severity}</span></div>
+        ${hops.length ? `<div class="via">via ${hops.join(" → ")}</div>` : ""}
+        <div class="via">${evidence(f.path)}</div></div>`;
+    }).join("") : "";
+    el.innerHTML = head + (rows ? `<h2 style="margin-left:0">Reachable privileges and secrets</h2>${rows}` : "");
+  }
+
+  function select(id) {
+    selected = id;
+    document.querySelectorAll(".agent").forEach((li) => li.classList.toggle("on", li.dataset.id === id));
+    renderDetail(id);
+    document.getElementById("hint").style.display = id ? "none" : "";
+    if (!cy) return;
+    cy.elements().removeClass("dim hl origin");
+    if (!id) return;
+    const r = data.radii[id];
+    const keep = new Set([id, ...(r ? r.reachable : [])]);
+    const edges = new Set((r ? r.edges : []).map((e) => e.join("|")));
+    cy.nodes().forEach((n) => n.addClass(keep.has(n.id()) ? "hl" : "dim"));
+    cy.edges().forEach((e) => e.addClass(edges.has([e.data("source"), e.data("target"), e.data("rel")].join("|")) ? "hl" : "dim"));
+    cy.getElementById(id).removeClass("hl").addClass("origin");
+  }
+
+  function style() {
+    const size = (n) => 10 + Math.min(n.data("severity"), 10) * 0.8;
+    return [
+      { selector: "node", style: {
+        "background-color": (n) => css("--" + n.data("kind")), width: size, height: size,
+        label: "data(short)", "font-size": 10, color: css("--muted"), "text-valign": "center",
+        "text-halign": "right", "text-margin-x": 6, "text-background-color": css("--bg"),
+        "text-background-opacity": 0.85, "text-background-padding": 1, "font-family": "ui-sans-serif, system-ui, -apple-system, sans-serif",
+        "text-max-width": 150, "text-wrap": "ellipsis", "min-zoomed-font-size": 6,
+        "transition-property": "opacity, background-color, border-width", "transition-duration": 150 } },
+      { selector: "node[kind = 'agent']", style: { width: 22, height: 22, shape: "round-rectangle",
+        "font-size": 11, "font-weight": 600, color: css("--text") } },
+      { selector: "node[kind = 'secret']", style: { shape: "diamond" } },
+      { selector: "node[kind = 'tool']", style: { shape: "round-triangle" } },
+      { selector: "node[kind = 'identity']", style: { shape: "round-rectangle" } },
+      { selector: "edge", style: { width: 1, "line-color": css("--edge"), "target-arrow-color": css("--edge"),
+        "target-arrow-shape": "triangle", "arrow-scale": 0.6, "curve-style": "bezier", opacity: 0.9,
+        "font-size": 9, color: css("--muted"), "text-background-color": css("--bg"),
+        "text-background-opacity": 1, "text-background-padding": 2, "text-rotation": "autorotate" } },
+      { selector: "edge[?weak]", style: { "line-style": "dashed" } },
+      { selector: "edge.hover", style: { label: "data(rel)", "z-index": 10 } },
+      { selector: ".dim", style: { opacity: 0.12 } },
+      { selector: "node.hl", style: { "border-width": 2, "border-color": css("--accent"), color: css("--text") } },
+      { selector: "edge.hl", style: { "line-color": css("--accent"), "target-arrow-color": css("--accent"), width: 1.5 } },
+      { selector: "node.origin", style: { "background-color": css("--accent"), color: css("--text") } },
+    ];
+  }
+
+  // Columns left to right: agents, tools, identities, identities they run as, privileges and secrets.
+  // Agents keep their blast-radius order; every other column is sorted a few times by the average
+  // height of its neighbours (barycenter heuristic), so edges mostly run straight across.
+  function layered() {
+    const rank = Object.fromEntries(data.agents.map((a, i) => [a.id, i]));
+    const nbrs = {}, incoming = {};
+    data.edges.forEach((e) => {
+      (nbrs[e.source] = nbrs[e.source] || []).push(e.target);
+      (nbrs[e.target] = nbrs[e.target] || []).push(e.source);
+      (incoming[e.target] = incoming[e.target] || []).push(e.source);
+    });
+    const col = (n) => {
+      if (n.kind === "agent") return 0;
+      if (n.kind === "tool") return 1;
+      if (n.kind === "identity") return (incoming[n.id] || []).some((s) => byId[s].kind === "identity") ? 3 : 2;
+      return 4;
+    };
+    const widths = [210, 180, 190, 170, 0];
+    const columns = [[], [], [], [], []];
+    data.nodes.forEach((n) => columns[col(n)].push(n));
+    const used = columns.map((c, i) => [c, widths[i]]).filter(([c]) => c.length);
+    const gap = 28, height = (Math.max(...used.map(([c]) => c.length)) - 1) * gap;
+    const y = {};
+    const place = (nodes) => {
+      const step = nodes.length > 1 ? Math.min(height / (nodes.length - 1), gap * 2.5) : 0;
+      nodes.forEach((n, i) => { y[n.id] = (i - (nodes.length - 1) / 2) * step; });
+    };
+    const centre = (n) => {
+      const ys = (nbrs[n.id] || []).map((s) => y[s]).filter((v) => v !== undefined);
+      return ys.length ? ys.reduce((a, b) => a + b, 0) / ys.length : Infinity;
+    };
+    used.forEach(([nodes], ci) => {
+      if (ci === 0) nodes.sort((a, b) => (rank[a.id] ?? 1e6) - (rank[b.id] ?? 1e6));
+      else nodes.sort((a, b) => centre(a) - centre(b) || b.severity - a.severity);
+      place(nodes);
+    });
+    for (let pass = 0; pass < 4; pass++) {
+      used.slice(1).forEach(([nodes]) => {
+        const keys = new Map(nodes.map((n) => [n, centre(n)]));
+        nodes.sort((a, b) => keys.get(a) - keys.get(b) || b.severity - a.severity);
+        place(nodes);
+      });
+    }
+    let x = 0;
+    used.forEach(([nodes, width]) => {
+      nodes.forEach((n) => cy.getElementById(n.id).position({ x, y: y[n.id] }));
+      x += width;
+    });
+    cy.fit(undefined, 36);
+  }
+
+  renderDetail(null);
+  if (!window.cytoscape) { document.getElementById("offline").style.display = "grid"; return; }
+
+  cy = cytoscape({
+    container: document.getElementById("cy"),
+    wheelSensitivity: 0.25,
+    minZoom: 0.2, maxZoom: 3,
+    elements: [
+      ...data.nodes.map((n) => ({ data: { id: n.id, kind: n.kind, severity: n.severity, label: n.label,
+        short: n.label.replace(/\s*\([^)]*\)$/, "") } })),
+      ...data.edges.map((e, i) => ({ data: { id: "e" + i, source: e.source, target: e.target, rel: e.rel, weak: !e.transitive } })),
+    ],
+    style: style(),
+    layout: { name: "preset" },
+  });
+  layered();
+  cy.on("tap", "node", (e) => select(e.target.id()));
+  cy.on("tap", "edge", (e) => { cy.edges(".hover").removeClass("hover"); e.target.addClass("hover"); });
+  cy.on("tap", (e) => { if (e.target === cy) select(null); });
+  cy.on("mouseover", "edge", (e) => e.target.addClass("hover"));
+  cy.on("mouseout", "edge", (e) => e.target.removeClass("hover"));
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => cy.style(style()));
+  if (location.hash.length > 1) select(decodeURIComponent(location.hash.slice(1)));
+})();
+</script>
+</body>
+</html>
