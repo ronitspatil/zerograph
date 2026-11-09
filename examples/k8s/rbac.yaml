@@ -1,0 +1,60 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: secret-reader
+  namespace: ai
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: research-agent-secrets
+  namespace: ai
+subjects:
+  - kind: ServiceAccount
+    name: research-agent
+roleRef:
+  kind: Role
+  name: secret-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ops-bot-admin
+subjects:
+  - kind: ServiceAccount
+    name: ops-bot
+    namespace: ai
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pod-reader
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/log]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: triage-bot-pods
+  namespace: ai
+subjects:
+  - kind: ServiceAccount
+    name: triage-bot
+roleRef:
+  kind: ClusterRole
+  name: pod-reader
+  apiGroup: rbac.authorization.k8s.io

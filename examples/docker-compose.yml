@@ -1,0 +1,43 @@
+# A small support-agent stack. All credentials here are placeholders.
+name: support
+services:
+  agent:
+    build: ./agent
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      DATABASE_URL: postgres://app@db:5432/support
+      DB_PASSWORD: example-not-a-real-password
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/data
+    networks: [backend]
+    secrets: [stripe_api_key]
+
+  db:
+    image: postgres:16
+    environment:
+      - POSTGRES_PASSWORD_FILE=/run/secrets/db_password
+    secrets: [db_password]
+    networks: [backend]
+
+  log-shipper:
+    image: fluent/fluent-bit:3.1
+    privileged: true
+    pid: host
+    volumes:
+      - /var/log:/var/log:ro
+    networks: [backend]
+
+  metrics:
+    image: prom/node-exporter:v1.8.2
+    network_mode: host
+    cap_add: [SYS_PTRACE]
+
+networks:
+  backend: {}
+
+secrets:
+  stripe_api_key:
+    file: ./secrets/stripe_api_key.txt
+  db_password:
+    file: ./secrets/db_password.txt

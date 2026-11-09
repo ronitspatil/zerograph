@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zerograph"
+version = "0.1.0"
+description = "Map AI agents, non-human identities and their privileges from config files, and score each agent's blast radius."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["PyYAML>=6.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+zerograph = "zerograph.cli:main"
+
+[tool.setuptools]
+packages = ["zerograph", "zerograph.parsers"]
+
+[tool.setuptools.package-data]
+zerograph = ["report.html"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
